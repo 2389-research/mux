@@ -1,10 +1,12 @@
 package mcp_test
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
 	"github.com/2389-research/mux/mcp"
+	"github.com/2389-research/mux/tool"
 )
 
 func TestJSONRPCRequest(t *testing.T) {
@@ -84,5 +86,67 @@ func TestClientCreation(t *testing.T) {
 	client := mcp.NewClient(config)
 	if client == nil {
 		t.Fatal("expected non-nil client")
+	}
+}
+
+func TestToolAdapter(t *testing.T) {
+	info := mcp.ToolInfo{
+		Name:        "read_file",
+		Description: "Read file contents",
+		InputSchema: map[string]any{"type": "object"},
+	}
+
+	mockCaller := &mockMCPCaller{
+		result: &mcp.ToolCallResult{
+			Content: []mcp.ContentBlock{{Type: "text", Text: "file contents"}},
+		},
+	}
+
+	adapter := mcp.NewToolAdapter(info, mockCaller)
+
+	// Verify Tool interface compliance
+	var _ tool.Tool = adapter
+
+	if adapter.Name() != "read_file" {
+		t.Errorf("expected 'read_file', got %q", adapter.Name())
+	}
+
+	result, err := adapter.Execute(context.Background(), map[string]any{"path": "/tmp"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Error("expected success")
+	}
+	if result.Output != "file contents" {
+		t.Errorf("expected 'file contents', got %q", result.Output)
+	}
+}
+
+type mockMCPCaller struct {
+	result *mcp.ToolCallResult
+	err    error
+}
+
+func (m *mockMCPCaller) CallTool(ctx context.Context, name string, args map[string]any) (*mcp.ToolCallResult, error) {
+	return m.result, m.err
+}
+
+func TestToolAdapterError(t *testing.T) {
+	info := mcp.ToolInfo{Name: "failing_tool"}
+	mockCaller := &mockMCPCaller{
+		result: &mcp.ToolCallResult{
+			Content: []mcp.ContentBlock{{Type: "text", Text: "error message"}},
+			IsError: true,
+		},
+	}
+
+	adapter := mcp.NewToolAdapter(info, mockCaller)
+	result, err := adapter.Execute(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Success {
+		t.Error("expected failure")
 	}
 }
