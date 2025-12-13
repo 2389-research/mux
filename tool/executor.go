@@ -55,6 +55,11 @@ func (e *Executor) AddAfterHook(hook AfterHook) {
 	e.afterHooks = append(e.afterHooks, hook)
 }
 
+// Registry returns the underlying tool registry.
+func (e *Executor) Registry() *Registry {
+	return e.registry
+}
+
 // Execute runs a tool by name with the given parameters.
 func (e *Executor) Execute(ctx context.Context, toolName string, params map[string]any) (*Result, error) {
 	t, ok := e.registry.Get(toolName)

@@ -38,7 +38,8 @@ func (a *ToolAdapter) RequiresApproval(params map[string]any) bool { return true
 func (a *ToolAdapter) Execute(ctx context.Context, params map[string]any) (*tool.Result, error) {
 	mcpResult, err := a.caller.CallTool(ctx, a.info.Name, params)
 	if err != nil {
-		return tool.NewErrorResult(a.info.Name, err.Error()), nil
+		// Return BOTH the error result AND the error
+		return tool.NewErrorResult(a.info.Name, err.Error()), err
 	}
 
 	output := a.extractOutput(mcpResult)

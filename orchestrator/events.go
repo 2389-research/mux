@@ -93,6 +93,10 @@ func (eb *EventBus) Subscribe() <-chan Event {
 	eb.mu.Lock()
 	defer eb.mu.Unlock()
 	ch := make(chan Event, 100)
+	if eb.closed {
+		close(ch)
+		return ch
+	}
 	eb.subscribers = append(eb.subscribers, ch)
 	return ch
 }

@@ -41,6 +41,12 @@ func New(client llm.Client, executor *tool.Executor) *Orchestrator {
 
 // NewWithConfig creates a new Orchestrator with custom config.
 func NewWithConfig(client llm.Client, executor *tool.Executor, config Config) *Orchestrator {
+	if client == nil {
+		panic("mux: client must not be nil")
+	}
+	if executor == nil {
+		panic("mux: executor must not be nil")
+	}
 	return &Orchestrator{
 		client:   client,
 		executor: executor,
@@ -68,6 +74,13 @@ func (o *Orchestrator) Run(ctx context.Context, prompt string) error {
 	defer o.eventBus.Close()
 
 	for i := 0; i < o.config.MaxIterations; i++ {
+		// Check context at start of each iteration
+		select {
+		case <-ctx.Done():
+			return o.handleError(ctx.Err())
+		default:
+		}
+
 		if err := o.transition(StateStreaming); err != nil {
 			return o.handleError(err)
 		}
@@ -97,12 +110,34 @@ func (o *Orchestrator) Run(ctx context.Context, prompt string) error {
 }
 
 func (o *Orchestrator) buildRequest() *llm.Request {
+	tools := o.buildToolDefinitions()
 	return &llm.Request{
 		Messages:  o.messages,
 		System:    o.config.SystemPrompt,
 		Model:     o.config.Model,
 		MaxTokens: 4096,
+		Tools:     tools,
 	}
+}
+
+func (o *Orchestrator) buildToolDefinitions() []llm.ToolDefinition {
+	registry := o.executor.Registry()
+	allTools := registry.All()
+	definitions := make([]llm.ToolDefinition, 0, len(allTools))
+
+	for _, t := range allTools {
+		def := llm.ToolDefinition{
+			Name:        t.Name(),
+			Description: t.Description(),
+			InputSchema: map[string]any{"type": "object"},
+		}
+		// If the tool provides a schema, use it
+		if sp, ok := t.(tool.SchemaProvider); ok {
+			def.InputSchema = sp.InputSchema()
+		}
+		definitions = append(definitions, def)
+	}
+	return definitions
 }
 
 func (o *Orchestrator) processResponse(resp *llm.Response) {

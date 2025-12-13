@@ -10,6 +10,7 @@ import (
 	"io"
 	"os/exec"
 	"sync"
+	"time"
 )
 
 // Client communicates with an MCP server.
@@ -23,6 +24,7 @@ type Client struct {
 	pending   map[uint64]chan *Response
 	running   bool
 	closeChan chan struct{}
+	done      chan struct{} // Signal goroutine exit
 }
 
 // NewClient creates a new MCP client.
@@ -31,6 +33,7 @@ func NewClient(config ServerConfig) *Client {
 		config:    config,
 		pending:   make(map[uint64]chan *Response),
 		closeChan: make(chan struct{}),
+		done:      make(chan struct{}),
 	}
 }
 
@@ -161,7 +164,16 @@ func (c *Client) send(req *Request) error {
 }
 
 func (c *Client) readResponses() {
-	for c.scanner.Scan() {
+	defer close(c.done)
+	for {
+		select {
+		case <-c.closeChan:
+			return
+		default:
+		}
+		if !c.scanner.Scan() {
+			return
+		}
 		line := c.scanner.Bytes()
 		if len(line) == 0 {
 			continue
@@ -181,15 +193,26 @@ func (c *Client) readResponses() {
 // Close shuts down the client.
 func (c *Client) Close() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if !c.running {
+		c.mu.Unlock()
 		return nil
 	}
-	close(c.closeChan)
 	c.running = false
+	close(c.closeChan)
+
+	// Close stdin to unblock scanner
 	if c.stdin != nil {
 		c.stdin.Close()
 	}
+	c.mu.Unlock()
+
+	// Wait for readResponses to exit (with timeout)
+	select {
+	case <-c.done:
+	case <-time.After(time.Second):
+	}
+
+	// Kill process
 	if c.cmd != nil && c.cmd.Process != nil {
 		c.cmd.Process.Kill()
 	}

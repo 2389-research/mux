@@ -20,3 +20,8 @@ type Tool interface {
 	// Execute runs the tool with the given parameters.
 	Execute(ctx context.Context, params map[string]any) (*Result, error)
 }
+
+// SchemaProvider is an optional interface for tools that provide JSON schema.
+type SchemaProvider interface {
+	InputSchema() map[string]any
+}
