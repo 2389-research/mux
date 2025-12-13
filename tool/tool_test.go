@@ -2,6 +2,7 @@ package tool_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/2389-research/mux/tool"
@@ -53,5 +54,79 @@ func TestToolInterface(t *testing.T) {
 	}
 	if !result.Success {
 		t.Error("expected success to be true")
+	}
+}
+
+func TestRegistry(t *testing.T) {
+	reg := tool.NewRegistry()
+
+	// Test empty registry
+	if names := reg.List(); len(names) != 0 {
+		t.Errorf("expected empty registry, got %d tools", len(names))
+	}
+
+	// Register a tool
+	mock := &mockTool{name: "test_tool", description: "Test"}
+	reg.Register(mock)
+
+	// Test retrieval
+	retrieved, ok := reg.Get("test_tool")
+	if !ok {
+		t.Fatal("expected to find registered tool")
+	}
+	if retrieved.Name() != "test_tool" {
+		t.Errorf("expected name 'test_tool', got %q", retrieved.Name())
+	}
+
+	// Test list
+	names := reg.List()
+	if len(names) != 1 || names[0] != "test_tool" {
+		t.Errorf("expected ['test_tool'], got %v", names)
+	}
+
+	// Test not found
+	_, ok = reg.Get("nonexistent")
+	if ok {
+		t.Error("expected not found for nonexistent tool")
+	}
+
+	// Test unregister
+	reg.Unregister("test_tool")
+	_, ok = reg.Get("test_tool")
+	if ok {
+		t.Error("expected tool to be unregistered")
+	}
+}
+
+func TestRegistryConcurrency(t *testing.T) {
+	reg := tool.NewRegistry()
+	done := make(chan bool)
+
+	// Concurrent writes
+	for i := 0; i < 100; i++ {
+		go func(n int) {
+			mock := &mockTool{name: fmt.Sprintf("tool_%d", n)}
+			reg.Register(mock)
+			done <- true
+		}(i)
+	}
+
+	// Concurrent reads
+	for i := 0; i < 100; i++ {
+		go func() {
+			reg.List()
+			reg.Get("tool_1")
+			done <- true
+		}()
+	}
+
+	// Wait for all goroutines
+	for i := 0; i < 200; i++ {
+		<-done
+	}
+
+	// Verify some tools registered
+	if reg.Count() == 0 {
+		t.Error("expected tools to be registered")
 	}
 }
