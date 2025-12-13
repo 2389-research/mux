@@ -1,6 +1,7 @@
 package orchestrator_test
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/2389-research/mux/orchestrator"
@@ -82,4 +83,68 @@ func TestStateMachineReset(t *testing.T) {
 	if sm.Current() != orchestrator.StateIdle {
 		t.Errorf("expected Idle after reset, got %s", sm.Current())
 	}
+}
+
+func TestEventTypes(t *testing.T) {
+	textEvent := orchestrator.NewTextEvent("Hello world")
+	if textEvent.Type != orchestrator.EventText {
+		t.Errorf("expected EventText, got %s", textEvent.Type)
+	}
+	if textEvent.Text != "Hello world" {
+		t.Errorf("expected 'Hello world', got %q", textEvent.Text)
+	}
+
+	toolCallEvent := orchestrator.NewToolCallEvent("tool_123", "read_file", map[string]any{"path": "/tmp"})
+	if toolCallEvent.Type != orchestrator.EventToolCall {
+		t.Errorf("expected EventToolCall, got %s", toolCallEvent.Type)
+	}
+
+	errorEvent := orchestrator.NewErrorEvent(fmt.Errorf("test error"))
+	if errorEvent.Type != orchestrator.EventError {
+		t.Errorf("expected EventError, got %s", errorEvent.Type)
+	}
+}
+
+func TestEventBus(t *testing.T) {
+	bus := orchestrator.NewEventBus()
+	sub := bus.Subscribe()
+
+	event := orchestrator.NewTextEvent("test")
+	bus.Publish(event)
+
+	select {
+	case received := <-sub:
+		if received.Text != "test" {
+			t.Errorf("expected text 'test', got %q", received.Text)
+		}
+	default:
+		t.Error("expected to receive event")
+	}
+
+	bus.Close()
+	_, ok := <-sub
+	if ok {
+		t.Error("expected channel to be closed")
+	}
+}
+
+func TestEventBusMultipleSubscribers(t *testing.T) {
+	bus := orchestrator.NewEventBus()
+	sub1 := bus.Subscribe()
+	sub2 := bus.Subscribe()
+
+	bus.Publish(orchestrator.NewTextEvent("broadcast"))
+
+	for i, sub := range []<-chan orchestrator.Event{sub1, sub2} {
+		select {
+		case e := <-sub:
+			if e.Text != "broadcast" {
+				t.Errorf("subscriber %d: expected 'broadcast', got %q", i, e.Text)
+			}
+		default:
+			t.Errorf("subscriber %d: expected to receive event", i)
+		}
+	}
+
+	bus.Close()
 }
