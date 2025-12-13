@@ -73,3 +73,16 @@ func TestServerConfig(t *testing.T) {
 		t.Errorf("expected 'stdio', got %q", config.Transport)
 	}
 }
+
+func TestClientCreation(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:      "test",
+		Transport: "stdio",
+		Command:   "echo",
+		Args:      []string{"hello"},
+	}
+	client := mcp.NewClient(config)
+	if client == nil {
+		t.Fatal("expected non-nil client")
+	}
+}
