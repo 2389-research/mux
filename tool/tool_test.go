@@ -130,3 +130,103 @@ func TestRegistryConcurrency(t *testing.T) {
 		t.Error("expected tools to be registered")
 	}
 }
+
+func TestExecutor(t *testing.T) {
+	reg := tool.NewRegistry()
+	mock := &mockTool{
+		name:             "test_tool",
+		requiresApproval: false,
+		executeFunc: func(ctx context.Context, params map[string]any) (*tool.Result, error) {
+			return tool.NewResult("test_tool", true, "executed", ""), nil
+		},
+	}
+	reg.Register(mock)
+
+	exec := tool.NewExecutor(reg)
+
+	// Execute tool that doesn't require approval
+	result, err := exec.Execute(context.Background(), "test_tool", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Error("expected success")
+	}
+	if result.Output != "executed" {
+		t.Errorf("expected output 'executed', got %q", result.Output)
+	}
+
+	// Execute nonexistent tool
+	_, err = exec.Execute(context.Background(), "nonexistent", nil)
+	if err == nil {
+		t.Error("expected error for nonexistent tool")
+	}
+}
+
+func TestExecutorApprovalFlow(t *testing.T) {
+	reg := tool.NewRegistry()
+	mock := &mockTool{
+		name:             "dangerous_tool",
+		requiresApproval: true,
+		executeFunc: func(ctx context.Context, params map[string]any) (*tool.Result, error) {
+			return tool.NewResult("dangerous_tool", true, "danger executed", ""), nil
+		},
+	}
+	reg.Register(mock)
+
+	// Test with approval granted
+	exec := tool.NewExecutor(reg)
+	approvalCalled := false
+	exec.SetApprovalFunc(func(ctx context.Context, t tool.Tool, params map[string]any) (bool, error) {
+		approvalCalled = true
+		return true, nil // approve
+	})
+
+	result, err := exec.Execute(context.Background(), "dangerous_tool", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !approvalCalled {
+		t.Error("expected approval function to be called")
+	}
+	if !result.Success {
+		t.Error("expected success after approval")
+	}
+
+	// Test with approval denied
+	exec.SetApprovalFunc(func(ctx context.Context, t tool.Tool, params map[string]any) (bool, error) {
+		return false, nil // deny
+	})
+
+	_, err = exec.Execute(context.Background(), "dangerous_tool", nil)
+	if err == nil {
+		t.Error("expected error when approval denied")
+	}
+}
+
+func TestExecutorHooks(t *testing.T) {
+	reg := tool.NewRegistry()
+	mock := &mockTool{name: "hook_test"}
+	reg.Register(mock)
+
+	exec := tool.NewExecutor(reg)
+
+	beforeCalled := false
+	afterCalled := false
+
+	exec.AddBeforeHook(func(ctx context.Context, toolName string, params map[string]any) {
+		beforeCalled = true
+	})
+	exec.AddAfterHook(func(ctx context.Context, toolName string, params map[string]any, result *tool.Result, err error) {
+		afterCalled = true
+	})
+
+	_, _ = exec.Execute(context.Background(), "hook_test", nil)
+
+	if !beforeCalled {
+		t.Error("expected before hook to be called")
+	}
+	if !afterCalled {
+		t.Error("expected after hook to be called")
+	}
+}

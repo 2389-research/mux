@@ -10,3 +10,24 @@ type Result struct {
 	Error    string
 	Metadata map[string]any
 }
+
+// NewResult creates a new Result with the given values.
+func NewResult(toolName string, success bool, output, errMsg string) *Result {
+	return &Result{
+		ToolName: toolName,
+		Success:  success,
+		Output:   output,
+		Error:    errMsg,
+		Metadata: make(map[string]any),
+	}
+}
+
+// NewErrorResult creates a failed Result with an error message.
+func NewErrorResult(toolName string, errMsg string) *Result {
+	return &Result{
+		ToolName: toolName,
+		Success:  false,
+		Error:    errMsg,
+		Metadata: make(map[string]any),
+	}
+}
