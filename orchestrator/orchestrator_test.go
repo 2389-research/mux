@@ -1,10 +1,13 @@
 package orchestrator_test
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
+	"github.com/2389-research/mux/llm"
 	"github.com/2389-research/mux/orchestrator"
+	"github.com/2389-research/mux/tool"
 )
 
 func TestStateMachine(t *testing.T) {
@@ -147,4 +150,136 @@ func TestEventBusMultipleSubscribers(t *testing.T) {
 	}
 
 	bus.Close()
+}
+
+// Add mock LLM client for testing
+type mockLLMClient struct {
+	responses []*llm.Response
+	callIndex int
+}
+
+func (m *mockLLMClient) CreateMessage(ctx context.Context, req *llm.Request) (*llm.Response, error) {
+	if m.callIndex >= len(m.responses) {
+		return &llm.Response{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
+			StopReason: llm.StopReasonEndTurn,
+		}, nil
+	}
+	resp := m.responses[m.callIndex]
+	m.callIndex++
+	return resp, nil
+}
+
+func (m *mockLLMClient) CreateMessageStream(ctx context.Context, req *llm.Request) (<-chan llm.StreamEvent, error) {
+	ch := make(chan llm.StreamEvent)
+	go func() {
+		resp, _ := m.CreateMessage(ctx, req)
+		ch <- llm.StreamEvent{Type: llm.EventMessageStop, Response: resp}
+		close(ch)
+	}()
+	return ch, nil
+}
+
+// mockTool for orchestrator tests
+type mockTool struct {
+	name        string
+	execFunc    func(ctx context.Context, params map[string]any) (*tool.Result, error)
+}
+
+func (m *mockTool) Name() string        { return m.name }
+func (m *mockTool) Description() string { return "mock" }
+func (m *mockTool) RequiresApproval(params map[string]any) bool { return false }
+func (m *mockTool) Execute(ctx context.Context, params map[string]any) (*tool.Result, error) {
+	if m.execFunc != nil {
+		return m.execFunc(ctx, params)
+	}
+	return tool.NewResult(m.name, true, "executed", ""), nil
+}
+
+func TestOrchestratorSimpleResponse(t *testing.T) {
+	client := &mockLLMClient{
+		responses: []*llm.Response{{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Hello!"}},
+			StopReason: llm.StopReasonEndTurn,
+		}},
+	}
+	registry := tool.NewRegistry()
+	executor := tool.NewExecutor(registry)
+
+	orch := orchestrator.New(client, executor)
+	events := orch.Subscribe()
+
+	ctx := context.Background()
+	err := orch.Run(ctx, "Say hello")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var hasText, hasComplete bool
+	for event := range events {
+		switch event.Type {
+		case orchestrator.EventText:
+			hasText = true
+		case orchestrator.EventComplete:
+			hasComplete = true
+		}
+	}
+
+	if !hasText {
+		t.Error("expected text event")
+	}
+	if !hasComplete {
+		t.Error("expected complete event")
+	}
+}
+
+func TestOrchestratorWithToolUse(t *testing.T) {
+	client := &mockLLMClient{
+		responses: []*llm.Response{
+			{
+				Content: []llm.ContentBlock{{
+					Type:  llm.ContentTypeToolUse,
+					ID:    "tool_1",
+					Name:  "test_tool",
+					Input: map[string]any{"arg": "value"},
+				}},
+				StopReason: llm.StopReasonToolUse,
+			},
+			{
+				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done!"}},
+				StopReason: llm.StopReasonEndTurn,
+			},
+		},
+	}
+
+	registry := tool.NewRegistry()
+	testTool := &mockTool{name: "test_tool"}
+	registry.Register(testTool)
+	executor := tool.NewExecutor(registry)
+
+	orch := orchestrator.New(client, executor)
+	events := orch.Subscribe()
+
+	ctx := context.Background()
+	err := orch.Run(ctx, "Use the tool")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var toolCalled, toolResult bool
+	for event := range events {
+		switch event.Type {
+		case orchestrator.EventToolCall:
+			toolCalled = true
+		case orchestrator.EventToolResult:
+			toolResult = true
+		}
+	}
+
+	if !toolCalled {
+		t.Error("expected tool call event")
+	}
+	if !toolResult {
+		t.Error("expected tool result event")
+	}
 }

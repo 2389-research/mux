@@ -21,7 +21,7 @@ const (
 
 var validTransitions = map[State][]State{
 	StateIdle:             {StateStreaming, StateError},
-	StateStreaming:        {StateAwaitingApproval, StateComplete, StateError},
+	StateStreaming:        {StateAwaitingApproval, StateExecutingTool, StateComplete, StateError},
 	StateAwaitingApproval: {StateExecutingTool, StateStreaming, StateError},
 	StateExecutingTool:    {StateStreaming, StateComplete, StateError},
 	StateComplete:         {StateIdle},
