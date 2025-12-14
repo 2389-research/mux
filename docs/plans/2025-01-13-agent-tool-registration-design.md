@@ -1,5 +1,7 @@
 # Agent Tool Registration Design
 
+**Status: Implemented**
+
 ## Problem
 
 Mux needs to support different agent types with different tool sets:
