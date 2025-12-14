@@ -46,6 +46,9 @@ func convertRequest(req *Request) anthropic.MessageNewParams {
 			switch block.Type {
 			case ContentTypeText:
 				content = append(content, anthropic.NewTextBlock(block.Text))
+			case ContentTypeToolUse:
+				// Serialize assistant's tool_use blocks for conversation history
+				content = append(content, anthropic.NewToolUseBlock(block.ID, block.Input, block.Name))
 			case ContentTypeToolResult:
 				content = append(content, anthropic.NewToolResultBlock(block.ToolUseID, block.Text, block.IsError))
 			}
@@ -66,12 +69,33 @@ func convertRequest(req *Request) anthropic.MessageNewParams {
 	if len(req.Tools) > 0 {
 		tools := make([]anthropic.ToolUnionParam, 0, len(req.Tools))
 		for _, tool := range req.Tools {
+			inputSchema := anthropic.ToolInputSchemaParam{}
+
+			// Extract properties from the schema
+			if props, ok := tool.InputSchema["properties"]; ok {
+				inputSchema.Properties = props
+			}
+
+			// Extract required fields from the schema
+			if req, ok := tool.InputSchema["required"]; ok {
+				if reqSlice, ok := req.([]string); ok {
+					inputSchema.Required = reqSlice
+				} else if reqSlice, ok := req.([]any); ok {
+					// Handle []any (common from JSON unmarshal)
+					required := make([]string, 0, len(reqSlice))
+					for _, r := range reqSlice {
+						if s, ok := r.(string); ok {
+							required = append(required, s)
+						}
+					}
+					inputSchema.Required = required
+				}
+			}
+
 			toolParam := anthropic.ToolParam{
 				Name:        tool.Name,
 				Description: param.NewOpt(tool.Description),
-				InputSchema: anthropic.ToolInputSchemaParam{
-					Properties: tool.InputSchema,
-				},
+				InputSchema: inputSchema,
 			}
 			tools = append(tools, anthropic.ToolUnionParam{OfTool: &toolParam})
 		}

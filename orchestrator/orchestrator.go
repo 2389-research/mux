@@ -129,7 +129,10 @@ func (o *Orchestrator) buildToolDefinitions() []llm.ToolDefinition {
 		def := llm.ToolDefinition{
 			Name:        t.Name(),
 			Description: t.Description(),
-			InputSchema: map[string]any{"type": "object"},
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
+			},
 		}
 		// If the tool provides a schema, use it
 		if sp, ok := t.(tool.SchemaProvider); ok {

@@ -44,3 +44,6 @@ temp/
 /examples/*/main
 /full
 /minimal
+
+# Scenario test scratch files
+.scratch/
