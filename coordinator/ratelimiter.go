@@ -1,0 +1,70 @@
+// ABOUTME: Token bucket rate limiter for API call throttling.
+// ABOUTME: Allows bursts up to capacity while maintaining average rate.
+package coordinator
+
+import (
+	"context"
+	"sync"
+	"time"
+)
+
+// RateLimiter implements token bucket rate limiting.
+type RateLimiter struct {
+	tokens     float64
+	capacity   float64
+	refillRate float64
+	lastRefill time.Time
+	mu         sync.Mutex
+}
+
+// NewRateLimiter creates a new token bucket rate limiter.
+// capacity: maximum tokens (burst size)
+// refillRate: tokens added per second
+func NewRateLimiter(capacity, refillRate float64) *RateLimiter {
+	return &RateLimiter{
+		tokens:     capacity,
+		capacity:   capacity,
+		refillRate: refillRate,
+		lastRefill: time.Now(),
+	}
+}
+
+// Take consumes tokens, blocking until available or context cancelled.
+func (r *RateLimiter) Take(ctx context.Context, tokens float64) error {
+	for {
+		if r.tryTake(tokens) {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+			// Retry
+		}
+	}
+}
+
+func (r *RateLimiter) tryTake(tokens float64) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.refill()
+
+	if r.tokens >= tokens {
+		r.tokens -= tokens
+		return true
+	}
+	return false
+}
+
+func (r *RateLimiter) refill() {
+	now := time.Now()
+	elapsed := now.Sub(r.lastRefill).Seconds()
+	r.lastRefill = now
+
+	r.tokens += elapsed * r.refillRate
+	if r.tokens > r.capacity {
+		r.tokens = r.capacity
+	}
+}

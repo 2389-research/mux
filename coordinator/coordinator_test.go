@@ -5,6 +5,7 @@ package coordinator
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 func TestCoordinatorAcquireRelease(t *testing.T) {
@@ -63,5 +64,41 @@ func TestCoordinatorReleaseAll(t *testing.T) {
 	// agent2's resource should still be locked
 	if err := c.Acquire(context.Background(), "agent3", "r3"); err == nil {
 		t.Error("expected r3 to still be locked")
+	}
+}
+
+func TestRateLimiterTake(t *testing.T) {
+	// Small bucket for fast testing
+	rl := NewRateLimiter(10, 100) // 10 capacity, 100/sec refill
+
+	// Should be able to take up to capacity
+	ctx := context.Background()
+	for i := 0; i < 10; i++ {
+		if err := rl.Take(ctx, 1); err != nil {
+			t.Fatalf("expected take %d to succeed, got %v", i, err)
+		}
+	}
+
+	// Next take should block briefly then succeed (refill)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if err := rl.Take(ctx, 1); err != nil {
+		t.Fatalf("expected take after refill to succeed, got %v", err)
+	}
+}
+
+func TestRateLimiterContextCancel(t *testing.T) {
+	rl := NewRateLimiter(1, 0.1) // Very slow refill
+
+	// Drain the bucket
+	_ = rl.Take(context.Background(), 1)
+
+	// Try to take with cancelled context
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	err := rl.Take(ctx, 1)
+	if err == nil {
+		t.Fatal("expected error on cancelled context")
 	}
 }
