@@ -102,3 +102,57 @@ func TestRateLimiterContextCancel(t *testing.T) {
 		t.Fatal("expected error on cancelled context")
 	}
 }
+
+func TestCacheGetSet(t *testing.T) {
+	cache := NewCache()
+
+	// Miss on empty cache
+	_, ok := cache.Get("key1")
+	if ok {
+		t.Error("expected cache miss")
+	}
+
+	// Set and get
+	cache.Set("key1", "value1", time.Hour)
+	val, ok := cache.Get("key1")
+	if !ok {
+		t.Fatal("expected cache hit")
+	}
+	if val != "value1" {
+		t.Errorf("expected value1, got %v", val)
+	}
+}
+
+func TestCacheExpiration(t *testing.T) {
+	cache := NewCache()
+
+	// Set with short TTL
+	cache.Set("key1", "value1", 10*time.Millisecond)
+
+	// Should hit immediately
+	_, ok := cache.Get("key1")
+	if !ok {
+		t.Error("expected immediate cache hit")
+	}
+
+	// Wait for expiration
+	time.Sleep(20 * time.Millisecond)
+
+	// Should miss after expiration
+	_, ok = cache.Get("key1")
+	if ok {
+		t.Error("expected cache miss after expiration")
+	}
+}
+
+func TestCacheDelete(t *testing.T) {
+	cache := NewCache()
+
+	cache.Set("key1", "value1", time.Hour)
+	cache.Delete("key1")
+
+	_, ok := cache.Get("key1")
+	if ok {
+		t.Error("expected cache miss after delete")
+	}
+}
