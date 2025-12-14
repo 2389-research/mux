@@ -37,8 +37,13 @@ func (r *RateLimiter) Take(ctx context.Context, tokens float64) error {
 			return nil
 		}
 
-		// Calculate sleep duration based on tokens needed
-		// Add small buffer (10ms) to avoid tight loops due to timing jitter
+		// Enforce a minimum wait time of 10ms to prevent CPU-intensive busy loops.
+		// This is necessary because:
+		// 1. Clock/timer granularity varies across systems (typically 1-15ms)
+		// 2. Very short waits (<10ms) can lead to excessive CPU usage from
+		//    rapid lock contention and context switching
+		// 3. The 10ms minimum ensures predictable behavior across platforms
+		//    while still providing responsive rate limiting for most use cases
 		if waitTime < 10*time.Millisecond {
 			waitTime = 10 * time.Millisecond
 		}

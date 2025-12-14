@@ -106,7 +106,7 @@ func (o *Orchestrator) Run(ctx context.Context, prompt string) error {
 		return nil
 	}
 
-	return o.handleError(fmt.Errorf("exceeded max iterations (%d)", o.config.MaxIterations))
+	return o.handleError(fmt.Errorf("exceeded max iterations (%d) while processing: %s", o.config.MaxIterations, prompt))
 }
 
 func (o *Orchestrator) buildRequest() *llm.Request {
@@ -120,6 +120,10 @@ func (o *Orchestrator) buildRequest() *llm.Request {
 	}
 }
 
+// buildToolDefinitions constructs tool definitions from the executor's source.
+// NOTE: Tool definitions are rebuilt on every request. Caching could improve performance
+// but would require careful invalidation when tools are dynamically added/removed.
+// Current approach prioritizes correctness over optimization.
 func (o *Orchestrator) buildToolDefinitions() []llm.ToolDefinition {
 	source := o.executor.Source()
 	allTools := source.All()
@@ -162,6 +166,13 @@ func (o *Orchestrator) executeTools(ctx context.Context, toolUses []llm.ContentB
 
 	var resultBlocks []llm.ContentBlock
 	for _, use := range toolUses {
+		// Check context before each tool execution to handle cancellation during long-running operations
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		result, err := o.executor.Execute(ctx, use.Name, use.Input)
 		if err != nil {
 			resultBlocks = append(resultBlocks, llm.ContentBlock{

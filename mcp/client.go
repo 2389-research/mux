@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 	"time"
@@ -169,12 +170,8 @@ func (c *Client) send(req *Request) error {
 func (c *Client) readResponses() {
 	defer close(c.done)
 	for {
-		select {
-		case <-c.closeChan:
-			return
-		default:
-		}
 		if !c.scanner.Scan() {
+			// Scanner stopped - either EOF, error, or closed
 			return
 		}
 		line := c.scanner.Bytes()
@@ -183,6 +180,7 @@ func (c *Client) readResponses() {
 		}
 		var resp Response
 		if err := json.Unmarshal(line, &resp); err != nil {
+			fmt.Printf("mcp: failed to unmarshal response: %v (line: %s)\n", err, string(line))
 			continue
 		}
 		c.mu.Lock()
@@ -203,16 +201,24 @@ func (c *Client) Close() error {
 	c.running = false
 	close(c.closeChan)
 
-	// Close stdin to unblock scanner
+	// Close stdin and stdout to unblock scanner
 	if c.stdin != nil {
 		c.stdin.Close()
+	}
+	if c.stdout != nil {
+		c.stdout.Close()
 	}
 	c.mu.Unlock()
 
 	// Wait for readResponses to exit (with timeout)
+	// Use a more robust timeout - 5 seconds should be sufficient
+	// for the scanner to detect the closed pipe and exit
 	select {
 	case <-c.done:
-	case <-time.After(time.Second):
+		// Clean exit
+	case <-time.After(5 * time.Second):
+		// Timeout - goroutine may be stuck, but we'll kill the process anyway
+		fmt.Fprintf(os.Stderr, "mcp: warning: readResponses goroutine did not exit within timeout\n")
 	}
 
 	// Kill process

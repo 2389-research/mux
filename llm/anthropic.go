@@ -5,6 +5,8 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -86,9 +88,13 @@ func convertRequest(req *Request) anthropic.MessageNewParams {
 					for _, r := range reqSlice {
 						if s, ok := r.(string); ok {
 							required = append(required, s)
+						} else {
+							fmt.Fprintf(os.Stderr, "Warning: failed to convert required field element to string for tool %s: got %T\n", tool.Name, r)
 						}
 					}
 					inputSchema.Required = required
+				} else {
+					fmt.Fprintf(os.Stderr, "Warning: failed to convert required field to []string or []any for tool %s: got %T\n", tool.Name, req)
 				}
 			}
 
@@ -175,7 +181,16 @@ func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request)
 	eventChan := make(chan StreamEvent, 100)
 
 	go func() {
-		defer close(eventChan)
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(os.Stderr, "Error: panic recovered in CreateMessageStream: %v\n", r)
+				eventChan <- StreamEvent{
+					Type:  EventError,
+					Error: fmt.Errorf("panic in stream processing: %v", r),
+				}
+			}
+			close(eventChan)
+		}()
 
 		for stream.Next() {
 			event := stream.Current()

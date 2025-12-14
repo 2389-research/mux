@@ -36,11 +36,14 @@ func (c *Cache) Get(key string) (any, bool) {
 		return nil, false
 	}
 
-	if time.Now().After(item.ExpiresAt) {
+	now := time.Now()
+	if now.After(item.ExpiresAt) {
+		// Entry is expired. Must acquire write lock to delete it.
+		// Release read lock first to avoid deadlock, then acquire write lock.
 		c.mu.RUnlock()
-		// Upgrade to write lock to delete expired entry
 		c.mu.Lock()
-		// Double-check in case another goroutine already deleted it
+		// Re-check expiration after acquiring write lock since another
+		// goroutine may have deleted or updated the entry.
 		if item, exists := c.items[key]; exists && time.Now().After(item.ExpiresAt) {
 			delete(c.items, key)
 		}

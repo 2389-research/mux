@@ -12,7 +12,9 @@ type FilteredRegistry struct {
 	deniedTools  []string
 }
 
-// Compile-time interface assertion
+// Compile-time interface assertion ensures FilteredRegistry implements ToolSource.
+// This guarantees FilteredRegistry can be used anywhere a ToolSource is expected,
+// enabling transparent filtering without changing client code.
 var _ ToolSource = (*FilteredRegistry)(nil)
 
 // NewFilteredRegistry creates a filtered view of the source registry.
@@ -82,5 +84,12 @@ func (f *FilteredRegistry) List() []string {
 
 // Count returns the number of tools that pass the filter.
 func (f *FilteredRegistry) Count() int {
-	return len(f.All())
+	all := f.source.All()
+	count := 0
+	for _, t := range all {
+		if f.IsAllowed(t.Name()) {
+			count++
+		}
+	}
+	return count
 }

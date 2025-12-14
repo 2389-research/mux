@@ -61,7 +61,10 @@ func (sm *StateMachine) Transition(to State) error {
 	return fmt.Errorf("invalid transition: %s -> %s", sm.current, to)
 }
 
-// ForceState sets state without validation (testing only).
+// ForceState sets state without validation.
+// WARNING: This method bypasses state machine validation and should ONLY be used
+// in test code to set up specific state conditions. Using this in production code
+// can lead to invalid state transitions and undefined behavior.
 func (sm *StateMachine) ForceState(state State) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()

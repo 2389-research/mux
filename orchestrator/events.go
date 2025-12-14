@@ -89,6 +89,9 @@ func NewEventBus() *EventBus {
 }
 
 // Subscribe returns a channel that receives events.
+// The channel is buffered with 100 events to handle typical burst scenarios where
+// the orchestrator generates multiple rapid events (text chunks, tool calls, state changes).
+// This size balances memory usage against the ability to absorb event bursts without blocking.
 func (eb *EventBus) Subscribe() <-chan Event {
 	eb.mu.Lock()
 	defer eb.mu.Unlock()
@@ -102,6 +105,9 @@ func (eb *EventBus) Subscribe() <-chan Event {
 }
 
 // Publish sends an event to all subscribers.
+// Events are sent non-blocking: if a subscriber's channel is full, the event is dropped
+// for that subscriber. This prevents slow consumers from blocking the orchestrator's
+// event loop. Subscribers should size their buffers appropriately or consume events quickly.
 func (eb *EventBus) Publish(event Event) {
 	eb.mu.RLock()
 	defer eb.mu.RUnlock()
@@ -112,6 +118,8 @@ func (eb *EventBus) Publish(event Event) {
 		select {
 		case ch <- event:
 		default:
+			// Drop event if channel is full - non-blocking publish prevents slow
+			// consumers from blocking orchestrator progress
 		}
 	}
 }

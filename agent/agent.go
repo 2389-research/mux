@@ -22,6 +22,10 @@ type Agent struct {
 	filtered *tool.FilteredRegistry
 	executor *tool.Executor
 	orch     *orchestrator.Orchestrator
+
+	// cachedConfig is lazily initialized to avoid expensive deep copies
+	cachedConfig     *Config
+	cachedConfigOnce sync.Once
 }
 
 // New creates a new root Agent with the given configuration.
@@ -90,18 +94,24 @@ func (a *Agent) Subscribe() <-chan orchestrator.Event {
 
 // Config returns a copy of the agent's configuration.
 // The returned config is safe to inspect but should not be modified.
+// Uses lazy initialization to avoid expensive deep copies on every call.
+// Note: The cached config is computed once and never invalidated.
+// Agent configuration is considered immutable after creation.
 func (a *Agent) Config() Config {
-	cfg := a.config
-	// Deep copy slices to prevent external modification
-	if a.config.AllowedTools != nil {
-		cfg.AllowedTools = make([]string, len(a.config.AllowedTools))
-		copy(cfg.AllowedTools, a.config.AllowedTools)
-	}
-	if a.config.DeniedTools != nil {
-		cfg.DeniedTools = make([]string, len(a.config.DeniedTools))
-		copy(cfg.DeniedTools, a.config.DeniedTools)
-	}
-	return cfg
+	a.cachedConfigOnce.Do(func() {
+		cfg := a.config
+		// Deep copy slices to prevent external modification
+		if a.config.AllowedTools != nil {
+			cfg.AllowedTools = make([]string, len(a.config.AllowedTools))
+			copy(cfg.AllowedTools, a.config.AllowedTools)
+		}
+		if a.config.DeniedTools != nil {
+			cfg.DeniedTools = make([]string, len(a.config.DeniedTools))
+			copy(cfg.DeniedTools, a.config.DeniedTools)
+		}
+		a.cachedConfig = &cfg
+	})
+	return *a.cachedConfig
 }
 
 // Parent returns the parent agent, or nil for root agents.
@@ -119,9 +129,8 @@ var (
 // Child tools are restricted to parent's allowed tools.
 // Child denied tools accumulate (union of parent and child denied).
 func (a *Agent) SpawnChild(cfg Config) (*Agent, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
+	// First, prepare the child config while holding a read lock
+	a.mu.RLock()
 	// Inherit registry if not specified
 	if cfg.Registry == nil {
 		cfg.Registry = a.config.Registry
@@ -140,6 +149,7 @@ func (a *Agent) SpawnChild(cfg Config) (*Agent, error) {
 		// Validate child tools are subset of parent tools (if parent has restrictions)
 		if len(a.config.AllowedTools) > 0 {
 			if err := a.validateChildTools(cfg.AllowedTools); err != nil {
+				a.mu.RUnlock()
 				return nil, err
 			}
 		}
@@ -148,15 +158,24 @@ func (a *Agent) SpawnChild(cfg Config) (*Agent, error) {
 	// Merge denied tools (union)
 	cfg.DeniedTools = unionStrings(a.config.DeniedTools, cfg.DeniedTools)
 
+	// Create child ID
+	childID := a.id + "." + cfg.Name
+	a.mu.RUnlock()
+
+	// Initialize child without holding parent lock (expensive operation)
 	child := &Agent{
-		id:       a.id + "." + cfg.Name,
+		id:       childID,
 		config:   cfg,
 		parent:   a,
 		children: make([]*Agent, 0),
 	}
 	child.init()
 
+	// Now acquire write lock just to append to children list
+	a.mu.Lock()
 	a.children = append(a.children, child)
+	a.mu.Unlock()
+
 	return child, nil
 }
 
@@ -202,6 +221,37 @@ func (a *Agent) Children() []*Agent {
 	children := make([]*Agent, len(a.children))
 	copy(children, a.children)
 	return children
+}
+
+// RemoveChild removes a specific child agent from the parent's children list.
+// Returns true if the child was found and removed, false otherwise.
+// This is useful for cleaning up terminated child agents.
+func (a *Agent) RemoveChild(child *Agent) bool {
+	if child == nil {
+		return false
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	for i, c := range a.children {
+		if c == child {
+			// Remove child from slice by replacing it with the last element
+			// and truncating the slice
+			a.children[i] = a.children[len(a.children)-1]
+			a.children = a.children[:len(a.children)-1]
+			return true
+		}
+	}
+	return false
+}
+
+// RemoveAllChildren removes all child agents from this agent.
+// This is useful for bulk cleanup operations.
+func (a *Agent) RemoveAllChildren() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.children = make([]*Agent, 0)
 }
 
 // Executor returns the agent's tool executor.

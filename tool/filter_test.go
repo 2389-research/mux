@@ -3,6 +3,7 @@ package tool_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/2389-research/mux/tool"
@@ -178,4 +179,340 @@ func TestFilteredRegistryWithExecutor(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for denied tool")
 	}
+}
+
+// Issue 8: Large tool sets performance test (1000+ tools)
+func TestFilteredRegistry_LargeToolSet(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping large tool set test in short mode")
+	}
+
+	const toolCount = 1000
+	source := tool.NewRegistry()
+
+	// Register 1000 tools
+	for i := 0; i < toolCount; i++ {
+		name := fmt.Sprintf("tool_%d", i)
+		source.Register(&mockTool{name: name})
+	}
+
+	tests := []struct {
+		name         string
+		allowedTools []string
+		deniedTools  []string
+		expectCount  int
+	}{
+		{
+			name:         "no filters returns all tools",
+			allowedTools: nil,
+			deniedTools:  nil,
+			expectCount:  toolCount,
+		},
+		{
+			name:         "allow first 100 tools",
+			allowedTools: generateToolNames(0, 100),
+			deniedTools:  nil,
+			expectCount:  100,
+		},
+		{
+			name:         "deny first 100 tools",
+			allowedTools: nil,
+			deniedTools:  generateToolNames(0, 100),
+			expectCount:  toolCount - 100,
+		},
+		{
+			name:         "allow 500 deny 50",
+			allowedTools: generateToolNames(0, 500),
+			deniedTools:  generateToolNames(0, 50),
+			expectCount:  450, // 500 allowed - 50 denied
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := tool.NewFilteredRegistry(source, tt.allowedTools, tt.deniedTools)
+
+			// Test Count performance
+			count := f.Count()
+			if count != tt.expectCount {
+				t.Errorf("Count() = %d, want %d", count, tt.expectCount)
+			}
+
+			// Test All performance
+			all := f.All()
+			if len(all) != tt.expectCount {
+				t.Errorf("All() returned %d tools, want %d", len(all), tt.expectCount)
+			}
+
+			// Test List performance
+			names := f.List()
+			if len(names) != tt.expectCount {
+				t.Errorf("List() returned %d names, want %d", len(names), tt.expectCount)
+			}
+
+			// Verify List is sorted
+			for i := 1; i < len(names); i++ {
+				if names[i-1] >= names[i] {
+					t.Errorf("List() not sorted at index %d: %q >= %q", i, names[i-1], names[i])
+					break
+				}
+			}
+		})
+	}
+}
+
+// Issue 8: Empty source registry handling
+func TestFilteredRegistry_EmptySource(t *testing.T) {
+	source := tool.NewRegistry() // Empty registry
+
+	tests := []struct {
+		name         string
+		allowedTools []string
+		deniedTools  []string
+	}{
+		{
+			name:         "no filters on empty registry",
+			allowedTools: nil,
+			deniedTools:  nil,
+		},
+		{
+			name:         "with allowed list on empty registry",
+			allowedTools: []string{"tool1", "tool2"},
+			deniedTools:  nil,
+		},
+		{
+			name:         "with denied list on empty registry",
+			allowedTools: nil,
+			deniedTools:  []string{"tool1", "tool2"},
+		},
+		{
+			name:         "with both lists on empty registry",
+			allowedTools: []string{"tool1"},
+			deniedTools:  []string{"tool2"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := tool.NewFilteredRegistry(source, tt.allowedTools, tt.deniedTools)
+
+			// All operations should work on empty registry
+			if f.Count() != 0 {
+				t.Errorf("Count() = %d, want 0", f.Count())
+			}
+
+			all := f.All()
+			if len(all) != 0 {
+				t.Errorf("All() returned %d tools, want 0", len(all))
+			}
+
+			names := f.List()
+			if len(names) != 0 {
+				t.Errorf("List() returned %d names, want 0", len(names))
+			}
+
+			// Get should return false for any tool
+			_, ok := f.Get("nonexistent")
+			if ok {
+				t.Error("Get() should return false for nonexistent tool")
+			}
+		})
+	}
+}
+
+// Issue 8: Tool filter updates during execution
+func TestFilteredRegistry_FilterUpdatesDuringExecution(t *testing.T) {
+	source := tool.NewRegistry()
+
+	// Register tools
+	for i := 0; i < 10; i++ {
+		name := fmt.Sprintf("tool_%d", i)
+		source.Register(&mockTool{name: name})
+	}
+
+	// Create filtered registry
+	allowed := []string{"tool_0", "tool_1", "tool_2"}
+	denied := []string{"tool_3"}
+	f := tool.NewFilteredRegistry(source, allowed, denied)
+
+	// Initial state
+	if f.Count() != 3 {
+		t.Errorf("initial Count() = %d, want 3", f.Count())
+	}
+
+	// Modify the source registry by adding more tools
+	for i := 10; i < 20; i++ {
+		name := fmt.Sprintf("tool_%d", i)
+		source.Register(&mockTool{name: name})
+	}
+
+	// Filtered registry should still respect original filters
+	// but see new tools from source
+	newCount := f.Count()
+	// Should still be 3 because new tools aren't in allowed list
+	if newCount != 3 {
+		t.Errorf("after adding tools, Count() = %d, want 3", newCount)
+	}
+
+	// Test that we can still access originally allowed tools
+	for _, name := range allowed {
+		if !f.IsAllowed(name) {
+			t.Errorf("IsAllowed(%q) = false, want true", name)
+		}
+		_, ok := f.Get(name)
+		if !ok {
+			t.Errorf("Get(%q) failed, expected success", name)
+		}
+	}
+
+	// Test that denied tool is still denied
+	if f.IsAllowed("tool_3") {
+		t.Error("IsAllowed(tool_3) = true, want false (should be denied)")
+	}
+}
+
+// Issue 8: Memory usage with large filter lists
+func TestFilteredRegistry_LargeFilterLists(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping large filter list test in short mode")
+	}
+
+	const filterSize = 5000
+	source := tool.NewRegistry()
+
+	// Register some tools (smaller than filter list)
+	for i := 0; i < 100; i++ {
+		name := fmt.Sprintf("tool_%d", i)
+		source.Register(&mockTool{name: name})
+	}
+
+	// Create very large filter lists
+	largeAllowed := generateToolNames(0, filterSize)
+	largeDenied := generateToolNames(filterSize, filterSize*2)
+
+	tests := []struct {
+		name         string
+		allowedTools []string
+		deniedTools  []string
+	}{
+		{
+			name:         "large allowed list",
+			allowedTools: largeAllowed,
+			deniedTools:  nil,
+		},
+		{
+			name:         "large denied list",
+			allowedTools: nil,
+			deniedTools:  largeDenied,
+		},
+		{
+			name:         "both lists large",
+			allowedTools: largeAllowed,
+			deniedTools:  largeDenied,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := tool.NewFilteredRegistry(source, tt.allowedTools, tt.deniedTools)
+
+			// Operations should complete without hanging or excessive memory
+			count := f.Count()
+			if count < 0 || count > 100 {
+				t.Errorf("Count() = %d, expected between 0 and 100", count)
+			}
+
+			all := f.All()
+			if len(all) != count {
+				t.Errorf("All() returned %d tools, expected %d", len(all), count)
+			}
+
+			names := f.List()
+			if len(names) != count {
+				t.Errorf("List() returned %d names, expected %d", len(names), count)
+			}
+
+			// Test Get operations
+			_, ok := f.Get("tool_0")
+			// Result depends on filters, just verify no panic
+			_ = ok
+		})
+	}
+}
+
+// Issue 8: Edge case - filter with duplicate entries
+func TestFilteredRegistry_DuplicateFilterEntries(t *testing.T) {
+	source := tool.NewRegistry()
+	source.Register(&mockTool{name: "tool_a"})
+	source.Register(&mockTool{name: "tool_b"})
+	source.Register(&mockTool{name: "tool_c"})
+
+	// Create filters with duplicates
+	allowed := []string{"tool_a", "tool_a", "tool_b", "tool_b"}
+	denied := []string{"tool_c", "tool_c"}
+
+	f := tool.NewFilteredRegistry(source, allowed, denied)
+
+	// Should handle duplicates gracefully
+	if f.Count() != 2 {
+		t.Errorf("Count() = %d, want 2 (tool_a and tool_b)", f.Count())
+	}
+
+	if !f.IsAllowed("tool_a") {
+		t.Error("IsAllowed(tool_a) = false, want true")
+	}
+	if !f.IsAllowed("tool_b") {
+		t.Error("IsAllowed(tool_b) = false, want true")
+	}
+	if f.IsAllowed("tool_c") {
+		t.Error("IsAllowed(tool_c) = true, want false")
+	}
+}
+
+// Issue 8: Concurrent access to filtered registry
+func TestFilteredRegistry_ConcurrentAccess(t *testing.T) {
+	source := tool.NewRegistry()
+
+	// Register tools
+	for i := 0; i < 100; i++ {
+		name := fmt.Sprintf("tool_%d", i)
+		source.Register(&mockTool{name: name})
+	}
+
+	f := tool.NewFilteredRegistry(source, nil, nil)
+
+	// Spawn multiple goroutines to access the filtered registry
+	done := make(chan bool, 10)
+	for i := 0; i < 10; i++ {
+		go func(id int) {
+			defer func() {
+				done <- true
+			}()
+
+			// Perform various operations
+			_ = f.Count()
+			_ = f.All()
+			_ = f.List()
+
+			for j := 0; j < 10; j++ {
+				name := fmt.Sprintf("tool_%d", j)
+				_ = f.IsAllowed(name)
+				_, _ = f.Get(name)
+			}
+		}(i)
+	}
+
+	// Wait for all goroutines to complete
+	for i := 0; i < 10; i++ {
+		<-done
+	}
+}
+
+// Helper function to generate tool names
+func generateToolNames(start, count int) []string {
+	names := make([]string, count)
+	for i := 0; i < count; i++ {
+		names[i] = fmt.Sprintf("tool_%d", start+i)
+	}
+	return names
 }

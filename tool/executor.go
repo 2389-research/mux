@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 )
 
 var (
@@ -107,9 +108,17 @@ func (e *Executor) Execute(ctx context.Context, toolName string, params map[stri
 		}
 	}
 
-	// Run before hooks
+	// Run before hooks with panic recovery to prevent hook failures from crashing execution
 	for _, hook := range e.beforeHooks {
-		hook(ctx, toolName, params)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					// Hook panicked - log and continue execution
+					fmt.Fprintf(os.Stderr, "Warning: before hook panicked for tool %s: %v\n", toolName, r)
+				}
+			}()
+			hook(ctx, toolName, params)
+		}()
 	}
 
 	// Execute tool
