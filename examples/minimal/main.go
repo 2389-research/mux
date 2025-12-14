@@ -1,5 +1,5 @@
 // ABOUTME: Minimal mux example - a simple agent with one tool.
-// ABOUTME: Run with: ANTHROPIC_API_KEY=xxx go run main.go
+// ABOUTME: Run with: ANTHROPIC_API_KEY=xxx go run main.go (or OPENAI_API_KEY=xxx)
 package main
 
 import (
@@ -40,9 +40,16 @@ func (t *CalculatorTool) InputSchema() map[string]any {
 }
 
 func main() {
-	apiKey := os.Getenv("ANTHROPIC_API_KEY")
-	if apiKey == "" {
-		fmt.Fprintln(os.Stderr, "Set ANTHROPIC_API_KEY")
+	// Support both Anthropic and OpenAI
+	var llmClient llm.Client
+	if apiKey := os.Getenv("OPENAI_API_KEY"); apiKey != "" {
+		llmClient = llm.NewOpenAIClient(apiKey, "gpt-5.2")
+		fmt.Println("Using OpenAI (gpt-5.2)")
+	} else if apiKey := os.Getenv("ANTHROPIC_API_KEY"); apiKey != "" {
+		llmClient = llm.NewAnthropicClient(apiKey, "claude-sonnet-4-20250514")
+		fmt.Println("Using Anthropic (claude-sonnet-4)")
+	} else {
+		fmt.Fprintln(os.Stderr, "Set OPENAI_API_KEY or ANTHROPIC_API_KEY")
 		os.Exit(1)
 	}
 
@@ -54,7 +61,7 @@ func main() {
 	a := agent.New(agent.Config{
 		Name:         "minimal",
 		Registry:     registry,
-		LLMClient:    llm.NewAnthropicClient(apiKey, "claude-sonnet-4-20250514"),
+		LLMClient:    llmClient,
 		SystemPrompt: "You are a helpful assistant with a calculator tool.",
 	})
 
