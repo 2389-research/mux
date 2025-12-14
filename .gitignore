@@ -39,3 +39,8 @@ temp/
 # Environment files
 .env
 .env.local
+# Binaries
+*.exe
+/examples/*/main
+/full
+/minimal
