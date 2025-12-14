@@ -1,0 +1,6 @@
+#!/bin/sh
+# ABOUTME: Pre-commit test hook for mux repository
+# ABOUTME: Runs Go tests before allowing commit
+
+# Run Go tests
+go test ./... -short
