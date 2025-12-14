@@ -138,8 +138,69 @@ func (a *AnthropicClient) CreateMessage(ctx context.Context, req *Request) (*Res
 
 // CreateMessageStream sends a message and returns a channel of streaming events.
 func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request) (<-chan StreamEvent, error) {
-	// TODO: implement in next task
-	return nil, nil
+	if req.Model == "" {
+		req.Model = a.model
+	}
+	if req.MaxTokens == 0 {
+		req.MaxTokens = 4096
+	}
+
+	params := convertRequest(req)
+	stream := a.client.Messages.NewStreaming(ctx, params)
+
+	eventChan := make(chan StreamEvent, 100)
+
+	go func() {
+		defer close(eventChan)
+
+		for stream.Next() {
+			event := stream.Current()
+			switch event.Type {
+			case "message_start":
+				eventChan <- StreamEvent{
+					Type:     EventMessageStart,
+					Response: convertResponse(&event.Message),
+				}
+			case "content_block_start":
+				eventChan <- StreamEvent{
+					Type:  EventContentStart,
+					Index: int(event.Index),
+				}
+			case "content_block_delta":
+				var text string
+				if event.Delta.Type == "text_delta" {
+					text = event.Delta.Text
+				}
+				eventChan <- StreamEvent{
+					Type:  EventContentDelta,
+					Index: int(event.Index),
+					Text:  text,
+				}
+			case "content_block_stop":
+				eventChan <- StreamEvent{
+					Type:  EventContentStop,
+					Index: int(event.Index),
+				}
+			case "message_delta":
+				eventChan <- StreamEvent{
+					Type: EventMessageDelta,
+				}
+			case "message_stop":
+				eventChan <- StreamEvent{
+					Type: EventMessageStop,
+				}
+			}
+		}
+
+		if err := stream.Err(); err != nil {
+			eventChan <- StreamEvent{
+				Type:  EventError,
+				Error: err,
+			}
+		}
+	}()
+
+	return eventChan, nil
 }
 
 // Compile-time interface assertion.
