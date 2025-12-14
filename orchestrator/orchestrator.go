@@ -121,8 +121,8 @@ func (o *Orchestrator) buildRequest() *llm.Request {
 }
 
 func (o *Orchestrator) buildToolDefinitions() []llm.ToolDefinition {
-	registry := o.executor.Registry()
-	allTools := registry.All()
+	source := o.executor.Source()
+	allTools := source.All()
 	definitions := make([]llm.ToolDefinition, 0, len(allTools))
 
 	for _, t := range allTools {

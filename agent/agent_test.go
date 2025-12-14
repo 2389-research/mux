@@ -59,3 +59,29 @@ func TestNewAgent(t *testing.T) {
 		t.Errorf("expected ID test-agent, got %s", a.ID())
 	}
 }
+
+func TestAgentRun(t *testing.T) {
+	registry := tool.NewRegistry()
+	client := &mockClient{
+		response: &llm.Response{
+			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "response"}},
+		},
+	}
+
+	a := agent.New(agent.Config{
+		Name:      "runner",
+		Registry:  registry,
+		LLMClient: client,
+	})
+
+	events := a.Subscribe()
+
+	err := a.Run(context.Background(), "hello")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Drain events
+	for range events {
+	}
+}

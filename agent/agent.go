@@ -3,6 +3,7 @@
 package agent
 
 import (
+	"context"
 	"sync"
 
 	"github.com/2389-research/mux/orchestrator"
@@ -63,4 +64,26 @@ func (a *Agent) init() {
 
 	// Create orchestrator
 	a.orch = orchestrator.NewWithConfig(a.config.LLMClient, a.executor, orchConfig)
+}
+
+// Run executes the agent's think-act loop with the given prompt.
+func (a *Agent) Run(ctx context.Context, prompt string) error {
+	return a.orch.Run(ctx, prompt)
+}
+
+// Subscribe returns a channel for receiving orchestrator events.
+func (a *Agent) Subscribe() <-chan orchestrator.Event {
+	return a.orch.Subscribe()
+}
+
+// Config returns the agent's configuration.
+func (a *Agent) Config() Config {
+	return a.config
+}
+
+// Parent returns the parent agent, or nil for root agents.
+func (a *Agent) Parent() *Agent {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.parent
 }
