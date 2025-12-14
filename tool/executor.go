@@ -25,7 +25,7 @@ type AfterHook func(ctx context.Context, toolName string, params map[string]any,
 
 // Executor manages tool execution with permission checking and hooks.
 type Executor struct {
-	registry     *Registry
+	source       ToolSource
 	approvalFunc ApprovalFunc
 	beforeHooks  []BeforeHook
 	afterHooks   []AfterHook
@@ -38,7 +38,20 @@ func NewExecutor(registry *Registry) *Executor {
 		panic("mux: registry must not be nil")
 	}
 	return &Executor{
-		registry:    registry,
+		source:      registry,
+		beforeHooks: make([]BeforeHook, 0),
+		afterHooks:  make([]AfterHook, 0),
+	}
+}
+
+// NewExecutorWithSource creates a new Executor with any ToolSource.
+// Panics if source is nil.
+func NewExecutorWithSource(source ToolSource) *Executor {
+	if source == nil {
+		panic("mux: source must not be nil")
+	}
+	return &Executor{
+		source:      source,
 		beforeHooks: make([]BeforeHook, 0),
 		afterHooks:  make([]AfterHook, 0),
 	}
@@ -59,14 +72,23 @@ func (e *Executor) AddAfterHook(hook AfterHook) {
 	e.afterHooks = append(e.afterHooks, hook)
 }
 
-// Registry returns the underlying tool registry.
+// Source returns the underlying tool source.
+func (e *Executor) Source() ToolSource {
+	return e.source
+}
+
+// Registry returns the underlying tool registry if source is a Registry.
+// Returns nil if source is a different ToolSource type.
 func (e *Executor) Registry() *Registry {
-	return e.registry
+	if reg, ok := e.source.(*Registry); ok {
+		return reg
+	}
+	return nil
 }
 
 // Execute runs a tool by name with the given parameters.
 func (e *Executor) Execute(ctx context.Context, toolName string, params map[string]any) (*Result, error) {
-	t, ok := e.registry.Get(toolName)
+	t, ok := e.source.Get(toolName)
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", ErrToolNotFound, toolName)
 	}

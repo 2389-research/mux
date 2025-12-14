@@ -2,6 +2,7 @@
 package tool_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/2389-research/mux/tool"
@@ -155,5 +156,26 @@ func TestFilteredRegistry_Count(t *testing.T) {
 
 	if f.Count() != 2 {
 		t.Errorf("expected count 2, got %d", f.Count())
+	}
+}
+
+func TestFilteredRegistryWithExecutor(t *testing.T) {
+	source := tool.NewRegistry()
+	source.Register(&mockTool{name: "allowed"})
+	source.Register(&mockTool{name: "denied"})
+
+	filtered := tool.NewFilteredRegistry(source, []string{"allowed"}, nil)
+	exec := tool.NewExecutorWithSource(filtered)
+
+	// Should execute allowed tool
+	_, err := exec.Execute(context.Background(), "allowed", nil)
+	if err != nil {
+		t.Errorf("expected allowed tool to execute, got error: %v", err)
+	}
+
+	// Should not find denied tool
+	_, err = exec.Execute(context.Background(), "denied", nil)
+	if err == nil {
+		t.Error("expected error for denied tool")
 	}
 }

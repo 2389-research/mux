@@ -25,3 +25,11 @@ type Tool interface {
 type SchemaProvider interface {
 	InputSchema() map[string]any
 }
+
+// ToolSource provides access to tools. Both Registry and FilteredRegistry implement this.
+type ToolSource interface {
+	Get(name string) (Tool, bool)
+	All() []Tool
+	List() []string
+	Count() int
+}
