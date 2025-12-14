@@ -131,3 +131,29 @@ func TestFilteredRegistry_All(t *testing.T) {
 		t.Error("bash should be filtered out")
 	}
 }
+
+func TestFilteredRegistry_List(t *testing.T) {
+	source := tool.NewRegistry()
+	source.Register(&mockTool{name: "bash"})
+	source.Register(&mockTool{name: "read_file"})
+
+	f := tool.NewFilteredRegistry(source, []string{"read_file"}, nil)
+
+	names := f.List()
+	if len(names) != 1 || names[0] != "read_file" {
+		t.Errorf("expected [read_file], got %v", names)
+	}
+}
+
+func TestFilteredRegistry_Count(t *testing.T) {
+	source := tool.NewRegistry()
+	source.Register(&mockTool{name: "a"})
+	source.Register(&mockTool{name: "b"})
+	source.Register(&mockTool{name: "c"})
+
+	f := tool.NewFilteredRegistry(source, []string{"a", "b"}, nil)
+
+	if f.Count() != 2 {
+		t.Errorf("expected count 2, got %d", f.Count())
+	}
+}

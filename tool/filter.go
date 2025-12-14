@@ -3,6 +3,8 @@
 // ABOUTME: applies allow/deny lists to control which tools are visible.
 package tool
 
+import "sort"
+
 // FilteredRegistry wraps a Registry with allow/deny filtering.
 type FilteredRegistry struct {
 	source       *Registry
@@ -62,4 +64,20 @@ func (f *FilteredRegistry) All() []Tool {
 		}
 	}
 	return filtered
+}
+
+// List returns names of all tools that pass the filter, sorted alphabetically.
+func (f *FilteredRegistry) List() []string {
+	all := f.All()
+	names := make([]string, 0, len(all))
+	for _, t := range all {
+		names = append(names, t.Name())
+	}
+	sort.Strings(names)
+	return names
+}
+
+// Count returns the number of tools that pass the filter.
+func (f *FilteredRegistry) Count() int {
+	return len(f.All())
 }
