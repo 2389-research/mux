@@ -88,9 +88,20 @@ func (a *Agent) Subscribe() <-chan orchestrator.Event {
 	return a.orch.Subscribe()
 }
 
-// Config returns the agent's configuration.
+// Config returns a copy of the agent's configuration.
+// The returned config is safe to inspect but should not be modified.
 func (a *Agent) Config() Config {
-	return a.config
+	cfg := a.config
+	// Deep copy slices to prevent external modification
+	if a.config.AllowedTools != nil {
+		cfg.AllowedTools = make([]string, len(a.config.AllowedTools))
+		copy(cfg.AllowedTools, a.config.AllowedTools)
+	}
+	if a.config.DeniedTools != nil {
+		cfg.DeniedTools = make([]string, len(a.config.DeniedTools))
+		copy(cfg.DeniedTools, a.config.DeniedTools)
+	}
+	return cfg
 }
 
 // Parent returns the parent agent, or nil for root agents.
