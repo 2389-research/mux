@@ -181,3 +181,8 @@ func (a *Agent) Children() []*Agent {
 	copy(children, a.children)
 	return children
 }
+
+// Executor returns the agent's tool executor.
+func (a *Agent) Executor() *tool.Executor {
+	return a.executor
+}
