@@ -12,6 +12,9 @@ type FilteredRegistry struct {
 	deniedTools  []string
 }
 
+// Compile-time interface assertion
+var _ ToolSource = (*FilteredRegistry)(nil)
+
 // NewFilteredRegistry creates a filtered view of the source registry.
 // allowedTools: if non-empty, only these tools are visible (allowlist)
 // deniedTools: these tools are never visible (denylist, takes precedence)

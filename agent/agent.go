@@ -25,7 +25,18 @@ type Agent struct {
 }
 
 // New creates a new root Agent with the given configuration.
+// Panics if Registry or LLMClient is nil.
 func New(cfg Config) *Agent {
+	if cfg.Registry == nil {
+		panic("mux: agent registry must not be nil")
+	}
+	if cfg.LLMClient == nil {
+		panic("mux: agent LLMClient must not be nil")
+	}
+	if cfg.Name == "" {
+		panic("mux: agent name must not be empty")
+	}
+
 	a := &Agent{
 		id:       cfg.Name,
 		config:   cfg,
