@@ -15,8 +15,8 @@ import (
 // EchoTool is a simple built-in tool.
 type EchoTool struct{}
 
-func (t *EchoTool) Name() string                              { return "echo" }
-func (t *EchoTool) Description() string                       { return "Echoes input" }
+func (t *EchoTool) Name() string                                { return "echo" }
+func (t *EchoTool) Description() string                         { return "Echoes input" }
 func (t *EchoTool) RequiresApproval(params map[string]any) bool { return false }
 func (t *EchoTool) Execute(ctx context.Context, params map[string]any) (*tool.Result, error) {
 	msg, _ := params["message"].(string)

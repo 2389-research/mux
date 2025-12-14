@@ -4,6 +4,7 @@ package agent_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/2389-research/mux/agent"
@@ -29,9 +30,9 @@ type mockTool struct {
 	name string
 }
 
-func (m *mockTool) Name() string                                                     { return m.name }
-func (m *mockTool) Description() string                                              { return "mock" }
-func (m *mockTool) RequiresApproval(params map[string]any) bool                      { return false }
+func (m *mockTool) Name() string                                { return m.name }
+func (m *mockTool) Description() string                         { return "mock" }
+func (m *mockTool) RequiresApproval(params map[string]any) bool { return false }
 func (m *mockTool) Execute(ctx context.Context, params map[string]any) (*tool.Result, error) {
 	return tool.NewResult(m.name, true, "ok", ""), nil
 }
@@ -188,5 +189,34 @@ func TestAgentSpawnChildDeniedAccumulates(t *testing.T) {
 	cfg := child.Config()
 	if len(cfg.DeniedTools) != 2 {
 		t.Errorf("expected 2 denied tools, got %d: %v", len(cfg.DeniedTools), cfg.DeniedTools)
+	}
+}
+
+func TestAgentSpawnChildInvalidTools(t *testing.T) {
+	registry := tool.NewRegistry()
+	registry.Register(&mockTool{name: "read_file"})
+	registry.Register(&mockTool{name: "bash"})
+
+	client := &mockClient{
+		response: &llm.Response{
+			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
+		},
+	}
+
+	parent := agent.New(agent.Config{
+		Name:         "parent",
+		Registry:     registry,
+		LLMClient:    client,
+		AllowedTools: []string{"read_file"}, // Only read_file allowed
+	})
+
+	// Child requesting tool parent doesn't have should fail
+	_, err := parent.SpawnChild(agent.Config{
+		Name:         "child",
+		AllowedTools: []string{"bash"}, // Parent doesn't have bash
+	})
+
+	if !errors.Is(err, agent.ErrInvalidChildTools) {
+		t.Errorf("expected ErrInvalidChildTools, got %v", err)
 	}
 }

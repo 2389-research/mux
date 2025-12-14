@@ -182,12 +182,12 @@ func (m *mockLLMClient) CreateMessageStream(ctx context.Context, req *llm.Reques
 
 // mockTool for orchestrator tests
 type mockTool struct {
-	name        string
-	execFunc    func(ctx context.Context, params map[string]any) (*tool.Result, error)
+	name     string
+	execFunc func(ctx context.Context, params map[string]any) (*tool.Result, error)
 }
 
-func (m *mockTool) Name() string        { return m.name }
-func (m *mockTool) Description() string { return "mock" }
+func (m *mockTool) Name() string                                { return m.name }
+func (m *mockTool) Description() string                         { return "mock" }
 func (m *mockTool) RequiresApproval(params map[string]any) bool { return false }
 func (m *mockTool) Execute(ctx context.Context, params map[string]any) (*tool.Result, error) {
 	if m.execFunc != nil {

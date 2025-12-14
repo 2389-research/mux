@@ -20,9 +20,9 @@ type testTool struct {
 	executed bool
 }
 
-func (t *testTool) Name() string                              { return t.name }
-func (t *testTool) Description() string                       { return "test" }
-func (t *testTool) RequiresApproval(map[string]any) bool      { return false }
+func (t *testTool) Name() string                         { return t.name }
+func (t *testTool) Description() string                  { return "test" }
+func (t *testTool) RequiresApproval(map[string]any) bool { return false }
 func (t *testTool) Execute(ctx context.Context, params map[string]any) (*tool.Result, error) {
 	t.executed = true
 	return tool.NewResult(t.name, true, "done", ""), nil
