@@ -43,3 +43,23 @@ func (f *FilteredRegistry) IsAllowed(name string) bool {
 	}
 	return false
 }
+
+// Get retrieves a tool by name if it passes the filter.
+func (f *FilteredRegistry) Get(name string) (Tool, bool) {
+	if !f.IsAllowed(name) {
+		return nil, false
+	}
+	return f.source.Get(name)
+}
+
+// All returns all tools that pass the filter.
+func (f *FilteredRegistry) All() []Tool {
+	all := f.source.All()
+	filtered := make([]Tool, 0, len(all))
+	for _, t := range all {
+		if f.IsAllowed(t.Name()) {
+			filtered = append(filtered, t)
+		}
+	}
+	return filtered
+}

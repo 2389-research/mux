@@ -81,3 +81,53 @@ func TestFilteredRegistry_isAllowed(t *testing.T) {
 		})
 	}
 }
+
+func TestFilteredRegistry_Get(t *testing.T) {
+	source := tool.NewRegistry()
+	mock1 := &mockTool{name: "allowed_tool"}
+	mock2 := &mockTool{name: "denied_tool"}
+	source.Register(mock1)
+	source.Register(mock2)
+
+	f := tool.NewFilteredRegistry(source, []string{"allowed_tool"}, nil)
+
+	// Should get allowed tool
+	got, ok := f.Get("allowed_tool")
+	if !ok {
+		t.Fatal("expected to find allowed_tool")
+	}
+	if got.Name() != "allowed_tool" {
+		t.Errorf("got name %q, want allowed_tool", got.Name())
+	}
+
+	// Should not get filtered-out tool
+	_, ok = f.Get("denied_tool")
+	if ok {
+		t.Error("expected denied_tool to be filtered out")
+	}
+}
+
+func TestFilteredRegistry_All(t *testing.T) {
+	source := tool.NewRegistry()
+	source.Register(&mockTool{name: "bash"})
+	source.Register(&mockTool{name: "read_file"})
+	source.Register(&mockTool{name: "write_file"})
+
+	f := tool.NewFilteredRegistry(source, []string{"read_file", "write_file"}, nil)
+
+	all := f.All()
+	if len(all) != 2 {
+		t.Fatalf("expected 2 tools, got %d", len(all))
+	}
+
+	names := make(map[string]bool)
+	for _, t := range all {
+		names[t.Name()] = true
+	}
+	if !names["read_file"] || !names["write_file"] {
+		t.Errorf("expected read_file and write_file, got %v", names)
+	}
+	if names["bash"] {
+		t.Error("bash should be filtered out")
+	}
+}
