@@ -27,20 +27,30 @@ func NewCache() *Cache {
 }
 
 // Get retrieves a value if it exists and hasn't expired.
+// Expired entries are removed on access to prevent memory leaks.
 func (c *Cache) Get(key string) (any, bool) {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
-
 	item, exists := c.items[key]
 	if !exists {
+		c.mu.RUnlock()
 		return nil, false
 	}
 
 	if time.Now().After(item.ExpiresAt) {
+		c.mu.RUnlock()
+		// Upgrade to write lock to delete expired entry
+		c.mu.Lock()
+		// Double-check in case another goroutine already deleted it
+		if item, exists := c.items[key]; exists && time.Now().After(item.ExpiresAt) {
+			delete(c.items, key)
+		}
+		c.mu.Unlock()
 		return nil, false
 	}
 
-	return item.Value, true
+	value := item.Value
+	c.mu.RUnlock()
+	return value, true
 }
 
 // Set stores a value with the given TTL.

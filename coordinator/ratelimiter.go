@@ -32,20 +32,29 @@ func NewRateLimiter(capacity, refillRate float64) *RateLimiter {
 // Take consumes tokens, blocking until available or context cancelled.
 func (r *RateLimiter) Take(ctx context.Context, tokens float64) error {
 	for {
-		if r.tryTake(tokens) {
+		waitTime := r.tryTake(tokens)
+		if waitTime == 0 {
 			return nil
+		}
+
+		// Calculate sleep duration based on tokens needed
+		// Add small buffer (10ms) to avoid tight loops due to timing jitter
+		if waitTime < 10*time.Millisecond {
+			waitTime = 10 * time.Millisecond
 		}
 
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(100 * time.Millisecond):
-			// Retry
+		case <-time.After(waitTime):
+			// Retry after calculated wait time
 		}
 	}
 }
 
-func (r *RateLimiter) tryTake(tokens float64) bool {
+// tryTake attempts to consume tokens. Returns 0 if successful,
+// otherwise returns the estimated wait time until tokens are available.
+func (r *RateLimiter) tryTake(tokens float64) time.Duration {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -53,9 +62,13 @@ func (r *RateLimiter) tryTake(tokens float64) bool {
 
 	if r.tokens >= tokens {
 		r.tokens -= tokens
-		return true
+		return 0
 	}
-	return false
+
+	// Calculate wait time for needed tokens
+	needed := tokens - r.tokens
+	waitSeconds := needed / r.refillRate
+	return time.Duration(waitSeconds * float64(time.Second))
 }
 
 func (r *RateLimiter) refill() {
