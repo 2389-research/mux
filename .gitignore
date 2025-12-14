@@ -47,3 +47,7 @@ temp/
 
 # Scenario test scratch files
 .scratch/
+code-review.md
+missing-tests.md
+output.txt
+
