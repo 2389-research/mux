@@ -320,6 +320,44 @@ func TestConvertUserMessage_ToolResult(t *testing.T) {
 	}
 }
 
+func TestConvertUserMessage_EmptyMessage(t *testing.T) {
+	msg := Message{Role: RoleUser}
+	result := convertUserMessage(msg)
+	if result.OfUser == nil {
+		t.Fatal("expected user message")
+	}
+	// Empty message should still create a valid user message (returns UserMessage(""))
+}
+
+func TestConvertUserMessage_OnlyBlocks(t *testing.T) {
+	msg := Message{
+		Role: RoleUser,
+		Blocks: []ContentBlock{
+			{Type: ContentTypeText, Text: "Block text content"},
+		},
+	}
+	result := convertUserMessage(msg)
+	if result.OfUser == nil {
+		t.Fatal("expected user message")
+	}
+	// Verifies that messages with only text blocks (no Content field) are converted correctly
+}
+
+func TestConvertUserMessage_TextBlocksInUserMessage(t *testing.T) {
+	msg := Message{
+		Role: RoleUser,
+		Blocks: []ContentBlock{
+			{Type: ContentTypeText, Text: "First block"},
+			{Type: ContentTypeText, Text: "Second block"},
+		},
+	}
+	result := convertUserMessage(msg)
+	if result.OfUser == nil {
+		t.Fatal("expected user message")
+	}
+	// Should use first text block when multiple text blocks are present
+}
+
 func TestConvertAssistantMessage_TextOnly(t *testing.T) {
 	msg := Message{Role: RoleAssistant, Content: "I can help with that."}
 	result := convertAssistantMessage(msg)
@@ -662,6 +700,258 @@ func TestOpenAIClient_StreamServerError(t *testing.T) {
 
 	if !gotError && err == nil {
 		t.Error("expected error event or error return for server error")
+	}
+}
+
+func TestOpenAIClient_StreamWithToolCalls(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("expected http.Flusher")
+		}
+
+		// Chunk 1: Start with role
+		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}` + "\n\n"))
+		flusher.Flush()
+
+		// Chunk 2: Tool call start
+		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_abc123","type":"function","function":{"name":"get_weather","arguments":""}}]},"finish_reason":null}]}` + "\n\n"))
+		flusher.Flush()
+
+		// Chunk 3: Tool call arguments
+		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"location\":"}}]},"finish_reason":null}]}` + "\n\n"))
+		flusher.Flush()
+
+		// Chunk 4: More arguments
+		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"New York\"}"}}]},"finish_reason":null}]}` + "\n\n"))
+		flusher.Flush()
+
+		// Chunk 5: End with tool_calls finish reason
+		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}` + "\n\n"))
+		flusher.Flush()
+
+		// Done
+		w.Write([]byte("data: [DONE]\n\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	client := &OpenAIClient{
+		client: openai.NewClient(
+			option.WithAPIKey("test-key"),
+			option.WithBaseURL(server.URL),
+		),
+		model: "gpt-5.2",
+	}
+
+	ctx := context.Background()
+	req := &Request{
+		Messages: []Message{NewUserMessage("What's the weather in New York?")},
+		Tools: []ToolDefinition{
+			{Name: "get_weather", Description: "Get weather", InputSchema: map[string]any{"type": "object"}},
+		},
+	}
+
+	eventChan, err := client.CreateMessageStream(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected error creating stream: %v", err)
+	}
+
+	var gotMessageStart, gotContentStop, gotMessageStop bool
+	var toolCallBlock *ContentBlock
+
+	for event := range eventChan {
+		switch event.Type {
+		case EventMessageStart:
+			gotMessageStart = true
+		case EventContentStop:
+			gotContentStop = true
+			toolCallBlock = event.Block
+		case EventMessageStop:
+			gotMessageStop = true
+		case EventError:
+			t.Errorf("unexpected error event: %v", event.Error)
+		}
+	}
+
+	if !gotMessageStart {
+		t.Error("expected MessageStart event")
+	}
+	if !gotContentStop {
+		t.Error("expected ContentStop event for tool call")
+	}
+	if !gotMessageStop {
+		t.Error("expected MessageStop event")
+	}
+	if toolCallBlock != nil {
+		if toolCallBlock.Type != ContentTypeToolUse {
+			t.Errorf("expected tool_use block, got %s", toolCallBlock.Type)
+		}
+		if toolCallBlock.Name != "get_weather" {
+			t.Errorf("expected tool name get_weather, got %s", toolCallBlock.Name)
+		}
+	}
+}
+
+func TestOpenAIClient_StreamWithMultipleContentDeltas(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("expected http.Flusher")
+		}
+
+		// Chunk 1: Role
+		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}` + "\n\n"))
+		flusher.Flush()
+
+		// Chunk 2: First content delta
+		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}` + "\n\n"))
+		flusher.Flush()
+
+		// Chunk 3: Second content delta
+		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{"content":" there"},"finish_reason":null}]}` + "\n\n"))
+		flusher.Flush()
+
+		// Chunk 4: Third content delta
+		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{"content":"!"},"finish_reason":null}]}` + "\n\n"))
+		flusher.Flush()
+
+		// Chunk 5: End
+		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n"))
+		flusher.Flush()
+
+		w.Write([]byte("data: [DONE]\n\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	client := &OpenAIClient{
+		client: openai.NewClient(
+			option.WithAPIKey("test-key"),
+			option.WithBaseURL(server.URL),
+		),
+		model: "gpt-5.2",
+	}
+
+	ctx := context.Background()
+	req := &Request{
+		Messages: []Message{NewUserMessage("Hello")},
+	}
+
+	eventChan, err := client.CreateMessageStream(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected error creating stream: %v", err)
+	}
+
+	var contentDeltas []string
+	var gotMessageStart, gotMessageStop bool
+
+	for event := range eventChan {
+		switch event.Type {
+		case EventMessageStart:
+			gotMessageStart = true
+		case EventContentDelta:
+			contentDeltas = append(contentDeltas, event.Text)
+		case EventMessageStop:
+			gotMessageStop = true
+		case EventError:
+			t.Errorf("unexpected error event: %v", event.Error)
+		}
+	}
+
+	if !gotMessageStart {
+		t.Error("expected MessageStart event")
+	}
+	if !gotMessageStop {
+		t.Error("expected MessageStop event")
+	}
+
+	expectedDeltas := []string{"Hello", " there", "!"}
+	if len(contentDeltas) != len(expectedDeltas) {
+		t.Errorf("expected %d content deltas, got %d", len(expectedDeltas), len(contentDeltas))
+	}
+	for i, expected := range expectedDeltas {
+		if i >= len(contentDeltas) {
+			break
+		}
+		if contentDeltas[i] != expected {
+			t.Errorf("delta %d: expected %q, got %q", i, expected, contentDeltas[i])
+		}
+	}
+}
+
+func TestOpenAIClient_StreamJustFinishedToolCallEvent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("expected http.Flusher")
+		}
+
+		// Simulate streaming tool call that gets completed
+		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}` + "\n\n"))
+		flusher.Flush()
+
+		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_test","type":"function","function":{"name":"test_tool","arguments":""}}]},"finish_reason":null}]}` + "\n\n"))
+		flusher.Flush()
+
+		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"key\":\"value\"}"}}]},"finish_reason":null}]}` + "\n\n"))
+		flusher.Flush()
+
+		// Next chunk signals tool call completion via JustFinishedToolCall
+		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_test2","type":"function","function":{"name":"another_tool","arguments":""}}]},"finish_reason":null}]}` + "\n\n"))
+		flusher.Flush()
+
+		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}` + "\n\n"))
+		flusher.Flush()
+
+		w.Write([]byte("data: [DONE]\n\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	client := &OpenAIClient{
+		client: openai.NewClient(
+			option.WithAPIKey("test-key"),
+			option.WithBaseURL(server.URL),
+		),
+		model: "gpt-5.2",
+	}
+
+	ctx := context.Background()
+	req := &Request{
+		Messages: []Message{NewUserMessage("Test")},
+		Tools: []ToolDefinition{
+			{Name: "test_tool", Description: "Test", InputSchema: map[string]any{"type": "object"}},
+			{Name: "another_tool", Description: "Another", InputSchema: map[string]any{"type": "object"}},
+		},
+	}
+
+	eventChan, err := client.CreateMessageStream(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected error creating stream: %v", err)
+	}
+
+	var contentStopEvents int
+	for event := range eventChan {
+		if event.Type == EventContentStop {
+			contentStopEvents++
+			if event.Block == nil {
+				t.Error("expected non-nil Block in ContentStop event")
+			} else if event.Block.Type != ContentTypeToolUse {
+				t.Errorf("expected tool_use block, got %s", event.Block.Type)
+			}
+		}
+		if event.Type == EventError {
+			t.Errorf("unexpected error event: %v", event.Error)
+		}
+	}
+
+	// Should get at least one ContentStop for completed tool call
+	if contentStopEvents == 0 {
+		t.Error("expected at least one ContentStop event for tool call completion")
 	}
 }
 

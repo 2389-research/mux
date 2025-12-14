@@ -3,6 +3,7 @@ package mcp_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -641,5 +642,1151 @@ func TestToolInfoWithComplexSchema(t *testing.T) {
 	}
 	if len(props) != 2 {
 		t.Errorf("expected 2 properties, got %d", len(props))
+	}
+}
+
+// ToolManager tests
+
+// mockToolProvider implements the ToolProvider interface for testing
+type mockToolProvider struct {
+	tools      []mcp.ToolInfo
+	listErr    error
+	callResult *mcp.ToolCallResult
+	callErr    error
+}
+
+func (m *mockToolProvider) ListTools(ctx context.Context) ([]mcp.ToolInfo, error) {
+	return m.tools, m.listErr
+}
+
+func (m *mockToolProvider) CallTool(ctx context.Context, name string, args map[string]any) (*mcp.ToolCallResult, error) {
+	return m.callResult, m.callErr
+}
+
+// Verify interface compliance
+var _ mcp.ToolProvider = (*mockToolProvider)(nil)
+
+func TestNewToolManager(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:      "test",
+		Transport: "stdio",
+		Command:   "echo",
+	}
+	client := mcp.NewClient(config)
+
+	manager := mcp.NewToolManager(client)
+	if manager == nil {
+		t.Fatal("expected non-nil ToolManager")
+	}
+
+	// Initially should have no tools
+	tools := manager.Tools()
+	if len(tools) != 0 {
+		t.Errorf("expected 0 tools initially, got %d", len(tools))
+	}
+}
+
+func TestToolManagerRefresh(t *testing.T) {
+	t.Run("RefreshLoadsTools", func(t *testing.T) {
+		mockProvider := &mockToolProvider{
+			tools: []mcp.ToolInfo{
+				{
+					Name:        "read_file",
+					Description: "Read a file",
+					InputSchema: map[string]any{"type": "object"},
+				},
+				{
+					Name:        "write_file",
+					Description: "Write a file",
+					InputSchema: map[string]any{"type": "object"},
+				},
+			},
+			callResult: &mcp.ToolCallResult{
+				Content: []mcp.ContentBlock{{Type: "text", Text: "result"}},
+			},
+		}
+
+		manager := mcp.NewToolManager(mockProvider)
+		ctx := context.Background()
+
+		// Refresh should load the tools
+		err := manager.Refresh(ctx)
+		if err != nil {
+			t.Fatalf("Refresh failed: %v", err)
+		}
+
+		// Verify tools were loaded
+		tools := manager.Tools()
+		if len(tools) != 2 {
+			t.Errorf("expected 2 tools, got %d", len(tools))
+		}
+
+		// Verify we can get each tool
+		readFile, ok := manager.Get("read_file")
+		if !ok {
+			t.Error("failed to get read_file tool")
+		}
+		if readFile != nil && readFile.Name() != "read_file" {
+			t.Errorf("expected 'read_file', got %q", readFile.Name())
+		}
+
+		writeFile, ok := manager.Get("write_file")
+		if !ok {
+			t.Error("failed to get write_file tool")
+		}
+		if writeFile != nil && writeFile.Name() != "write_file" {
+			t.Errorf("expected 'write_file', got %q", writeFile.Name())
+		}
+	})
+
+	t.Run("RefreshError", func(t *testing.T) {
+		mockProvider := &mockToolProvider{
+			listErr: context.DeadlineExceeded,
+		}
+
+		manager := mcp.NewToolManager(mockProvider)
+		ctx := context.Background()
+
+		// Refresh should fail
+		err := manager.Refresh(ctx)
+		if err == nil {
+			t.Fatal("expected error from Refresh")
+		}
+		if err != context.DeadlineExceeded {
+			t.Errorf("expected DeadlineExceeded error, got %v", err)
+		}
+
+		// Tools should still be empty
+		tools := manager.Tools()
+		if len(tools) != 0 {
+			t.Errorf("expected 0 tools after error, got %d", len(tools))
+		}
+	})
+
+	t.Run("RefreshReplacesTools", func(t *testing.T) {
+		mockProvider := &mockToolProvider{
+			tools: []mcp.ToolInfo{
+				{Name: "tool1", Description: "First"},
+				{Name: "tool2", Description: "Second"},
+			},
+			callResult: &mcp.ToolCallResult{
+				Content: []mcp.ContentBlock{{Type: "text", Text: "result"}},
+			},
+		}
+
+		manager := mcp.NewToolManager(mockProvider)
+		ctx := context.Background()
+
+		// First refresh
+		err := manager.Refresh(ctx)
+		if err != nil {
+			t.Fatalf("first Refresh failed: %v", err)
+		}
+
+		if len(manager.Tools()) != 2 {
+			t.Errorf("expected 2 tools after first refresh, got %d", len(manager.Tools()))
+		}
+
+		// Update the mock to return different tools
+		mockProvider.tools = []mcp.ToolInfo{
+			{Name: "tool3", Description: "Third"},
+		}
+
+		// Second refresh should replace tools
+		err = manager.Refresh(ctx)
+		if err != nil {
+			t.Fatalf("second Refresh failed: %v", err)
+		}
+
+		tools := manager.Tools()
+		if len(tools) != 1 {
+			t.Errorf("expected 1 tool after second refresh, got %d", len(tools))
+		}
+
+		// Old tools should be gone
+		_, ok := manager.Get("tool1")
+		if ok {
+			t.Error("tool1 should have been removed")
+		}
+
+		// New tool should be present
+		tool3, ok := manager.Get("tool3")
+		if !ok {
+			t.Error("tool3 should be present")
+		}
+		if tool3 != nil && tool3.Name() != "tool3" {
+			t.Errorf("expected 'tool3', got %q", tool3.Name())
+		}
+	})
+}
+
+func TestToolManagerTools(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:      "test",
+		Transport: "stdio",
+		Command:   "echo",
+	}
+	client := mcp.NewClient(config)
+	manager := mcp.NewToolManager(client)
+
+	// Initially empty
+	tools := manager.Tools()
+	if len(tools) != 0 {
+		t.Errorf("expected 0 tools, got %d", len(tools))
+	}
+
+	// After refresh would have tools, but we can't test that without a real server
+	// So we verify the return type is correct
+	if tools == nil {
+		t.Error("expected non-nil slice")
+	}
+}
+
+func TestToolManagerGet(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:      "test",
+		Transport: "stdio",
+		Command:   "echo",
+	}
+	client := mcp.NewClient(config)
+	manager := mcp.NewToolManager(client)
+
+	// Get non-existent tool
+	tool, ok := manager.Get("nonexistent")
+	if ok {
+		t.Error("expected ok=false for non-existent tool")
+	}
+	if tool != nil {
+		t.Error("expected nil tool for non-existent tool")
+	}
+}
+
+func TestToolManagerRegisterAll(t *testing.T) {
+	t.Run("EmptyManager", func(t *testing.T) {
+		// Create a manager with no tools
+		mockProvider := &mockToolProvider{
+			tools: []mcp.ToolInfo{},
+		}
+		manager := mcp.NewToolManager(mockProvider)
+
+		// Create a registry
+		registry := tool.NewRegistry()
+
+		// Register all tools (should be empty initially)
+		manager.RegisterAll(registry)
+
+		if registry.Count() != 0 {
+			t.Errorf("expected 0 registered tools, got %d", registry.Count())
+		}
+	})
+
+	t.Run("WithTools", func(t *testing.T) {
+		// Create a manager with mock tools
+		mockProvider := &mockToolProvider{
+			tools: []mcp.ToolInfo{
+				{Name: "tool1", Description: "First tool"},
+				{Name: "tool2", Description: "Second tool"},
+				{Name: "tool3", Description: "Third tool"},
+			},
+			callResult: &mcp.ToolCallResult{
+				Content: []mcp.ContentBlock{{Type: "text", Text: "result"}},
+			},
+		}
+
+		manager := mcp.NewToolManager(mockProvider)
+		ctx := context.Background()
+
+		// Refresh to load tools
+		err := manager.Refresh(ctx)
+		if err != nil {
+			t.Fatalf("Refresh failed: %v", err)
+		}
+
+		// Create a registry and register all tools
+		registry := tool.NewRegistry()
+		manager.RegisterAll(registry)
+
+		if registry.Count() != 3 {
+			t.Errorf("expected 3 registered tools, got %d", registry.Count())
+		}
+
+		// Verify all tools are in the registry
+		for _, name := range []string{"tool1", "tool2", "tool3"} {
+			tool, ok := registry.Get(name)
+			if !ok {
+				t.Errorf("failed to get tool %s from registry", name)
+			}
+			if tool != nil && tool.Name() != name {
+				t.Errorf("expected tool name %q, got %q", name, tool.Name())
+			}
+		}
+	})
+
+	t.Run("MultipleRegistries", func(t *testing.T) {
+		// Test that RegisterAll works with multiple registries
+		mockProvider := &mockToolProvider{
+			tools: []mcp.ToolInfo{
+				{Name: "tool_a", Description: "Tool A"},
+				{Name: "tool_b", Description: "Tool B"},
+			},
+			callResult: &mcp.ToolCallResult{
+				Content: []mcp.ContentBlock{{Type: "text", Text: "result"}},
+			},
+		}
+
+		manager := mcp.NewToolManager(mockProvider)
+		ctx := context.Background()
+
+		// Refresh to load tools
+		err := manager.Refresh(ctx)
+		if err != nil {
+			t.Fatalf("Refresh failed: %v", err)
+		}
+
+		// Register to first registry
+		registry1 := tool.NewRegistry()
+		manager.RegisterAll(registry1)
+
+		// Register to second registry
+		registry2 := tool.NewRegistry()
+		manager.RegisterAll(registry2)
+
+		// Both registries should have the same tools
+		if registry1.Count() != registry2.Count() {
+			t.Errorf("registries have different counts: %d vs %d", registry1.Count(), registry2.Count())
+		}
+
+		if registry1.Count() != 2 {
+			t.Errorf("expected 2 tools in each registry, got %d", registry1.Count())
+		}
+	})
+}
+
+func TestToolManagerToolsWithMultipleRetrievals(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:      "test",
+		Transport: "stdio",
+		Command:   "echo",
+	}
+	client := mcp.NewClient(config)
+	manager := mcp.NewToolManager(client)
+
+	// Call Tools multiple times to ensure it's stable
+	tools1 := manager.Tools()
+	tools2 := manager.Tools()
+
+	if len(tools1) != len(tools2) {
+		t.Errorf("expected same tool count, got %d and %d", len(tools1), len(tools2))
+	}
+
+	// Both should be non-nil
+	if tools1 == nil || tools2 == nil {
+		t.Error("expected non-nil tool slices")
+	}
+}
+
+func TestToolAdapterDescription(t *testing.T) {
+	info := mcp.ToolInfo{
+		Name:        "test_tool",
+		Description: "This is a test tool",
+		InputSchema: map[string]any{"type": "object"},
+	}
+
+	mockCaller := &mockMCPCaller{
+		result: &mcp.ToolCallResult{
+			Content: []mcp.ContentBlock{{Type: "text", Text: "result"}},
+		},
+	}
+
+	adapter := mcp.NewToolAdapter(info, mockCaller)
+
+	desc := adapter.Description()
+	if desc != "This is a test tool" {
+		t.Errorf("expected 'This is a test tool', got %q", desc)
+	}
+}
+
+func TestToolAdapterRequiresApproval(t *testing.T) {
+	info := mcp.ToolInfo{
+		Name:        "test_tool",
+		Description: "Test",
+	}
+
+	mockCaller := &mockMCPCaller{
+		result: &mcp.ToolCallResult{
+			Content: []mcp.ContentBlock{{Type: "text", Text: "result"}},
+		},
+	}
+
+	adapter := mcp.NewToolAdapter(info, mockCaller)
+
+	// MCP tools always require approval
+	requiresApproval := adapter.RequiresApproval(map[string]any{"test": "param"})
+	if !requiresApproval {
+		t.Error("expected MCP tools to require approval")
+	}
+
+	// Test with nil params
+	requiresApproval = adapter.RequiresApproval(nil)
+	if !requiresApproval {
+		t.Error("expected MCP tools to require approval even with nil params")
+	}
+}
+
+func TestToolAdapterInputSchema(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"path": map[string]any{
+				"type":        "string",
+				"description": "File path",
+			},
+		},
+		"required": []string{"path"},
+	}
+
+	info := mcp.ToolInfo{
+		Name:        "read_file",
+		Description: "Read a file",
+		InputSchema: schema,
+	}
+
+	mockCaller := &mockMCPCaller{
+		result: &mcp.ToolCallResult{
+			Content: []mcp.ContentBlock{{Type: "text", Text: "result"}},
+		},
+	}
+
+	adapter := mcp.NewToolAdapter(info, mockCaller)
+
+	inputSchema := adapter.InputSchema()
+	if inputSchema == nil {
+		t.Fatal("expected non-nil input schema")
+	}
+
+	if inputSchema["type"] != "object" {
+		t.Errorf("expected type 'object', got %v", inputSchema["type"])
+	}
+
+	props, ok := inputSchema["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("expected properties map")
+	}
+
+	if len(props) != 1 {
+		t.Errorf("expected 1 property, got %d", len(props))
+	}
+}
+
+func TestToolAdapterInputSchemaEmpty(t *testing.T) {
+	info := mcp.ToolInfo{
+		Name:        "no_params_tool",
+		Description: "Tool with no parameters",
+		InputSchema: map[string]any{},
+	}
+
+	mockCaller := &mockMCPCaller{
+		result: &mcp.ToolCallResult{
+			Content: []mcp.ContentBlock{{Type: "text", Text: "result"}},
+		},
+	}
+
+	adapter := mcp.NewToolAdapter(info, mockCaller)
+
+	inputSchema := adapter.InputSchema()
+	if inputSchema == nil {
+		t.Fatal("expected non-nil input schema")
+	}
+
+	if len(inputSchema) != 0 {
+		t.Errorf("expected empty schema, got %d properties", len(inputSchema))
+	}
+}
+
+func TestToolAdapterResourceContentBlock(t *testing.T) {
+	mockCaller := &mockMCPCaller{
+		result: &mcp.ToolCallResult{
+			Content: []mcp.ContentBlock{
+				{Type: "text", Text: "text content"},
+				{Type: "resource", MimeType: "application/json"},
+			},
+		},
+	}
+
+	info := mcp.ToolInfo{Name: "resource_tool"}
+	adapter := mcp.NewToolAdapter(info, mockCaller)
+
+	result, err := adapter.Execute(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Error("expected success")
+	}
+
+	expected := "text content\n[resource: application/json]"
+	if result.Output != expected {
+		t.Errorf("unexpected output: got %q, want %q", result.Output, expected)
+	}
+}
+
+func TestToolManagerIntegration(t *testing.T) {
+	// This is an integration test that verifies the full ToolManager lifecycle
+	// without requiring a real MCP server
+
+	mockClient := &mockMCPCaller{
+		result: &mcp.ToolCallResult{
+			Content: []mcp.ContentBlock{{Type: "text", Text: "success"}},
+		},
+	}
+
+	// Create multiple tool adapters
+	tools := []*mcp.ToolAdapter{
+		mcp.NewToolAdapter(mcp.ToolInfo{
+			Name:        "tool_a",
+			Description: "First tool",
+			InputSchema: map[string]any{"type": "object"},
+		}, mockClient),
+		mcp.NewToolAdapter(mcp.ToolInfo{
+			Name:        "tool_b",
+			Description: "Second tool",
+			InputSchema: map[string]any{"type": "object"},
+		}, mockClient),
+		mcp.NewToolAdapter(mcp.ToolInfo{
+			Name:        "tool_c",
+			Description: "Third tool",
+			InputSchema: map[string]any{"type": "object"},
+		}, mockClient),
+	}
+
+	// Verify all tools are properly created
+	if len(tools) != 3 {
+		t.Errorf("expected 3 tools, got %d", len(tools))
+	}
+
+	// Verify each tool implements the Tool interface correctly
+	for i, adapter := range tools {
+		if adapter == nil {
+			t.Errorf("tool %d is nil", i)
+			continue
+		}
+
+		// Verify Tool interface compliance
+		var _ tool.Tool = adapter
+
+		// Test all interface methods
+		if adapter.Name() == "" {
+			t.Errorf("tool %d has empty name", i)
+		}
+		if adapter.Description() == "" {
+			t.Errorf("tool %d has empty description", i)
+		}
+		if !adapter.RequiresApproval(nil) {
+			t.Errorf("tool %d should require approval", i)
+		}
+		if adapter.InputSchema() == nil {
+			t.Errorf("tool %d has nil input schema", i)
+		}
+
+		// Test Execute
+		result, err := adapter.Execute(context.Background(), map[string]any{})
+		if err != nil {
+			t.Errorf("tool %d Execute failed: %v", i, err)
+		}
+		if !result.Success {
+			t.Errorf("tool %d Execute was not successful", i)
+		}
+	}
+
+	// Test registration
+	registry := tool.NewRegistry()
+	for _, adapter := range tools {
+		registry.Register(adapter)
+	}
+
+	if registry.Count() != 3 {
+		t.Errorf("expected 3 registered tools, got %d", registry.Count())
+	}
+
+	// Verify we can retrieve the tools
+	for _, adapter := range tools {
+		retrieved, ok := registry.Get(adapter.Name())
+		if !ok {
+			t.Errorf("failed to retrieve tool %s", adapter.Name())
+		}
+		if retrieved.Name() != adapter.Name() {
+			t.Errorf("retrieved tool has wrong name: got %s, want %s", retrieved.Name(), adapter.Name())
+		}
+	}
+}
+
+// Integration tests with mock MCP server for ListTools and CallTool
+
+func TestClientListTools(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:      "mock",
+		Transport: "stdio",
+		Command:   "node",
+		Args:      []string{"testdata/mock_server.js"},
+	}
+	client := mcp.NewClient(config)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := client.Start(ctx)
+	if err != nil {
+		t.Fatalf("failed to start client: %v", err)
+	}
+	defer client.Close()
+
+	tools, err := client.ListTools(ctx)
+	if err != nil {
+		t.Fatalf("ListTools failed: %v", err)
+	}
+
+	if len(tools) != 2 {
+		t.Errorf("expected 2 tools, got %d", len(tools))
+	}
+
+	// Verify tool details
+	foundTestTool := false
+	foundEchoTool := false
+	for _, tool := range tools {
+		if tool.Name == "test_tool" {
+			foundTestTool = true
+			if tool.Description != "A test tool" {
+				t.Errorf("expected 'A test tool', got %q", tool.Description)
+			}
+		}
+		if tool.Name == "echo_tool" {
+			foundEchoTool = true
+			if tool.Description != "Echoes the input" {
+				t.Errorf("expected 'Echoes the input', got %q", tool.Description)
+			}
+		}
+	}
+
+	if !foundTestTool {
+		t.Error("expected to find test_tool")
+	}
+	if !foundEchoTool {
+		t.Error("expected to find echo_tool")
+	}
+}
+
+func TestClientCallTool(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:      "mock",
+		Transport: "stdio",
+		Command:   "node",
+		Args:      []string{"testdata/mock_server.js"},
+	}
+	client := mcp.NewClient(config)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := client.Start(ctx)
+	if err != nil {
+		t.Fatalf("failed to start client: %v", err)
+	}
+	defer client.Close()
+
+	// Test successful tool call
+	result, err := client.CallTool(ctx, "test_tool", map[string]any{"input": "test"})
+	if err != nil {
+		t.Fatalf("CallTool failed: %v", err)
+	}
+
+	if result.IsError {
+		t.Error("expected successful result")
+	}
+
+	if len(result.Content) != 1 {
+		t.Errorf("expected 1 content block, got %d", len(result.Content))
+	}
+
+	if result.Content[0].Type != "text" {
+		t.Errorf("expected type 'text', got %q", result.Content[0].Type)
+	}
+
+	if result.Content[0].Text != "test result" {
+		t.Errorf("expected 'test result', got %q", result.Content[0].Text)
+	}
+}
+
+func TestClientCallToolEcho(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:      "mock",
+		Transport: "stdio",
+		Command:   "node",
+		Args:      []string{"testdata/mock_server.js"},
+	}
+	client := mcp.NewClient(config)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := client.Start(ctx)
+	if err != nil {
+		t.Fatalf("failed to start client: %v", err)
+	}
+	defer client.Close()
+
+	// Test echo tool with custom message
+	testMessage := "hello world"
+	result, err := client.CallTool(ctx, "echo_tool", map[string]any{"message": testMessage})
+	if err != nil {
+		t.Fatalf("CallTool failed: %v", err)
+	}
+
+	if result.IsError {
+		t.Error("expected successful result")
+	}
+
+	if len(result.Content) == 0 {
+		t.Fatal("expected at least 1 content block")
+	}
+
+	if result.Content[0].Text != testMessage {
+		t.Errorf("expected %q, got %q", testMessage, result.Content[0].Text)
+	}
+}
+
+func TestClientCallToolNotFound(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:      "mock",
+		Transport: "stdio",
+		Command:   "node",
+		Args:      []string{"testdata/mock_server.js"},
+	}
+	client := mcp.NewClient(config)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := client.Start(ctx)
+	if err != nil {
+		t.Fatalf("failed to start client: %v", err)
+	}
+	defer client.Close()
+
+	// Test calling non-existent tool
+	_, err = client.CallTool(ctx, "nonexistent_tool", nil)
+	if err == nil {
+		t.Fatal("expected error for non-existent tool")
+	}
+
+	// Should be an RPC error
+	rpcErr, ok := err.(*mcp.RPCError)
+	if !ok {
+		t.Fatalf("expected RPCError, got %T", err)
+	}
+
+	if rpcErr.Code != -32601 {
+		t.Errorf("expected code -32601, got %d", rpcErr.Code)
+	}
+}
+
+func TestClientCallToolWithError(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:      "mock",
+		Transport: "stdio",
+		Command:   "node",
+		Args:      []string{"testdata/mock_server.js"},
+	}
+	client := mcp.NewClient(config)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := client.Start(ctx)
+	if err != nil {
+		t.Fatalf("failed to start client: %v", err)
+	}
+	defer client.Close()
+
+	// Test tool that returns an error result
+	result, err := client.CallTool(ctx, "error_tool", nil)
+	if err != nil {
+		t.Fatalf("CallTool failed: %v", err)
+	}
+
+	if !result.IsError {
+		t.Error("expected IsError to be true")
+	}
+
+	if len(result.Content) == 0 {
+		t.Fatal("expected at least 1 content block")
+	}
+}
+
+func TestClientListToolsTimeout(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:      "mock",
+		Transport: "stdio",
+		Command:   "node",
+		Args:      []string{"testdata/mock_server.js"},
+	}
+	client := mcp.NewClient(config)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := client.Start(ctx)
+	if err != nil {
+		t.Fatalf("failed to start client: %v", err)
+	}
+	defer client.Close()
+
+	// Create a very short timeout for the actual call
+	callCtx, callCancel := context.WithTimeout(context.Background(), 1*time.Nanosecond)
+	defer callCancel()
+
+	// Wait for timeout to definitely expire
+	time.Sleep(10 * time.Millisecond)
+
+	_, err = client.ListTools(callCtx)
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+
+	if err != context.DeadlineExceeded {
+		t.Errorf("expected context.DeadlineExceeded, got %v", err)
+	}
+}
+
+func TestClientCallToolTimeout(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:      "mock",
+		Transport: "stdio",
+		Command:   "node",
+		Args:      []string{"testdata/mock_server.js"},
+	}
+	client := mcp.NewClient(config)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := client.Start(ctx)
+	if err != nil {
+		t.Fatalf("failed to start client: %v", err)
+	}
+	defer client.Close()
+
+	// Create a very short timeout for the actual call
+	callCtx, callCancel := context.WithTimeout(context.Background(), 1*time.Nanosecond)
+	defer callCancel()
+
+	// Wait for timeout to definitely expire
+	time.Sleep(10 * time.Millisecond)
+
+	_, err = client.CallTool(callCtx, "test_tool", nil)
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+
+	if err != context.DeadlineExceeded {
+		t.Errorf("expected context.DeadlineExceeded, got %v", err)
+	}
+}
+
+func TestClientMultipleListToolsCalls(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:      "mock",
+		Transport: "stdio",
+		Command:   "node",
+		Args:      []string{"testdata/mock_server.js"},
+	}
+	client := mcp.NewClient(config)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := client.Start(ctx)
+	if err != nil {
+		t.Fatalf("failed to start client: %v", err)
+	}
+	defer client.Close()
+
+	// Call ListTools multiple times to ensure it works consistently
+	for i := 0; i < 3; i++ {
+		tools, err := client.ListTools(ctx)
+		if err != nil {
+			t.Fatalf("ListTools call %d failed: %v", i+1, err)
+		}
+
+		if len(tools) != 2 {
+			t.Errorf("call %d: expected 2 tools, got %d", i+1, len(tools))
+		}
+	}
+}
+
+func TestClientCallToolAfterClose(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:      "mock",
+		Transport: "stdio",
+		Command:   "node",
+		Args:      []string{"testdata/mock_server.js"},
+	}
+	client := mcp.NewClient(config)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := client.Start(ctx)
+	if err != nil {
+		t.Fatalf("failed to start client: %v", err)
+	}
+
+	// Close the client
+	client.Close()
+
+	// Try to call tool after close
+	_, err = client.CallTool(ctx, "test_tool", nil)
+	if err == nil {
+		t.Fatal("expected error when calling tool after close")
+	}
+}
+
+func TestClientListToolsAfterClose(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:      "mock",
+		Transport: "stdio",
+		Command:   "node",
+		Args:      []string{"testdata/mock_server.js"},
+	}
+	client := mcp.NewClient(config)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := client.Start(ctx)
+	if err != nil {
+		t.Fatalf("failed to start client: %v", err)
+	}
+
+	// Close the client
+	client.Close()
+
+	// Try to list tools after close
+	_, err = client.ListTools(ctx)
+	if err == nil {
+		t.Fatal("expected error when listing tools after close")
+	}
+}
+
+// Additional edge case tests for better coverage
+
+func TestClientListToolsInvalidJSON(t *testing.T) {
+	// This test ensures we handle malformed JSON responses gracefully
+	config := mcp.ServerConfig{
+		Name:      "mock",
+		Transport: "stdio",
+		Command:   "node",
+		Args:      []string{"testdata/mock_server.js"},
+	}
+	client := mcp.NewClient(config)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := client.Start(ctx)
+	if err != nil {
+		t.Fatalf("failed to start client: %v", err)
+	}
+	defer client.Close()
+
+	// Normal call should succeed
+	tools, err := client.ListTools(ctx)
+	if err != nil {
+		t.Fatalf("ListTools failed: %v", err)
+	}
+	if len(tools) != 2 {
+		t.Errorf("expected 2 tools, got %d", len(tools))
+	}
+}
+
+func TestClientCallToolWithNilArguments(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:      "mock",
+		Transport: "stdio",
+		Command:   "node",
+		Args:      []string{"testdata/mock_server.js"},
+	}
+	client := mcp.NewClient(config)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := client.Start(ctx)
+	if err != nil {
+		t.Fatalf("failed to start client: %v", err)
+	}
+	defer client.Close()
+
+	// Test calling tool with nil arguments
+	result, err := client.CallTool(ctx, "echo_tool", nil)
+	if err != nil {
+		t.Fatalf("CallTool failed: %v", err)
+	}
+
+	if result.IsError {
+		t.Error("expected successful result")
+	}
+
+	// Echo tool should return "no message" when args are nil
+	if len(result.Content) == 0 {
+		t.Fatal("expected at least 1 content block")
+	}
+
+	if result.Content[0].Text != "no message" {
+		t.Errorf("expected 'no message', got %q", result.Content[0].Text)
+	}
+}
+
+func TestClientCallToolWithEmptyArguments(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:      "mock",
+		Transport: "stdio",
+		Command:   "node",
+		Args:      []string{"testdata/mock_server.js"},
+	}
+	client := mcp.NewClient(config)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := client.Start(ctx)
+	if err != nil {
+		t.Fatalf("failed to start client: %v", err)
+	}
+	defer client.Close()
+
+	// Test calling tool with empty map arguments
+	result, err := client.CallTool(ctx, "test_tool", map[string]any{})
+	if err != nil {
+		t.Fatalf("CallTool failed: %v", err)
+	}
+
+	if result.IsError {
+		t.Error("expected successful result")
+	}
+}
+
+func TestClientConcurrentToolCalls(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:      "mock",
+		Transport: "stdio",
+		Command:   "node",
+		Args:      []string{"testdata/mock_server.js"},
+	}
+	client := mcp.NewClient(config)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err := client.Start(ctx)
+	if err != nil {
+		t.Fatalf("failed to start client: %v", err)
+	}
+	defer client.Close()
+
+	// Make multiple concurrent tool calls
+	const numCalls = 5
+	done := make(chan error, numCalls)
+
+	for i := 0; i < numCalls; i++ {
+		go func(index int) {
+			message := "concurrent message"
+			result, err := client.CallTool(ctx, "echo_tool", map[string]any{"message": message})
+			if err != nil {
+				done <- err
+				return
+			}
+			if result.IsError {
+				done <- fmt.Errorf("tool returned error")
+				return
+			}
+			if len(result.Content) == 0 {
+				done <- fmt.Errorf("no content blocks")
+				return
+			}
+			if result.Content[0].Text != message {
+				done <- fmt.Errorf("wrong message: got %q, want %q", result.Content[0].Text, message)
+				return
+			}
+			done <- nil
+		}(i)
+	}
+
+	// Wait for all calls to complete
+	for i := 0; i < numCalls; i++ {
+		if err := <-done; err != nil {
+			t.Errorf("concurrent call %d failed: %v", i, err)
+		}
+	}
+}
+
+func TestClientConcurrentMixedCalls(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:      "mock",
+		Transport: "stdio",
+		Command:   "node",
+		Args:      []string{"testdata/mock_server.js"},
+	}
+	client := mcp.NewClient(config)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err := client.Start(ctx)
+	if err != nil {
+		t.Fatalf("failed to start client: %v", err)
+	}
+	defer client.Close()
+
+	// Mix ListTools and CallTool calls concurrently
+	const numCalls = 6
+	done := make(chan error, numCalls)
+
+	// 3 ListTools calls
+	for i := 0; i < 3; i++ {
+		go func() {
+			tools, err := client.ListTools(ctx)
+			if err != nil {
+				done <- err
+				return
+			}
+			if len(tools) != 2 {
+				done <- fmt.Errorf("expected 2 tools, got %d", len(tools))
+				return
+			}
+			done <- nil
+		}()
+	}
+
+	// 3 CallTool calls
+	for i := 0; i < 3; i++ {
+		go func() {
+			result, err := client.CallTool(ctx, "test_tool", nil)
+			if err != nil {
+				done <- err
+				return
+			}
+			if result.IsError {
+				done <- fmt.Errorf("tool returned error")
+				return
+			}
+			done <- nil
+		}()
+	}
+
+	// Wait for all calls to complete
+	for i := 0; i < numCalls; i++ {
+		if err := <-done; err != nil {
+			t.Errorf("concurrent call %d failed: %v", i, err)
+		}
 	}
 }

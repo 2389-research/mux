@@ -14,6 +14,12 @@ type ToolCaller interface {
 	CallTool(ctx context.Context, name string, args map[string]any) (*ToolCallResult, error)
 }
 
+// ToolProvider is the interface for discovering and calling MCP tools.
+type ToolProvider interface {
+	ToolCaller
+	ListTools(ctx context.Context) ([]ToolInfo, error)
+}
+
 // ToolAdapter wraps an MCP tool to implement the Tool interface.
 type ToolAdapter struct {
 	info   ToolInfo
@@ -75,24 +81,24 @@ func (a *ToolAdapter) InputSchema() map[string]any { return a.info.InputSchema }
 
 // ToolManager manages multiple MCP tool adapters.
 type ToolManager struct {
-	client *Client
-	tools  map[string]*ToolAdapter
+	provider ToolProvider
+	tools    map[string]*ToolAdapter
 }
 
 // NewToolManager creates a manager for MCP tools.
-func NewToolManager(client *Client) *ToolManager {
-	return &ToolManager{client: client, tools: make(map[string]*ToolAdapter)}
+func NewToolManager(provider ToolProvider) *ToolManager {
+	return &ToolManager{provider: provider, tools: make(map[string]*ToolAdapter)}
 }
 
 // Refresh reloads tools from the MCP server.
 func (m *ToolManager) Refresh(ctx context.Context) error {
-	infos, err := m.client.ListTools(ctx)
+	infos, err := m.provider.ListTools(ctx)
 	if err != nil {
 		return err
 	}
 	m.tools = make(map[string]*ToolAdapter)
 	for _, info := range infos {
-		m.tools[info.Name] = NewToolAdapter(info, m.client)
+		m.tools[info.Name] = NewToolAdapter(info, m.provider)
 	}
 	return nil
 }

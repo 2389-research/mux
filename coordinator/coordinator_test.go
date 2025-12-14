@@ -757,3 +757,228 @@ func TestRateLimiterZeroRefillRate(t *testing.T) {
 		t.Error("expected timeout with zero refill rate")
 	}
 }
+
+// TestCacheClear tests that Clear() removes all items
+func TestCacheClear(t *testing.T) {
+	cache := NewCache()
+
+	// Add multiple entries
+	cache.Set("key1", "value1", time.Hour)
+	cache.Set("key2", "value2", time.Hour)
+	cache.Set("key3", "value3", time.Hour)
+
+	// Verify entries exist
+	cache.mu.RLock()
+	if len(cache.items) != 3 {
+		t.Errorf("expected 3 items before Clear, got %d", len(cache.items))
+	}
+	cache.mu.RUnlock()
+
+	// Clear the cache
+	cache.Clear()
+
+	// Verify all entries are removed
+	cache.mu.RLock()
+	itemCount := len(cache.items)
+	cache.mu.RUnlock()
+
+	if itemCount != 0 {
+		t.Errorf("expected 0 items after Clear, got %d", itemCount)
+	}
+
+	// Verify Gets return false
+	if _, ok := cache.Get("key1"); ok {
+		t.Error("expected key1 to be missing after Clear")
+	}
+	if _, ok := cache.Get("key2"); ok {
+		t.Error("expected key2 to be missing after Clear")
+	}
+	if _, ok := cache.Get("key3"); ok {
+		t.Error("expected key3 to be missing after Clear")
+	}
+}
+
+// TestCacheClearEmpty tests Clear() on an empty cache
+func TestCacheClearEmpty(t *testing.T) {
+	cache := NewCache()
+
+	// Clear empty cache should not panic
+	cache.Clear()
+
+	// Verify cache is still empty
+	cache.mu.RLock()
+	itemCount := len(cache.items)
+	cache.mu.RUnlock()
+
+	if itemCount != 0 {
+		t.Errorf("expected 0 items after Clear on empty cache, got %d", itemCount)
+	}
+}
+
+// TestCacheClearConcurrent tests Clear() with concurrent access
+func TestCacheClearConcurrent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping concurrency test in short mode")
+	}
+
+	cache := NewCache()
+
+	// Pre-populate cache
+	for i := 0; i < 100; i++ {
+		key := fmt.Sprintf("key%d", i)
+		cache.Set(key, fmt.Sprintf("value%d", i), time.Hour)
+	}
+
+	var wg sync.WaitGroup
+	errChan := make(chan error, 100)
+
+	// Start concurrent readers
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				key := fmt.Sprintf("key%d", j%100)
+				// Just reading, should not panic
+				cache.Get(key)
+			}
+		}(i)
+	}
+
+	// Start concurrent writers
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				key := fmt.Sprintf("key%d", j%100)
+				value := fmt.Sprintf("value%d-%d", id, j)
+				cache.Set(key, value, time.Hour)
+			}
+		}(i)
+	}
+
+	// Start concurrent deleters
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				key := fmt.Sprintf("key%d", j%100)
+				cache.Delete(key)
+			}
+		}()
+	}
+
+	// Call Clear in the middle of concurrent operations
+	time.Sleep(10 * time.Millisecond)
+	cache.Clear()
+
+	// Wait for all operations to complete
+	wg.Wait()
+	close(errChan)
+
+	// Check for errors
+	for err := range errChan {
+		t.Errorf("unexpected error during concurrent Clear: %v", err)
+	}
+
+	// Verify cache is in a valid state (may or may not be empty due to concurrent writers)
+	cache.mu.RLock()
+	itemCount := len(cache.items)
+	cache.mu.RUnlock()
+
+	t.Logf("Cache item count after concurrent Clear: %d", itemCount)
+	// Should not panic and should have a valid state
+}
+
+// TestCacheClearAfterExpiration tests Clear() after items have expired
+func TestCacheClearAfterExpiration(t *testing.T) {
+	cache := NewCache()
+
+	// Add entries with short TTL
+	cache.Set("key1", "value1", 10*time.Millisecond)
+	cache.Set("key2", "value2", 10*time.Millisecond)
+	cache.Set("key3", "value3", time.Hour) // One long-lived entry
+
+	// Verify entries exist
+	cache.mu.RLock()
+	initialCount := len(cache.items)
+	cache.mu.RUnlock()
+
+	if initialCount != 3 {
+		t.Errorf("expected 3 items initially, got %d", initialCount)
+	}
+
+	// Wait for some entries to expire
+	time.Sleep(20 * time.Millisecond)
+
+	// Clear should remove all items, including expired ones
+	cache.Clear()
+
+	// Verify all entries are removed
+	cache.mu.RLock()
+	itemCount := len(cache.items)
+	cache.mu.RUnlock()
+
+	if itemCount != 0 {
+		t.Errorf("expected 0 items after Clear, got %d", itemCount)
+	}
+
+	// Verify expired entries are gone
+	if _, ok := cache.Get("key1"); ok {
+		t.Error("expected key1 to be missing after Clear")
+	}
+	if _, ok := cache.Get("key2"); ok {
+		t.Error("expected key2 to be missing after Clear")
+	}
+	// Even the long-lived entry should be gone
+	if _, ok := cache.Get("key3"); ok {
+		t.Error("expected key3 to be missing after Clear")
+	}
+}
+
+// TestCacheClearMultipleTimes tests calling Clear() multiple times
+func TestCacheClearMultipleTimes(t *testing.T) {
+	cache := NewCache()
+
+	// Add entries
+	cache.Set("key1", "value1", time.Hour)
+	cache.Set("key2", "value2", time.Hour)
+
+	// Clear once
+	cache.Clear()
+
+	// Verify empty
+	cache.mu.RLock()
+	if len(cache.items) != 0 {
+		t.Errorf("expected 0 items after first Clear, got %d", len(cache.items))
+	}
+	cache.mu.RUnlock()
+
+	// Clear again (should be safe on empty cache)
+	cache.Clear()
+
+	// Verify still empty
+	cache.mu.RLock()
+	if len(cache.items) != 0 {
+		t.Errorf("expected 0 items after second Clear, got %d", len(cache.items))
+	}
+	cache.mu.RUnlock()
+
+	// Add new entries after clear
+	cache.Set("key3", "value3", time.Hour)
+
+	// Verify new entry exists
+	if val, ok := cache.Get("key3"); !ok || val != "value3" {
+		t.Error("cache should work normally after Clear")
+	}
+
+	// Clear again
+	cache.Clear()
+
+	// Verify cleared
+	if _, ok := cache.Get("key3"); ok {
+		t.Error("expected key3 to be missing after third Clear")
+	}
+}

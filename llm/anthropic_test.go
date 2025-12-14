@@ -641,3 +641,455 @@ func TestConvertResponse_ToolUseWithNullInput(t *testing.T) {
 		t.Logf("Input is nil for null input")
 	}
 }
+
+// CreateMessageStream Tests
+
+func TestCreateMessageStream_SuccessfulTextStream(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("expected http.ResponseWriter to be an http.Flusher")
+		}
+
+		// Send message_start event
+		w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_123\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-20250514\",\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n"))
+		flusher.Flush()
+
+		// Send content_block_start event
+		w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"))
+		flusher.Flush()
+
+		// Send content_block_delta events with text
+		w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n"))
+		flusher.Flush()
+
+		w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" world\"}}\n\n"))
+		flusher.Flush()
+
+		// Send content_block_stop event
+		w.Write([]byte("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"))
+		flusher.Flush()
+
+		// Send message_delta event
+		w.Write([]byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":5}}\n\n"))
+		flusher.Flush()
+
+		// Send message_stop event
+		w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	client := &AnthropicClient{
+		client: anthropic.NewClient(
+			option.WithAPIKey("test-key"),
+			option.WithBaseURL(server.URL),
+		),
+		model: "claude-sonnet-4-20250514",
+	}
+
+	ctx := context.Background()
+	req := &Request{
+		Messages: []Message{NewUserMessage("Hello")},
+	}
+
+	eventChan, err := client.CreateMessageStream(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected error creating stream: %v", err)
+	}
+
+	// Collect all events
+	var events []StreamEvent
+	for event := range eventChan {
+		events = append(events, event)
+		if event.Type == EventError {
+			t.Fatalf("unexpected error event: %v", event.Error)
+		}
+	}
+
+	// Verify we got all expected events
+	expectedEventTypes := []EventType{
+		EventMessageStart,
+		EventContentStart,
+		EventContentDelta,
+		EventContentDelta,
+		EventContentStop,
+		EventMessageDelta,
+		EventMessageStop,
+	}
+
+	if len(events) != len(expectedEventTypes) {
+		t.Fatalf("expected %d events, got %d", len(expectedEventTypes), len(events))
+	}
+
+	for i, expectedType := range expectedEventTypes {
+		if events[i].Type != expectedType {
+			t.Errorf("event %d: expected type %s, got %s", i, expectedType, events[i].Type)
+		}
+	}
+
+	// Verify message_start event has response
+	if events[0].Response == nil {
+		t.Error("message_start event should have response")
+	} else if events[0].Response.ID != "msg_123" {
+		t.Errorf("expected message ID msg_123, got %s", events[0].Response.ID)
+	}
+
+	// Verify content_delta events have text
+	if events[2].Text != "Hello" {
+		t.Errorf("expected first delta text 'Hello', got '%s'", events[2].Text)
+	}
+	if events[3].Text != " world" {
+		t.Errorf("expected second delta text ' world', got '%s'", events[3].Text)
+	}
+
+	// Verify indices are correct
+	if events[1].Index != 0 {
+		t.Errorf("expected content_start index 0, got %d", events[1].Index)
+	}
+	if events[4].Index != 0 {
+		t.Errorf("expected content_stop index 0, got %d", events[4].Index)
+	}
+}
+
+func TestCreateMessageStream_WithToolUse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("expected http.ResponseWriter to be an http.Flusher")
+		}
+
+		// Send message_start event
+		w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_456\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-20250514\",\"stop_reason\":null,\"usage\":{\"input_tokens\":15,\"output_tokens\":0}}}\n\n"))
+		flusher.Flush()
+
+		// Send text content_block_start
+		w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"))
+		flusher.Flush()
+
+		// Send text delta
+		w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Let me help\"}}\n\n"))
+		flusher.Flush()
+
+		// Send text block stop
+		w.Write([]byte("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"))
+		flusher.Flush()
+
+		// Send tool_use content_block_start
+		w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool_abc\",\"name\":\"read_file\"}}\n\n"))
+		flusher.Flush()
+
+		// Send tool input delta (non-text delta)
+		w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\"}}\n\n"))
+		flusher.Flush()
+
+		// Send tool block stop
+		w.Write([]byte("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n"))
+		flusher.Flush()
+
+		// Send message_delta
+		w.Write([]byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":12}}\n\n"))
+		flusher.Flush()
+
+		// Send message_stop
+		w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	client := &AnthropicClient{
+		client: anthropic.NewClient(
+			option.WithAPIKey("test-key"),
+			option.WithBaseURL(server.URL),
+		),
+		model: "claude-sonnet-4-20250514",
+	}
+
+	ctx := context.Background()
+	req := &Request{
+		Messages: []Message{NewUserMessage("Read test.txt")},
+		Tools: []ToolDefinition{
+			{
+				Name:        "read_file",
+				Description: "Read a file",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path": map[string]any{"type": "string"},
+					},
+					"required": []string{"path"},
+				},
+			},
+		},
+	}
+
+	eventChan, err := client.CreateMessageStream(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected error creating stream: %v", err)
+	}
+
+	// Collect all events
+	var events []StreamEvent
+	for event := range eventChan {
+		events = append(events, event)
+		if event.Type == EventError {
+			t.Fatalf("unexpected error event: %v", event.Error)
+		}
+	}
+
+	// Verify we got expected events including tool use blocks
+	if len(events) < 8 {
+		t.Fatalf("expected at least 8 events, got %d", len(events))
+	}
+
+	// Verify message_start
+	if events[0].Type != EventMessageStart {
+		t.Errorf("expected first event to be message_start, got %s", events[0].Type)
+	}
+
+	// Verify we have content blocks for both text and tool use (indices 0 and 1)
+	var foundTextDelta, foundToolStart bool
+	for _, event := range events {
+		if event.Type == EventContentDelta && event.Index == 0 && event.Text == "Let me help" {
+			foundTextDelta = true
+		}
+		if event.Type == EventContentStart && event.Index == 1 {
+			foundToolStart = true
+		}
+	}
+
+	if !foundTextDelta {
+		t.Error("expected to find text delta event for index 0")
+	}
+	if !foundToolStart {
+		t.Error("expected to find content_start event for tool use at index 1")
+	}
+
+	// Verify final events
+	lastEvent := events[len(events)-1]
+	if lastEvent.Type != EventMessageStop {
+		t.Errorf("expected last event to be message_stop, got %s", lastEvent.Type)
+	}
+}
+
+func TestCreateMessageStream_ContentDeltaNonTextType(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("expected http.ResponseWriter to be an http.Flusher")
+		}
+
+		// Send message_start
+		w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_789\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-20250514\",\"stop_reason\":null,\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n"))
+		flusher.Flush()
+
+		// Send content_block_start
+		w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool_123\",\"name\":\"test\"}}\n\n"))
+		flusher.Flush()
+
+		// Send content_block_delta with non-text type (e.g., input_json_delta)
+		w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}\n\n"))
+		flusher.Flush()
+
+		// Send content_block_stop
+		w.Write([]byte("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"))
+		flusher.Flush()
+
+		// Send message_stop
+		w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	client := &AnthropicClient{
+		client: anthropic.NewClient(
+			option.WithAPIKey("test-key"),
+			option.WithBaseURL(server.URL),
+		),
+		model: "claude-sonnet-4-20250514",
+	}
+
+	ctx := context.Background()
+	req := &Request{
+		Messages: []Message{NewUserMessage("Test")},
+	}
+
+	eventChan, err := client.CreateMessageStream(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected error creating stream: %v", err)
+	}
+
+	// Collect all events
+	var events []StreamEvent
+	for event := range eventChan {
+		events = append(events, event)
+		if event.Type == EventError {
+			t.Fatalf("unexpected error event: %v", event.Error)
+		}
+	}
+
+	// Find the content_delta event
+	var foundDelta bool
+	for _, event := range events {
+		if event.Type == EventContentDelta {
+			foundDelta = true
+			// For non-text delta types, text should be empty
+			if event.Text != "" {
+				t.Errorf("expected empty text for non-text delta type, got '%s'", event.Text)
+			}
+		}
+	}
+
+	if !foundDelta {
+		t.Error("expected to find content_delta event")
+	}
+}
+
+func TestCreateMessageStream_DefaultModelAndMaxTokens(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify request has defaults applied
+		var reqBody map[string]any
+		json.NewDecoder(r.Body).Decode(&reqBody)
+
+		if reqBody["model"] != "claude-sonnet-4-20250514" {
+			t.Errorf("expected default model, got %v", reqBody["model"])
+		}
+		if reqBody["max_tokens"] != float64(4096) {
+			t.Errorf("expected default max_tokens 4096, got %v", reqBody["max_tokens"])
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("expected http.ResponseWriter to be an http.Flusher")
+		}
+
+		w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_000\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-20250514\",\"stop_reason\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n"))
+		flusher.Flush()
+
+		w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	client := &AnthropicClient{
+		client: anthropic.NewClient(
+			option.WithAPIKey("test-key"),
+			option.WithBaseURL(server.URL),
+		),
+		model: "claude-sonnet-4-20250514",
+	}
+
+	ctx := context.Background()
+	req := &Request{
+		Messages: []Message{NewUserMessage("Test")},
+		// Model and MaxTokens intentionally omitted
+	}
+
+	eventChan, err := client.CreateMessageStream(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected error creating stream: %v", err)
+	}
+
+	// Consume events
+	for range eventChan {
+		// Just drain the channel
+	}
+}
+
+func TestCreateMessageStream_EmptyStream(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// Send no events, just close
+	}))
+	defer server.Close()
+
+	client := &AnthropicClient{
+		client: anthropic.NewClient(
+			option.WithAPIKey("test-key"),
+			option.WithBaseURL(server.URL),
+		),
+		model: "claude-sonnet-4-20250514",
+	}
+
+	ctx := context.Background()
+	req := &Request{
+		Messages: []Message{NewUserMessage("Test")},
+	}
+
+	eventChan, err := client.CreateMessageStream(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected error creating stream: %v", err)
+	}
+
+	// Collect events (should be empty or just close)
+	var events []StreamEvent
+	for event := range eventChan {
+		events = append(events, event)
+	}
+
+	// Empty stream is acceptable, just verify we don't panic
+	t.Logf("Got %d events from empty stream", len(events))
+}
+
+func TestCreateMessageStream_MessageDeltaOnly(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("expected http.ResponseWriter to be an http.Flusher")
+		}
+
+		// Send just message_delta and message_stop without content
+		w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_111\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-20250514\",\"stop_reason\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n"))
+		flusher.Flush()
+
+		w.Write([]byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":0}}\n\n"))
+		flusher.Flush()
+
+		w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	client := &AnthropicClient{
+		client: anthropic.NewClient(
+			option.WithAPIKey("test-key"),
+			option.WithBaseURL(server.URL),
+		),
+		model: "claude-sonnet-4-20250514",
+	}
+
+	ctx := context.Background()
+	req := &Request{
+		Messages: []Message{NewUserMessage("Test")},
+	}
+
+	eventChan, err := client.CreateMessageStream(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected error creating stream: %v", err)
+	}
+
+	var events []StreamEvent
+	for event := range eventChan {
+		events = append(events, event)
+		if event.Type == EventError {
+			t.Fatalf("unexpected error event: %v", event.Error)
+		}
+	}
+
+	// Verify we got message_start, message_delta, and message_stop
+	expectedTypes := []EventType{EventMessageStart, EventMessageDelta, EventMessageStop}
+	if len(events) != len(expectedTypes) {
+		t.Fatalf("expected %d events, got %d", len(expectedTypes), len(events))
+	}
+
+	for i, expected := range expectedTypes {
+		if events[i].Type != expected {
+			t.Errorf("event %d: expected %s, got %s", i, expected, events[i].Type)
+		}
+	}
+}

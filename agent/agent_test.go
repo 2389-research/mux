@@ -28,12 +28,13 @@ func (m *mockClient) CreateMessageStream(ctx context.Context, req *llm.Request) 
 
 // mockTool implements tool.Tool for testing
 type mockTool struct {
-	name string
+	name             string
+	requiresApproval bool
 }
 
 func (m *mockTool) Name() string                                { return m.name }
 func (m *mockTool) Description() string                         { return "mock" }
-func (m *mockTool) RequiresApproval(params map[string]any) bool { return false }
+func (m *mockTool) RequiresApproval(params map[string]any) bool { return m.requiresApproval }
 func (m *mockTool) Execute(ctx context.Context, params map[string]any) (*tool.Result, error) {
 	return tool.NewResult(m.name, true, "ok", ""), nil
 }
@@ -59,6 +60,267 @@ func TestNewAgent(t *testing.T) {
 	}
 	if a.ID() != "test-agent" {
 		t.Errorf("expected ID test-agent, got %s", a.ID())
+	}
+}
+
+func TestNewAgentPanicsOnNilRegistry(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic with nil registry")
+		}
+	}()
+
+	client := &mockClient{
+		response: &llm.Response{
+			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "hello"}},
+		},
+	}
+
+	agent.New(agent.Config{
+		Name:      "test-agent",
+		Registry:  nil,
+		LLMClient: client,
+	})
+}
+
+func TestNewAgentPanicsOnNilClient(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic with nil LLMClient")
+		}
+	}()
+
+	registry := tool.NewRegistry()
+
+	agent.New(agent.Config{
+		Name:      "test-agent",
+		Registry:  registry,
+		LLMClient: nil,
+	})
+}
+
+func TestNewAgentPanicsOnEmptyName(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic with empty name")
+		}
+	}()
+
+	registry := tool.NewRegistry()
+	client := &mockClient{
+		response: &llm.Response{
+			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "hello"}},
+		},
+	}
+
+	agent.New(agent.Config{
+		Name:      "",
+		Registry:  registry,
+		LLMClient: client,
+	})
+}
+
+func TestNewAgentWithMaxIterations(t *testing.T) {
+	registry := tool.NewRegistry()
+	client := &mockClient{
+		response: &llm.Response{
+			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "hello"}},
+		},
+	}
+
+	a := agent.New(agent.Config{
+		Name:          "test-agent",
+		Registry:      registry,
+		LLMClient:     client,
+		MaxIterations: 50,
+	})
+
+	if a == nil {
+		t.Fatal("expected non-nil agent")
+	}
+
+	// Verify config stores MaxIterations
+	cfg := a.Config()
+	if cfg.MaxIterations != 50 {
+		t.Errorf("expected MaxIterations 50, got %d", cfg.MaxIterations)
+	}
+}
+
+func TestNewAgentWithCustomApprovalFunc(t *testing.T) {
+	registry := tool.NewRegistry()
+	registry.Register(&mockTool{name: "dangerous_tool", requiresApproval: true})
+
+	client := &mockClient{
+		response: &llm.Response{
+			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "hello"}},
+		},
+	}
+
+	approvalCalled := false
+	approvalFunc := func(ctx context.Context, t tool.Tool, params map[string]any) (bool, error) {
+		approvalCalled = true
+		return false, nil // Deny all tools
+	}
+
+	a := agent.New(agent.Config{
+		Name:         "test-agent",
+		Registry:     registry,
+		LLMClient:    client,
+		ApprovalFunc: approvalFunc,
+	})
+
+	if a == nil {
+		t.Fatal("expected non-nil agent")
+	}
+
+	// Execute a tool to verify approval func is set
+	ctx := context.Background()
+	_, err := a.Executor().Execute(ctx, "dangerous_tool", nil)
+
+	// Should fail because approval func denies
+	if err == nil {
+		t.Error("expected error due to approval denial")
+	}
+
+	if !approvalCalled {
+		t.Error("approval func was not called")
+	}
+}
+
+func TestInitWithAllowedTools(t *testing.T) {
+	registry := tool.NewRegistry()
+	registry.Register(&mockTool{name: "read_file"})
+	registry.Register(&mockTool{name: "write_file"})
+	registry.Register(&mockTool{name: "bash"})
+
+	client := &mockClient{
+		response: &llm.Response{
+			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "hello"}},
+		},
+	}
+
+	a := agent.New(agent.Config{
+		Name:         "test-agent",
+		Registry:     registry,
+		LLMClient:    client,
+		AllowedTools: []string{"read_file", "write_file"},
+	})
+
+	if a == nil {
+		t.Fatal("expected non-nil agent")
+	}
+
+	// Verify allowed tools are set
+	cfg := a.Config()
+	if len(cfg.AllowedTools) != 2 {
+		t.Errorf("expected 2 allowed tools, got %d", len(cfg.AllowedTools))
+	}
+}
+
+func TestInitWithDeniedTools(t *testing.T) {
+	registry := tool.NewRegistry()
+	registry.Register(&mockTool{name: "read_file"})
+	registry.Register(&mockTool{name: "dangerous_tool"})
+
+	client := &mockClient{
+		response: &llm.Response{
+			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "hello"}},
+		},
+	}
+
+	a := agent.New(agent.Config{
+		Name:        "test-agent",
+		Registry:    registry,
+		LLMClient:   client,
+		DeniedTools: []string{"dangerous_tool"},
+	})
+
+	if a == nil {
+		t.Fatal("expected non-nil agent")
+	}
+
+	// Verify denied tools are set
+	cfg := a.Config()
+	if len(cfg.DeniedTools) != 1 {
+		t.Errorf("expected 1 denied tool, got %d", len(cfg.DeniedTools))
+	}
+}
+
+func TestInitWithCustomSystemPrompt(t *testing.T) {
+	registry := tool.NewRegistry()
+	client := &mockClient{
+		response: &llm.Response{
+			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "hello"}},
+		},
+	}
+
+	customPrompt := "You are a specialized agent for testing."
+
+	a := agent.New(agent.Config{
+		Name:         "test-agent",
+		Registry:     registry,
+		LLMClient:    client,
+		SystemPrompt: customPrompt,
+	})
+
+	if a == nil {
+		t.Fatal("expected non-nil agent")
+	}
+
+	// Verify system prompt is set
+	cfg := a.Config()
+	if cfg.SystemPrompt != customPrompt {
+		t.Errorf("expected SystemPrompt %q, got %q", customPrompt, cfg.SystemPrompt)
+	}
+}
+
+func TestInitWithAllConfigOptions(t *testing.T) {
+	registry := tool.NewRegistry()
+	registry.Register(&mockTool{name: "read_file"})
+	registry.Register(&mockTool{name: "write_file"})
+	registry.Register(&mockTool{name: "bash"})
+
+	client := &mockClient{
+		response: &llm.Response{
+			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "hello"}},
+		},
+	}
+
+	approvalFunc := func(ctx context.Context, t tool.Tool, params map[string]any) (bool, error) {
+		return true, nil
+	}
+
+	a := agent.New(agent.Config{
+		Name:          "test-agent",
+		Registry:      registry,
+		LLMClient:     client,
+		AllowedTools:  []string{"read_file", "write_file"},
+		DeniedTools:   []string{"bash"},
+		MaxIterations: 100,
+		SystemPrompt:  "Custom system prompt",
+		ApprovalFunc:  approvalFunc,
+	})
+
+	if a == nil {
+		t.Fatal("expected non-nil agent")
+	}
+
+	// Verify all config options are set
+	cfg := a.Config()
+	if len(cfg.AllowedTools) != 2 {
+		t.Errorf("expected 2 allowed tools, got %d", len(cfg.AllowedTools))
+	}
+	if len(cfg.DeniedTools) != 1 {
+		t.Errorf("expected 1 denied tool, got %d", len(cfg.DeniedTools))
+	}
+	if cfg.MaxIterations != 100 {
+		t.Errorf("expected MaxIterations 100, got %d", cfg.MaxIterations)
+	}
+	if cfg.SystemPrompt != "Custom system prompt" {
+		t.Errorf("expected custom system prompt, got %q", cfg.SystemPrompt)
+	}
+	if cfg.ApprovalFunc == nil {
+		t.Error("expected ApprovalFunc to be set")
 	}
 }
 
