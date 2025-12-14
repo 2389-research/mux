@@ -4,6 +4,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"github.com/2389-research/mux/orchestrator"
@@ -86,4 +87,97 @@ func (a *Agent) Parent() *Agent {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.parent
+}
+
+var (
+	ErrInvalidChildTools = errors.New("child cannot have tools parent doesn't have")
+)
+
+// SpawnChild creates a child agent with inherited configuration.
+// Child tools are restricted to parent's allowed tools.
+// Child denied tools accumulate (union of parent and child denied).
+func (a *Agent) SpawnChild(cfg Config) (*Agent, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	// Inherit registry if not specified
+	if cfg.Registry == nil {
+		cfg.Registry = a.config.Registry
+	}
+
+	// Inherit LLM client if not specified
+	if cfg.LLMClient == nil {
+		cfg.LLMClient = a.config.LLMClient
+	}
+
+	// Empty AllowedTools = inherit parent's allowed tools
+	if len(cfg.AllowedTools) == 0 {
+		cfg.AllowedTools = make([]string, len(a.config.AllowedTools))
+		copy(cfg.AllowedTools, a.config.AllowedTools)
+	} else {
+		// Validate child tools are subset of parent tools (if parent has restrictions)
+		if len(a.config.AllowedTools) > 0 {
+			if err := a.validateChildTools(cfg.AllowedTools); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// Merge denied tools (union)
+	cfg.DeniedTools = unionStrings(a.config.DeniedTools, cfg.DeniedTools)
+
+	child := &Agent{
+		id:       a.id + "." + cfg.Name,
+		config:   cfg,
+		parent:   a,
+		children: make([]*Agent, 0),
+	}
+	child.init()
+
+	a.children = append(a.children, child)
+	return child, nil
+}
+
+// validateChildTools ensures child's tools are a subset of parent's allowed tools.
+func (a *Agent) validateChildTools(childTools []string) error {
+	parentSet := make(map[string]bool)
+	for _, t := range a.config.AllowedTools {
+		parentSet[t] = true
+	}
+
+	for _, t := range childTools {
+		if !parentSet[t] {
+			return ErrInvalidChildTools
+		}
+	}
+	return nil
+}
+
+// unionStrings returns the union of two string slices without duplicates.
+func unionStrings(a, b []string) []string {
+	seen := make(map[string]bool)
+	result := make([]string, 0, len(a)+len(b))
+
+	for _, s := range a {
+		if !seen[s] {
+			seen[s] = true
+			result = append(result, s)
+		}
+	}
+	for _, s := range b {
+		if !seen[s] {
+			seen[s] = true
+			result = append(result, s)
+		}
+	}
+	return result
+}
+
+// Children returns the list of child agents.
+func (a *Agent) Children() []*Agent {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	children := make([]*Agent, len(a.children))
+	copy(children, a.children)
+	return children
 }
