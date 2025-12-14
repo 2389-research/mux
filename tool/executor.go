@@ -32,7 +32,11 @@ type Executor struct {
 }
 
 // NewExecutor creates a new Executor with the given Registry.
+// Panics if registry is nil.
 func NewExecutor(registry *Registry) *Executor {
+	if registry == nil {
+		panic("mux: registry must not be nil")
+	}
 	return &Executor{
 		registry:    registry,
 		beforeHooks: make([]BeforeHook, 0),

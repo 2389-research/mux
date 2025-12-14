@@ -159,6 +159,9 @@ func (c *Client) send(req *Request) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if !c.running {
+		return fmt.Errorf("client closed")
+	}
 	_, err = c.stdin.Write(append(data, '\n'))
 	return err
 }
