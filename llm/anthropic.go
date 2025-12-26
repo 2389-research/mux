@@ -134,7 +134,10 @@ func convertResponse(msg *anthropic.Message) *Response {
 			// Unmarshal the raw JSON input to map[string]any
 			var input map[string]any
 			if block.Input != nil {
-				json.Unmarshal(block.Input, &input) //nolint:errcheck // best-effort parse
+				if err := json.Unmarshal(block.Input, &input); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to parse tool input for %s: %v\n", block.Name, err)
+					input = make(map[string]any)
+				}
 			}
 			resp.Content = append(resp.Content, ContentBlock{
 				Type:  ContentTypeToolUse,

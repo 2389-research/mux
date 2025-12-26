@@ -272,7 +272,10 @@ func (o *OpenAIClient) CreateMessageStream(ctx context.Context, req *Request) (<
 			// Check for completed tool calls
 			if toolCall, ok := acc.JustFinishedToolCall(); ok {
 				var input map[string]any
-				json.Unmarshal([]byte(toolCall.Arguments), &input) //nolint:errcheck // best-effort parse
+				if err := json.Unmarshal([]byte(toolCall.Arguments), &input); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to parse tool call arguments for %s: %v\n", toolCall.Name, err)
+					input = make(map[string]any)
+				}
 
 				eventChan <- StreamEvent{
 					Type: EventContentStop,
