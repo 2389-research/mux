@@ -6,6 +6,7 @@ toolchain go1.24.11
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.19.0
+	github.com/joho/godotenv v1.5.1
 	github.com/openai/openai-go v1.12.0
 )
 

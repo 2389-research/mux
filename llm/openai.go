@@ -37,7 +37,8 @@ func convertOpenAIRequest(req *Request) openai.ChatCompletionNewParams {
 	}
 
 	if req.MaxTokens > 0 {
-		params.MaxTokens = openai.Int(int64(req.MaxTokens))
+		// Use MaxCompletionTokens for newer models (gpt-5.x, o1, etc.)
+		params.MaxCompletionTokens = openai.Int(int64(req.MaxTokens))
 	}
 
 	if req.Temperature != nil {

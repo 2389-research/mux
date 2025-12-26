@@ -1,5 +1,5 @@
 // ABOUTME: Minimal mux example - a simple agent with one tool.
-// ABOUTME: Run with: ANTHROPIC_API_KEY=xxx go run main.go (or OPENAI_API_KEY=xxx)
+// ABOUTME: Run with: go run main.go (uses .env file or ANTHROPIC_API_KEY/OPENAI_API_KEY env vars)
 package main
 
 import (
@@ -13,7 +13,13 @@ import (
 	"github.com/2389-research/mux/llm"
 	"github.com/2389-research/mux/orchestrator"
 	"github.com/2389-research/mux/tool"
+	"github.com/joho/godotenv"
 )
+
+func init() {
+	// Load .env file if it exists (silent fail if not present)
+	godotenv.Load()
+}
 
 // CalculatorTool does simple math.
 type CalculatorTool struct{}
