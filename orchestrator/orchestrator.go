@@ -5,6 +5,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/2389-research/mux/llm"
 	"github.com/2389-research/mux/tool"
@@ -31,6 +32,7 @@ type Orchestrator struct {
 	config   Config
 	state    *StateMachine
 	eventBus *EventBus
+	mu       sync.Mutex
 	messages []llm.Message
 }
 
@@ -68,7 +70,11 @@ func (o *Orchestrator) State() State {
 }
 
 // Run executes the think-act loop with the given prompt.
+// The orchestrator is not safe for concurrent Run() calls on the same instance.
 func (o *Orchestrator) Run(ctx context.Context, prompt string) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
 	o.state.Reset()
 	o.messages = []llm.Message{llm.NewUserMessage(prompt)}
 	defer o.eventBus.Close()
