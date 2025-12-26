@@ -18,8 +18,8 @@ import (
 // CalculatorTool does simple math.
 type CalculatorTool struct{}
 
-func (t *CalculatorTool) Name() string        { return "calculator" }
-func (t *CalculatorTool) Description() string { return "Add two numbers" }
+func (t *CalculatorTool) Name() string                         { return "calculator" }
+func (t *CalculatorTool) Description() string                  { return "Add two numbers" }
 func (t *CalculatorTool) RequiresApproval(map[string]any) bool { return false }
 func (t *CalculatorTool) Execute(_ context.Context, p map[string]any) (*tool.Result, error) {
 	a, _ := p["a"].(float64)

@@ -565,7 +565,7 @@ func TestAnthropicClient_StreamServerError(t *testing.T) {
 
 func TestConvertRequest_ComplexMessageBlocks(t *testing.T) {
 	req := &Request{
-		Model:    "claude-sonnet-4-20250514",
+		Model: "claude-sonnet-4-20250514",
 		Messages: []Message{
 			{
 				Role: RoleUser,
@@ -700,7 +700,7 @@ func TestCreateMessageStream_SuccessfulTextStream(t *testing.T) {
 	}
 
 	// Collect all events
-	var events []StreamEvent
+	var events []StreamEvent //nolint:prealloc // size unknown in tests
 	for event := range eventChan {
 		events = append(events, event)
 		if event.Type == EventError {
@@ -831,7 +831,7 @@ func TestCreateMessageStream_WithToolUse(t *testing.T) {
 	}
 
 	// Collect all events
-	var events []StreamEvent
+	var events []StreamEvent //nolint:prealloc // size unknown in tests
 	for event := range eventChan {
 		events = append(events, event)
 		if event.Type == EventError {
@@ -923,7 +923,7 @@ func TestCreateMessageStream_ContentDeltaNonTextType(t *testing.T) {
 	}
 
 	// Collect all events
-	var events []StreamEvent
+	var events []StreamEvent //nolint:prealloc // size unknown in tests
 	for event := range eventChan {
 		events = append(events, event)
 		if event.Type == EventError {
@@ -1026,7 +1026,7 @@ func TestCreateMessageStream_EmptyStream(t *testing.T) {
 	}
 
 	// Collect events (should be empty or just close)
-	var events []StreamEvent
+	var events []StreamEvent //nolint:prealloc // size unknown in tests
 	for event := range eventChan {
 		events = append(events, event)
 	}
@@ -1073,7 +1073,7 @@ func TestCreateMessageStream_MessageDeltaOnly(t *testing.T) {
 		t.Fatalf("unexpected error creating stream: %v", err)
 	}
 
-	var events []StreamEvent
+	var events []StreamEvent //nolint:prealloc // size unknown in tests
 	for event := range eventChan {
 		events = append(events, event)
 		if event.Type == EventError {

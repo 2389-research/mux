@@ -134,7 +134,7 @@ func convertResponse(msg *anthropic.Message) *Response {
 			// Unmarshal the raw JSON input to map[string]any
 			var input map[string]any
 			if block.Input != nil {
-				json.Unmarshal(block.Input, &input)
+				json.Unmarshal(block.Input, &input) //nolint:errcheck // best-effort parse
 			}
 			resp.Content = append(resp.Content, ContentBlock{
 				Type:  ContentTypeToolUse,

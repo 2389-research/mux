@@ -46,7 +46,8 @@ func (c *Client) Start(ctx context.Context) error {
 		return fmt.Errorf("client already running")
 	}
 
-	c.cmd = exec.CommandContext(ctx, c.config.Command, c.config.Args...)
+	// MCP servers are configured by the user, command execution is intentional
+	c.cmd = exec.CommandContext(ctx, c.config.Command, c.config.Args...) //nolint:gosec // G204: intentional - MCP servers are user-configured
 	for k, v := range c.config.Env {
 		c.cmd.Env = append(c.cmd.Env, fmt.Sprintf("%s=%s", k, v))
 	}

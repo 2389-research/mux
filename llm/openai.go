@@ -272,7 +272,7 @@ func (o *OpenAIClient) CreateMessageStream(ctx context.Context, req *Request) (<
 			// Check for completed tool calls
 			if toolCall, ok := acc.JustFinishedToolCall(); ok {
 				var input map[string]any
-				json.Unmarshal([]byte(toolCall.Arguments), &input)
+				json.Unmarshal([]byte(toolCall.Arguments), &input) //nolint:errcheck // best-effort parse
 
 				eventChan <- StreamEvent{
 					Type: EventContentStop,

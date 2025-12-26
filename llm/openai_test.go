@@ -239,8 +239,8 @@ func TestOpenAIClient_ConnectionRefused(t *testing.T) {
 
 func TestConvertOpenAIRequest_SystemPrompt(t *testing.T) {
 	req := &Request{
-		Model:   "gpt-5.2",
-		System:  "You are a helpful assistant.",
+		Model:  "gpt-5.2",
+		System: "You are a helpful assistant.",
 		Messages: []Message{
 			{Role: RoleUser, Content: "Hello"},
 		},

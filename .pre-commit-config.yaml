@@ -1,0 +1,73 @@
+# Pre-commit hooks for Clem
+# See https://pre-commit.com for more information
+
+repos:
+  # Go tools as local hooks (more reliable)
+  - repo: local
+    hooks:
+      - id: go-fmt
+        name: go fmt
+        description: Run go fmt to format Go code
+        entry: go fmt
+        args: ["./..."]
+        language: system
+        pass_filenames: false
+
+      - id: go-vet
+        name: go vet
+        description: Run go vet to check for suspicious constructs
+        entry: go vet
+        args: ["./..."]
+        language: system
+        pass_filenames: false
+
+      - id: go-test
+        name: go test
+        description: Run go test for all packages (short mode with race detection)
+        entry: go test
+        args: ["-race", "-short", "-timeout=120s", "./..."]
+        language: system
+        pass_filenames: false
+
+      - id: go-mod-tidy
+        name: go mod tidy
+        description: Ensure go.mod and go.sum are up to date
+        entry: go mod tidy
+        language: system
+        pass_filenames: false
+
+      - id: golangci-lint
+        name: golangci-lint
+        description: Run golangci-lint with project config
+        entry: golangci-lint
+        args: ["run", "--config=.golangci.yml"]
+        language: system
+        pass_filenames: false
+
+  # General file checks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+        name: trim trailing whitespace
+        description: Trim trailing whitespace
+        exclude: ^test-react/
+
+      - id: end-of-file-fixer
+        name: fix end of files
+        description: Ensure files end with a newline
+        exclude: ^test-react/
+
+      - id: check-yaml
+        name: check yaml
+        description: Check YAML syntax
+
+      - id: check-added-large-files
+        name: check for large files
+        description: Prevent committing large files
+        args: ["--maxkb=1000"]
+        exclude: ^test-react/
+
+      - id: check-merge-conflict
+        name: check merge conflicts
+        description: Check for merge conflict markers

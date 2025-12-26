@@ -46,6 +46,7 @@ func (a *ToolAdapter) RequiresApproval(params map[string]any) bool { return true
 // When CallTool fails (network error, timeout, etc), we return BOTH:
 //   - An error result object (for consistent tool.Result handling)
 //   - The actual error (for proper error propagation)
+//
 // This dual return allows callers to either handle the error directly OR
 // use the Result object uniformly with other tool results.
 func (a *ToolAdapter) Execute(ctx context.Context, params map[string]any) (*tool.Result, error) {

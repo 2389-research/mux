@@ -1,0 +1,118 @@
+version: "2"
+run:
+  modules-download-mode: readonly
+linters:
+  enable:
+    - bodyclose
+    - copyloopvar
+    - gosec
+    - misspell
+    - prealloc
+    - revive
+    - unconvert
+    - unparam
+  settings:
+    errcheck:
+      check-type-assertions: false
+      check-blank: true
+    gosec:
+      excludes:
+        - G101
+        - G104
+        - G602
+    govet:
+      disable:
+        - fieldalignment
+        - shadow
+      enable-all: true
+    revive:
+      rules:
+        - name: var-naming
+          severity: warning
+          disabled: false
+        - name: unexported-return
+          severity: warning
+          disabled: false
+        - name: exported
+          severity: warning
+          disabled: true
+        - name: package-comments
+          disabled: true
+        - name: indent-error-flow
+          disabled: true
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - errcheck
+          - gosec
+          - govet
+          - unparam
+        path: .*_test\.go$
+      - linters:
+          - all
+        path: (^|\/)vendor\/
+      - linters:
+          - errcheck
+        text: Error return value of `godotenv.Load` is not checked
+      - linters:
+          - errcheck
+        text: Error return value of `v.BindEnv` is not checked
+      - linters:
+          - errcheck
+        text: Error return value of `tx.Rollback` is not checked
+      - linters:
+          - errcheck
+        text: Error return value of `tmpl.Execute` is not checked
+      - linters:
+          - errcheck
+        text: Error return value of `.*(Shutdown|Stop|Close|Kill|Remove|Wait).*` is not checked
+      - linters:
+          - errcheck
+        text: Error return value of `r.RegisterAction` is not checked
+      - linters:
+          - errcheck
+        text: Error return value of `json.Marshal` is not checked
+      - linters:
+          - errcheck
+        path: internal/providers/gmail/
+      - linters:
+          - errcheck
+        path: internal/providers/oauth/
+      - linters:
+          - errcheck
+        path: cmd/jeff/wizard.go
+      - linters:
+          - errcheck
+        text: Error return value of `io.ReadAll` is not checked
+      - linters:
+          - unused
+        text: func generateMonthCalendar is unused
+      - linters:
+          - staticcheck
+        text: "QF1003:"
+      - linters:
+          - unparam
+        path: internal/tools/weather_tool.go
+      - linters:
+          - errcheck
+        text: Error return value of `m.approvalRules.Set(Always|Never)Allow` is not checked
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

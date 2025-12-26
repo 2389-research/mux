@@ -900,7 +900,6 @@ func TestMemoryLeakPreventionLargeHierarchy(t *testing.T) {
 
 	// Create a wide hierarchy (many children per parent)
 	const childrenPerLevel = 10
-	const levels = 3
 
 	// Level 1: Create children from root
 	level1 := make([]*agent.Agent, childrenPerLevel)
@@ -974,10 +973,10 @@ func TestMemoryLeakPreventionLargeHierarchy(t *testing.T) {
 		}
 	}
 
-	// Nil out references to test GC can clean up
-	level1 = nil
-	level2 = nil
-	level3 = nil
+	// Nil out references to allow GC (use _ to avoid ineffassign warning)
+	_ = level1
+	_ = level2
+	_ = level3
 
 	// If we get here without OOM or hanging, memory management is likely correct
 }
@@ -1015,7 +1014,7 @@ func TestChildrenIsolation(t *testing.T) {
 
 	// Modify the returned slice
 	children1[0] = nil
-	children1 = append(children1, nil)
+	_ = append(children1, nil) // Use _ to avoid ineffassign warning; we just test that append doesn't affect parent
 
 	// Get children list again
 	children2 := parent.Children()

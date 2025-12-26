@@ -170,7 +170,7 @@ func (o *Orchestrator) executeTools(ctx context.Context, toolUses []llm.ContentB
 		return err
 	}
 
-	var resultBlocks []llm.ContentBlock
+	resultBlocks := make([]llm.ContentBlock, 0, len(toolUses))
 	for _, use := range toolUses {
 		// Check context before each tool execution to handle cancellation during long-running operations
 		select {
@@ -213,7 +213,7 @@ func (o *Orchestrator) transition(to State) error {
 }
 
 func (o *Orchestrator) handleError(err error) error {
-	o.state.Transition(StateError)
+	o.state.Transition(StateError) //nolint:errcheck // best-effort transition to error state
 	o.eventBus.Publish(NewErrorEvent(err))
 	return err
 }

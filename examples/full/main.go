@@ -22,8 +22,8 @@ import (
 // ReadTool simulates reading a file.
 type ReadTool struct{}
 
-func (t *ReadTool) Name() string        { return "read_file" }
-func (t *ReadTool) Description() string { return "Read a file: {\"path\": \"file.txt\"}" }
+func (t *ReadTool) Name() string                         { return "read_file" }
+func (t *ReadTool) Description() string                  { return "Read a file: {\"path\": \"file.txt\"}" }
 func (t *ReadTool) RequiresApproval(map[string]any) bool { return false }
 func (t *ReadTool) Execute(_ context.Context, p map[string]any) (*tool.Result, error) {
 	path, _ := p["path"].(string)
@@ -35,8 +35,10 @@ type WriteTool struct {
 	coord *coordinator.Coordinator
 }
 
-func (t *WriteTool) Name() string        { return "write_file" }
-func (t *WriteTool) Description() string { return "Write a file: {\"path\": \"file.txt\", \"content\": \"...\"}" }
+func (t *WriteTool) Name() string { return "write_file" }
+func (t *WriteTool) Description() string {
+	return "Write a file: {\"path\": \"file.txt\", \"content\": \"...\"}"
+}
 func (t *WriteTool) RequiresApproval(map[string]any) bool { return true } // Requires approval!
 func (t *WriteTool) Execute(ctx context.Context, p map[string]any) (*tool.Result, error) {
 	path, _ := p["path"].(string)
@@ -47,7 +49,7 @@ func (t *WriteTool) Execute(ctx context.Context, p map[string]any) (*tool.Result
 		if err := t.coord.Acquire(ctx, "main", path); err != nil {
 			return tool.NewResult("write_file", false, "", fmt.Sprintf("Lock failed: %v", err)), nil
 		}
-		defer t.coord.Release("main", path)
+		defer func() { t.coord.Release("main", path) }() //nolint:errcheck // best-effort release
 	}
 
 	return tool.NewResult("write_file", true, fmt.Sprintf("Wrote %d bytes to %s", len(content), path), ""), nil
@@ -58,8 +60,8 @@ type SearchTool struct {
 	cache *coordinator.Cache
 }
 
-func (t *SearchTool) Name() string        { return "search" }
-func (t *SearchTool) Description() string { return "Search for info: {\"query\": \"...\"}" }
+func (t *SearchTool) Name() string                         { return "search" }
+func (t *SearchTool) Description() string                  { return "Search for info: {\"query\": \"...\"}" }
 func (t *SearchTool) RequiresApproval(map[string]any) bool { return false }
 func (t *SearchTool) Execute(_ context.Context, p map[string]any) (*tool.Result, error) {
 	query, _ := p["query"].(string)
@@ -113,17 +115,21 @@ func main() {
 		ApprovalFunc: func(_ context.Context, t tool.Tool, _ map[string]any) (bool, error) {
 			fmt.Printf("\n⚠️  Tool '%s' requires approval. Allow? [y/N] ", t.Name())
 			var response string
-			fmt.Scanln(&response)
+			fmt.Scanln(&response) //nolint:errcheck // user input, ignore scan errors
 			return strings.ToLower(response) == "y", nil
 		},
 	})
 
 	// Create a restricted child agent (read-only)
-	readOnlyAgent, _ := rootAgent.SpawnChild(agent.Config{
+	readOnlyAgent, err := rootAgent.SpawnChild(agent.Config{
 		Name:         "reader",
 		AllowedTools: []string{"read_file", "search"}, // No write_file!
 		SystemPrompt: "You are a read-only assistant. You can read and search but not write.",
 	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to spawn child: %v\n", err)
+		os.Exit(1)
+	}
 
 	fmt.Println("Full mux example with coordinator features.")
 	fmt.Println("Commands: /root, /reader, /status, quit")
