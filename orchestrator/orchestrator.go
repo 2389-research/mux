@@ -5,6 +5,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 
 	"github.com/2389-research/mux/llm"
@@ -12,6 +13,9 @@ import (
 )
 
 const DefaultMaxIterations = 50
+
+// warnedSchemaTools tracks tools we've warned about missing schemas (to avoid spam)
+var warnedSchemaTools sync.Map
 
 // Config holds orchestrator configuration.
 type Config struct {
@@ -147,6 +151,12 @@ func (o *Orchestrator) buildToolDefinitions() []llm.ToolDefinition {
 		// If the tool provides a schema, use it
 		if sp, ok := t.(tool.SchemaProvider); ok {
 			def.InputSchema = sp.InputSchema()
+		} else {
+			// Warn about tools without schemas - LLM won't know what parameters to use
+			// Only warn once per tool name to avoid log spam
+			if _, warned := warnedSchemaTools.LoadOrStore(t.Name(), true); !warned {
+				fmt.Fprintf(os.Stderr, "Warning: tool %q has no InputSchema - LLM may not call it correctly. Implement tool.SchemaProvider to fix.\n", t.Name())
+			}
 		}
 		definitions = append(definitions, def)
 	}
