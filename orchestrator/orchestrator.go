@@ -73,14 +73,41 @@ func (o *Orchestrator) State() State {
 	return o.state.Current()
 }
 
+// Messages returns a copy of the current conversation history.
+func (o *Orchestrator) Messages() []llm.Message {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	result := make([]llm.Message, len(o.messages))
+	copy(result, o.messages)
+	return result
+}
+
+// SetMessages sets the conversation history.
+// Use this to restore conversation state from persistence.
+func (o *Orchestrator) SetMessages(messages []llm.Message) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.messages = make([]llm.Message, len(messages))
+	copy(o.messages, messages)
+}
+
+// ClearMessages resets the conversation history.
+func (o *Orchestrator) ClearMessages() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.messages = nil
+}
+
 // Run executes the think-act loop with the given prompt.
+// The prompt is appended to existing conversation history, enabling multi-turn conversations.
 // The orchestrator is not safe for concurrent Run() calls on the same instance.
 func (o *Orchestrator) Run(ctx context.Context, prompt string) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
 	o.state.Reset()
-	o.messages = []llm.Message{llm.NewUserMessage(prompt)}
+	// Append to existing conversation instead of replacing
+	o.messages = append(o.messages, llm.NewUserMessage(prompt))
 	// Reset at END instead of Close - allows orchestrator reuse
 	defer o.eventBus.Reset()
 

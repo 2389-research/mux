@@ -7,6 +7,7 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/2389-research/mux/llm"
 	"github.com/2389-research/mux/orchestrator"
 	"github.com/2389-research/mux/tool"
 )
@@ -90,6 +91,22 @@ func (a *Agent) Run(ctx context.Context, prompt string) error {
 // Subscribe returns a channel for receiving orchestrator events.
 func (a *Agent) Subscribe() <-chan orchestrator.Event {
 	return a.orch.Subscribe()
+}
+
+// Messages returns the current conversation history.
+func (a *Agent) Messages() []llm.Message {
+	return a.orch.Messages()
+}
+
+// SetMessages sets the conversation history.
+// Use this to restore conversation state from persistence.
+func (a *Agent) SetMessages(messages []llm.Message) {
+	a.orch.SetMessages(messages)
+}
+
+// ClearMessages resets the conversation history.
+func (a *Agent) ClearMessages() {
+	a.orch.ClearMessages()
 }
 
 // Config returns a copy of the agent's configuration.
