@@ -99,18 +99,41 @@ func (o *Orchestrator) ClearMessages() {
 }
 
 // Run executes the think-act loop with the given prompt.
-// The prompt is appended to existing conversation history, enabling multi-turn conversations.
+// Each call starts fresh with only the new prompt (no conversation history).
+// Use Continue() for multi-turn conversations that preserve history.
 // The orchestrator is not safe for concurrent Run() calls on the same instance.
 func (o *Orchestrator) Run(ctx context.Context, prompt string) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
 	o.state.Reset()
-	// Append to existing conversation instead of replacing
+	// Fresh start - replace any existing messages
+	o.messages = []llm.Message{llm.NewUserMessage(prompt)}
+	// Reset at END instead of Close - allows orchestrator reuse
+	defer o.eventBus.Reset()
+
+	return o.runLoop(ctx, prompt)
+}
+
+// Continue appends the prompt to existing conversation history and runs the think-act loop.
+// Use this for multi-turn conversations where the agent should remember previous exchanges.
+// Use SetMessages() to restore history from persistence before calling Continue().
+// The orchestrator is not safe for concurrent calls on the same instance.
+func (o *Orchestrator) Continue(ctx context.Context, prompt string) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	o.state.Reset()
+	// Append to existing conversation history
 	o.messages = append(o.messages, llm.NewUserMessage(prompt))
 	// Reset at END instead of Close - allows orchestrator reuse
 	defer o.eventBus.Reset()
 
+	return o.runLoop(ctx, prompt)
+}
+
+// runLoop executes the core think-act loop. Must be called with mutex held.
+func (o *Orchestrator) runLoop(ctx context.Context, prompt string) error {
 	for i := 0; i < o.config.MaxIterations; i++ {
 		// Check context at start of each iteration
 		select {

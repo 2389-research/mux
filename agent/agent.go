@@ -84,8 +84,17 @@ func (a *Agent) init() {
 }
 
 // Run executes the agent's think-act loop with the given prompt.
+// Each call starts fresh with only the new prompt (no conversation history).
+// Use Continue() for multi-turn conversations that preserve history.
 func (a *Agent) Run(ctx context.Context, prompt string) error {
 	return a.orch.Run(ctx, prompt)
+}
+
+// Continue appends the prompt to existing conversation history and runs the think-act loop.
+// Use this for multi-turn conversations where the agent should remember previous exchanges.
+// Use SetMessages() to restore history from persistence before calling Continue().
+func (a *Agent) Continue(ctx context.Context, prompt string) error {
+	return a.orch.Continue(ctx, prompt)
 }
 
 // Subscribe returns a channel for receiving orchestrator events.
