@@ -81,7 +81,8 @@ func (o *Orchestrator) Run(ctx context.Context, prompt string) error {
 
 	o.state.Reset()
 	o.messages = []llm.Message{llm.NewUserMessage(prompt)}
-	defer o.eventBus.Close()
+	// Reset at END instead of Close - allows orchestrator reuse
+	defer o.eventBus.Reset()
 
 	for i := 0; i < o.config.MaxIterations; i++ {
 		// Check context at start of each iteration

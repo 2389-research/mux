@@ -1,0 +1,249 @@
+// ABOUTME: GraphViz diagram representing the mux library architecture
+// ABOUTME: Generate PNG with: dot -Tpng architecture.dot -o architecture.png
+
+digraph mux_architecture {
+    // Graph settings
+    rankdir=TB;
+    compound=true;
+    fontname="Helvetica";
+    fontsize=12;
+    node [fontname="Helvetica", fontsize=10, shape=box, style="rounded,filled"];
+    edge [fontname="Helvetica", fontsize=9];
+
+    // Color scheme
+    // Interfaces: light blue
+    // Implementations: light green
+    // External: light orange
+    // Core flow: light purple
+
+    // ===== TOOL PACKAGE =====
+    subgraph cluster_tool {
+        label="package tool";
+        style="rounded,filled";
+        fillcolor="#f0f8ff";
+        color="#4682b4";
+
+        // Interfaces
+        Tool [label="«interface»\nTool\n─────────\nName() string\nDescription() string\nExecute(ctx, input) (string, error)", fillcolor="#e6f3ff", color="#4682b4"];
+        SchemaProvider [label="«interface»\nSchemaProvider\n─────────\nInputSchema() map[string]any", fillcolor="#e6f3ff", color="#4682b4"];
+        ToolSource [label="«interface»\nToolSource\n─────────\nTools() []Tool", fillcolor="#e6f3ff", color="#4682b4"];
+
+        // Implementations
+        Registry [label="Registry\n─────────\ntools map[string]Tool\n─────────\nRegister(Tool)\nGet(name) Tool\nTools() []Tool", fillcolor="#e6ffe6", color="#228b22"];
+        FilteredRegistry [label="FilteredRegistry\n─────────\nsource ToolSource\nallowed []string\n─────────\nTools() []Tool\nGet(name) Tool", fillcolor="#e6ffe6", color="#228b22"];
+        Executor [label="Executor\n─────────\nregistry ToolSource\n─────────\nExecute(ctx, name, input) Result", fillcolor="#e6ffe6", color="#228b22"];
+        Result [label="Result\n─────────\nName string\nOutput string\nError error\nDuration time.Duration", fillcolor="#fffacd", color="#daa520"];
+
+        // Relationships within package
+        Registry -> Tool [style=dashed, label="stores", color="#666666"];
+        Registry -> ToolSource [style=dashed, arrowhead=empty, label="implements"];
+        FilteredRegistry -> ToolSource [style=dashed, arrowhead=empty, label="implements"];
+        FilteredRegistry -> ToolSource [label="wraps", color="#666666"];
+        Executor -> ToolSource [label="uses", color="#666666"];
+        Executor -> Result [label="returns", color="#666666"];
+        Tool -> SchemaProvider [style=dotted, label="optionally\nimplements", color="#999999"];
+    }
+
+    // ===== MCP PACKAGE =====
+    subgraph cluster_mcp {
+        label="package mcp";
+        style="rounded,filled";
+        fillcolor="#fff8f0";
+        color="#d2691e";
+
+        // Types
+        MCPClient [label="Client\n─────────\nconfig ClientConfig\ncmd *exec.Cmd\nstdin/stdout io.Pipe\n─────────\nStart() error\nListTools() []ToolInfo\nCallTool(name, args) (string, error)\nClose() error", fillcolor="#ffe6cc", color="#d2691e"];
+        ClientConfig [label="ClientConfig\n─────────\nCommand string\nArgs []string\nEnv map[string]string\nWorkingDir string", fillcolor="#fffacd", color="#daa520"];
+        ToolInfo [label="ToolInfo\n─────────\nName string\nDescription string\nInputSchema map[string]any", fillcolor="#fffacd", color="#daa520"];
+        ToolAdapter [label="ToolAdapter\n─────────\nclient *Client\ninfo ToolInfo\n─────────\nName() string\nDescription() string\nInputSchema() map[string]any\nExecute(ctx, input) (string, error)", fillcolor="#e6ffe6", color="#228b22"];
+        JSONRPCRequest [label="jsonrpcRequest\n─────────\nJSONRPC string\nID int\nMethod string\nParams any", fillcolor="#f5f5f5", color="#999999"];
+        JSONRPCResponse [label="jsonrpcResponse\n─────────\nJSONRPC string\nID int\nResult json.RawMessage\nError *jsonrpcError", fillcolor="#f5f5f5", color="#999999"];
+
+        // Relationships
+        MCPClient -> ClientConfig [label="configured by", color="#666666"];
+        MCPClient -> ToolInfo [label="discovers", color="#666666"];
+        MCPClient -> JSONRPCRequest [label="sends", color="#666666"];
+        MCPClient -> JSONRPCResponse [label="receives", color="#666666"];
+        ToolAdapter -> MCPClient [label="wraps", color="#666666"];
+        ToolAdapter -> ToolInfo [label="exposes", color="#666666"];
+    }
+
+    // MCP implements Tool interface (cross-package)
+    ToolAdapter -> Tool [style=dashed, arrowhead=empty, label="implements", constraint=false, color="#4682b4"];
+    ToolAdapter -> SchemaProvider [style=dashed, arrowhead=empty, label="implements", constraint=false, color="#4682b4"];
+
+    // ===== LLM PACKAGE =====
+    subgraph cluster_llm {
+        label="package llm";
+        style="rounded,filled";
+        fillcolor="#f8f0ff";
+        color="#8b008b";
+
+        // Interface
+        LLMClient [label="«interface»\nClient\n─────────\nChat(ctx, req) (*Response, error)\nSupportsStreaming() bool", fillcolor="#f0e6ff", color="#8b008b"];
+
+        // Implementations
+        AnthropicClient [label="AnthropicClient\n─────────\nclient *anthropic.Client\nmodel string\n─────────\nChat(ctx, req) (*Response, error)\nSupportsStreaming() bool", fillcolor="#e6ffe6", color="#228b22"];
+        OpenAIClient [label="OpenAIClient\n─────────\nclient *openai.Client\nmodel string\n─────────\nChat(ctx, req) (*Response, error)\nSupportsStreaming() bool", fillcolor="#e6ffe6", color="#228b22"];
+
+        // Types
+        ChatRequest [label="ChatRequest\n─────────\nMessages []Message\nTools []ToolDefinition\nMaxTokens int\nSystemPrompt string", fillcolor="#fffacd", color="#daa520"];
+        ChatResponse [label="Response\n─────────\nContent string\nToolCalls []ToolCall\nStopReason string\nUsage Usage", fillcolor="#fffacd", color="#daa520"];
+        ToolCall [label="ToolCall\n─────────\nID string\nName string\nInput map[string]any", fillcolor="#fffacd", color="#daa520"];
+        Message [label="Message\n─────────\nRole string\nContent string\nToolCalls []ToolCall\nToolResults []ToolResult", fillcolor="#fffacd", color="#daa520"];
+
+        // Relationships
+        AnthropicClient -> LLMClient [style=dashed, arrowhead=empty, label="implements"];
+        OpenAIClient -> LLMClient [style=dashed, arrowhead=empty, label="implements"];
+        LLMClient -> ChatRequest [label="receives", color="#666666"];
+        LLMClient -> ChatResponse [label="returns", color="#666666"];
+        ChatResponse -> ToolCall [label="contains", color="#666666"];
+        ChatRequest -> Message [label="contains", color="#666666"];
+    }
+
+    // ===== ORCHESTRATOR PACKAGE =====
+    subgraph cluster_orchestrator {
+        label="package orchestrator";
+        style="rounded,filled";
+        fillcolor="#f0fff0";
+        color="#006400";
+
+        // Main type
+        Orchestrator [label="Orchestrator\n─────────\nclient llm.Client\nexecutor *tool.Executor\nconfig Config\nstate *State\n─────────\nRun(ctx, prompt) (*Result, error)\nRunWithStreaming(ctx, prompt, handler) (*Result, error)", fillcolor="#ccffcc", color="#006400"];
+        OrchestratorConfig [label="Config\n─────────\nMaxIterations int\nSystemPrompt string\nOnToolCall func\nOnToolResult func\nOnThinking func", fillcolor="#fffacd", color="#daa520"];
+
+        // State machine
+        State [label="State\n─────────\ncurrent StateType\nmessages []llm.Message\niterations int\n─────────\nTransition(StateType)\nAddMessage(Message)", fillcolor="#e6ffe6", color="#228b22"];
+        StateType [label="«enum» StateType\n─────────\nStateThinking\nStateActing\nStateComplete\nStateError\nStateMaxIterations", fillcolor="#f5f5f5", color="#999999"];
+
+        // Events
+        EventHandler [label="«interface»\nEventHandler\n─────────\nOnEvent(Event)", fillcolor="#f0e6ff", color="#8b008b"];
+        Event [label="Event\n─────────\nType EventType\nData any\nTimestamp time.Time", fillcolor="#fffacd", color="#daa520"];
+
+        // Relationships
+        Orchestrator -> OrchestratorConfig [label="configured by", color="#666666"];
+        Orchestrator -> State [label="manages", color="#666666"];
+        State -> StateType [label="tracks", color="#666666"];
+        Orchestrator -> EventHandler [label="notifies", color="#666666"];
+        EventHandler -> Event [label="receives", color="#666666"];
+    }
+
+    // Orchestrator dependencies (cross-package)
+    Orchestrator -> LLMClient [label="uses", color="#8b008b", lhead=cluster_llm];
+    Orchestrator -> Executor [label="uses", color="#228b22", lhead=cluster_tool];
+
+    // ===== AGENT PACKAGE =====
+    subgraph cluster_agent {
+        label="package agent";
+        style="rounded,filled";
+        fillcolor="#fff0f5";
+        color="#c71585";
+
+        Agent [label="Agent\n─────────\norchestrator *Orchestrator\nconfig AgentConfig\nmcpClients []*mcp.Client\n─────────\nRun(ctx, prompt) (*Result, error)\nClose() error", fillcolor="#ffe6f0", color="#c71585"];
+        AgentConfig [label="AgentConfig\n─────────\nClient llm.Client\nTools []tool.Tool\nMCPServers []mcp.ClientConfig\nSystemPrompt string\nMaxIterations int", fillcolor="#fffacd", color="#daa520"];
+        AgentResult [label="Result\n─────────\nOutput string\nMessages []llm.Message\nIterations int\nTokenUsage Usage", fillcolor="#fffacd", color="#daa520"];
+
+        // Relationships
+        Agent -> AgentConfig [label="configured by", color="#666666"];
+        Agent -> AgentResult [label="returns", color="#666666"];
+    }
+
+    // Agent dependencies (cross-package)
+    Agent -> Orchestrator [label="wraps", color="#006400"];
+    Agent -> MCPClient [label="manages", color="#d2691e"];
+    AgentConfig -> Tool [label="accepts", color="#4682b4", style=dashed];
+    AgentConfig -> ClientConfig [label="accepts", color="#d2691e", style=dashed];
+
+    // ===== COORDINATOR PACKAGE =====
+    subgraph cluster_coordinator {
+        label="package coordinator";
+        style="rounded,filled";
+        fillcolor="#f0ffff";
+        color="#008b8b";
+
+        Coordinator [label="Coordinator\n─────────\nagents map[string]*Agent\nparentTools ToolSource\n─────────\nRegisterAgent(name, config)\nSpawnChild(parent, name, config)\nRun(name, prompt) (*Result, error)", fillcolor="#ccffff", color="#008b8b"];
+
+        // Relationships within
+    }
+
+    // Coordinator dependencies
+    Coordinator -> Agent [label="manages", color="#c71585"];
+    Coordinator -> FilteredRegistry [label="creates for\nchild agents", color="#228b22", style=dashed];
+
+    // ===== PERMISSION PACKAGE =====
+    subgraph cluster_permission {
+        label="package permission";
+        style="rounded,filled";
+        fillcolor="#fffaf0";
+        color="#ff8c00";
+
+        PermissionChecker [label="«interface»\nChecker\n─────────\nCheck(ctx, toolName, input) (bool, error)", fillcolor="#fff0e6", color="#ff8c00"];
+        AlwaysAllow [label="AlwaysAllow\n─────────\nCheck() → true", fillcolor="#e6ffe6", color="#228b22"];
+        AlwaysDeny [label="AlwaysDeny\n─────────\nCheck() → false", fillcolor="#e6ffe6", color="#228b22"];
+        CallbackChecker [label="CallbackChecker\n─────────\nfn func(...) bool\n─────────\nCheck() → fn()", fillcolor="#e6ffe6", color="#228b22"];
+
+        AlwaysAllow -> PermissionChecker [style=dashed, arrowhead=empty, label="implements"];
+        AlwaysDeny -> PermissionChecker [style=dashed, arrowhead=empty, label="implements"];
+        CallbackChecker -> PermissionChecker [style=dashed, arrowhead=empty, label="implements"];
+    }
+
+    // Permission integration
+    Executor -> PermissionChecker [label="consults", color="#ff8c00", style=dashed];
+
+    // ===== EXTERNAL SYSTEMS =====
+    subgraph cluster_external {
+        label="External Systems";
+        style="rounded,filled";
+        fillcolor="#f5f5f5";
+        color="#999999";
+
+        AnthropicAPI [label="Anthropic API\n(Claude)", shape=cylinder, fillcolor="#d4a574", color="#8b4513"];
+        OpenAIAPI [label="OpenAI API\n(GPT)", shape=cylinder, fillcolor="#74d4a5", color="#2e8b57"];
+        MCPServer [label="MCP Server\n(stdio subprocess)", shape=cylinder, fillcolor="#a5d474", color="#556b2f"];
+    }
+
+    // External connections
+    AnthropicClient -> AnthropicAPI [label="HTTP/JSON", color="#8b4513", style=bold];
+    OpenAIClient -> OpenAIAPI [label="HTTP/JSON", color="#2e8b57", style=bold];
+    MCPClient -> MCPServer [label="JSON-RPC 2.0\nover stdio", color="#556b2f", style=bold];
+
+    // ===== ORCHESTRATION FLOW =====
+    subgraph cluster_flow {
+        label="Think-Act Loop";
+        style="rounded,dashed";
+        fillcolor="#fafafa";
+        color="#666666";
+        rank=same;
+
+        flow_think [label="1. THINK\nLLM generates\nresponse", shape=ellipse, fillcolor="#f0e6ff", color="#8b008b"];
+        flow_act [label="2. ACT\nExecute tool\ncalls", shape=ellipse, fillcolor="#e6f3ff", color="#4682b4"];
+        flow_result [label="3. RESULT\nAdd to\ncontext", shape=ellipse, fillcolor="#e6ffe6", color="#228b22"];
+        flow_check [label="4. CHECK\nComplete or\ncontinue?", shape=diamond, fillcolor="#fffacd", color="#daa520"];
+
+        flow_think -> flow_act [label="tool_calls"];
+        flow_act -> flow_result [label="outputs"];
+        flow_result -> flow_check;
+        flow_check -> flow_think [label="continue", style=dashed];
+    }
+
+    // Connect flow to orchestrator
+    Orchestrator -> flow_think [style=dotted, color="#666666", label="drives"];
+
+    // ===== LEGEND =====
+    subgraph cluster_legend {
+        label="Legend";
+        style="rounded";
+        fillcolor="#ffffff";
+        color="#cccccc";
+        rank=sink;
+
+        leg_interface [label="Interface", fillcolor="#e6f3ff", color="#4682b4"];
+        leg_impl [label="Implementation", fillcolor="#e6ffe6", color="#228b22"];
+        leg_data [label="Data Type", fillcolor="#fffacd", color="#daa520"];
+        leg_external [label="External", shape=cylinder, fillcolor="#f5f5f5", color="#999999"];
+
+        leg_interface -> leg_impl [style=dashed, arrowhead=empty, label="implements"];
+        leg_impl -> leg_data [label="uses"];
+        leg_data -> leg_external [style=invis];
+    }
+}

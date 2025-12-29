@@ -51,3 +51,6 @@ code-review.md
 missing-tests.md
 output.txt
 
+# Generated diagram outputs (regenerate from .dot files)
+architecture.png
+architecture.svg

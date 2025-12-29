@@ -136,3 +136,17 @@ func (eb *EventBus) Close() {
 		close(ch)
 	}
 }
+
+// Reset closes all current subscribers and prepares the event bus for reuse.
+// This allows the orchestrator to be reused for multiple Run() calls.
+func (eb *EventBus) Reset() {
+	eb.mu.Lock()
+	defer eb.mu.Unlock()
+	// Close all current subscriber channels to signal run completion
+	for _, ch := range eb.subscribers {
+		close(ch)
+	}
+	// Clear subscriber list and reopen for new subscriptions
+	eb.subscribers = nil
+	eb.closed = false
+}
