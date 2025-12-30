@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,7 +86,10 @@ func TestClientCreation(t *testing.T) {
 		Command:   "echo",
 		Args:      []string{"hello"},
 	}
-	client := mcp.NewClient(config)
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
 	if client == nil {
 		t.Fatal("expected non-nil client")
 	}
@@ -162,10 +166,13 @@ func TestClientStartInvalidCommand(t *testing.T) {
 		Command:   "/nonexistent/command",
 		Args:      []string{},
 	}
-	client := mcp.NewClient(config)
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
 	ctx := context.Background()
 
-	err := client.Start(ctx)
+	err = client.Start(ctx)
 	if err == nil {
 		t.Fatal("expected error for invalid command")
 	}
@@ -181,10 +188,13 @@ func TestClientStartMissingExecutable(t *testing.T) {
 		Command:   "this-command-definitely-does-not-exist-12345",
 		Args:      []string{},
 	}
-	client := mcp.NewClient(config)
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
 	ctx := context.Background()
 
-	err := client.Start(ctx)
+	err = client.Start(ctx)
 	if err == nil {
 		t.Fatal("expected error for missing executable")
 	}
@@ -197,7 +207,10 @@ func TestClientStartAlreadyRunning(t *testing.T) {
 		Command:   "cat",
 		Args:      []string{},
 	}
-	client := mcp.NewClient(config)
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -208,7 +221,7 @@ func TestClientStartAlreadyRunning(t *testing.T) {
 	// Try to start again with new context
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel2()
-	err := client.Start(ctx2)
+	err = client.Start(ctx2)
 	if err == nil {
 		t.Fatal("expected error when starting already running client")
 	}
@@ -227,12 +240,15 @@ func TestClientServerCrashDuringOperation(t *testing.T) {
 		Command:   "sh",
 		Args:      []string{"-c", "exit 1"},
 	}
-	client := mcp.NewClient(config)
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
 	// Start will fail because server exits immediately
-	err := client.Start(ctx)
+	err = client.Start(ctx)
 	if err == nil {
 		client.Close()
 		t.Fatal("expected error when server crashes during startup")
@@ -246,13 +262,16 @@ func TestClientConnectionCleanupOnContextCancellation(t *testing.T) {
 		Command:   "cat",
 		Args:      []string{},
 	}
-	client := mcp.NewClient(config)
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Cancel immediately
 	cancel()
 
-	err := client.Start(ctx)
+	err = client.Start(ctx)
 	// Should fail due to context cancellation
 	if err == nil {
 		client.Close()
@@ -490,10 +509,13 @@ func TestClientClose(t *testing.T) {
 		Command:   "cat",
 		Args:      []string{},
 	}
-	client := mcp.NewClient(config)
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
 
 	// Close before start should not error
-	err := client.Close()
+	err = client.Close()
 	if err != nil {
 		t.Errorf("unexpected error closing non-started client: %v", err)
 	}
@@ -506,7 +528,10 @@ func TestClientDoubleClose(t *testing.T) {
 		Command:   "cat",
 		Args:      []string{},
 	}
-	client := mcp.NewClient(config)
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
 
 	// Close twice
 	err1 := client.Close()
@@ -574,7 +599,10 @@ func TestClientServerConfigValidation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client := mcp.NewClient(tt.config)
+			client, err := mcp.NewClient(tt.config)
+			if err != nil {
+				t.Fatalf("NewClient failed: %v", err)
+			}
 			if client == nil {
 				t.Error("expected non-nil client")
 			}
@@ -672,7 +700,10 @@ func TestNewToolManager(t *testing.T) {
 		Transport: "stdio",
 		Command:   "echo",
 	}
-	client := mcp.NewClient(config)
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
 
 	manager := mcp.NewToolManager(client)
 	if manager == nil {
@@ -826,7 +857,10 @@ func TestToolManagerTools(t *testing.T) {
 		Transport: "stdio",
 		Command:   "echo",
 	}
-	client := mcp.NewClient(config)
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
 	manager := mcp.NewToolManager(client)
 
 	// Initially empty
@@ -848,7 +882,10 @@ func TestToolManagerGet(t *testing.T) {
 		Transport: "stdio",
 		Command:   "echo",
 	}
-	client := mcp.NewClient(config)
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
 	manager := mcp.NewToolManager(client)
 
 	// Get non-existent tool
@@ -968,7 +1005,10 @@ func TestToolManagerToolsWithMultipleRetrievals(t *testing.T) {
 		Transport: "stdio",
 		Command:   "echo",
 	}
-	client := mcp.NewClient(config)
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
 	manager := mcp.NewToolManager(client)
 
 	// Call Tools multiple times to ensure it's stable
@@ -1229,12 +1269,15 @@ func TestClientListTools(t *testing.T) {
 		Command:   "node",
 		Args:      []string{"testdata/mock_server.js"},
 	}
-	client := mcp.NewClient(config)
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := client.Start(ctx)
+	err = client.Start(ctx)
 	if err != nil {
 		t.Fatalf("failed to start client: %v", err)
 	}
@@ -1282,12 +1325,15 @@ func TestClientCallTool(t *testing.T) {
 		Command:   "node",
 		Args:      []string{"testdata/mock_server.js"},
 	}
-	client := mcp.NewClient(config)
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := client.Start(ctx)
+	err = client.Start(ctx)
 	if err != nil {
 		t.Fatalf("failed to start client: %v", err)
 	}
@@ -1323,12 +1369,15 @@ func TestClientCallToolEcho(t *testing.T) {
 		Command:   "node",
 		Args:      []string{"testdata/mock_server.js"},
 	}
-	client := mcp.NewClient(config)
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := client.Start(ctx)
+	err = client.Start(ctx)
 	if err != nil {
 		t.Fatalf("failed to start client: %v", err)
 	}
@@ -1361,12 +1410,15 @@ func TestClientCallToolNotFound(t *testing.T) {
 		Command:   "node",
 		Args:      []string{"testdata/mock_server.js"},
 	}
-	client := mcp.NewClient(config)
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := client.Start(ctx)
+	err = client.Start(ctx)
 	if err != nil {
 		t.Fatalf("failed to start client: %v", err)
 	}
@@ -1396,12 +1448,15 @@ func TestClientCallToolWithError(t *testing.T) {
 		Command:   "node",
 		Args:      []string{"testdata/mock_server.js"},
 	}
-	client := mcp.NewClient(config)
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := client.Start(ctx)
+	err = client.Start(ctx)
 	if err != nil {
 		t.Fatalf("failed to start client: %v", err)
 	}
@@ -1429,12 +1484,15 @@ func TestClientListToolsTimeout(t *testing.T) {
 		Command:   "node",
 		Args:      []string{"testdata/mock_server.js"},
 	}
-	client := mcp.NewClient(config)
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := client.Start(ctx)
+	err = client.Start(ctx)
 	if err != nil {
 		t.Fatalf("failed to start client: %v", err)
 	}
@@ -1464,12 +1522,15 @@ func TestClientCallToolTimeout(t *testing.T) {
 		Command:   "node",
 		Args:      []string{"testdata/mock_server.js"},
 	}
-	client := mcp.NewClient(config)
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := client.Start(ctx)
+	err = client.Start(ctx)
 	if err != nil {
 		t.Fatalf("failed to start client: %v", err)
 	}
@@ -1499,12 +1560,15 @@ func TestClientMultipleListToolsCalls(t *testing.T) {
 		Command:   "node",
 		Args:      []string{"testdata/mock_server.js"},
 	}
-	client := mcp.NewClient(config)
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := client.Start(ctx)
+	err = client.Start(ctx)
 	if err != nil {
 		t.Fatalf("failed to start client: %v", err)
 	}
@@ -1530,12 +1594,15 @@ func TestClientCallToolAfterClose(t *testing.T) {
 		Command:   "node",
 		Args:      []string{"testdata/mock_server.js"},
 	}
-	client := mcp.NewClient(config)
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := client.Start(ctx)
+	err = client.Start(ctx)
 	if err != nil {
 		t.Fatalf("failed to start client: %v", err)
 	}
@@ -1557,12 +1624,15 @@ func TestClientListToolsAfterClose(t *testing.T) {
 		Command:   "node",
 		Args:      []string{"testdata/mock_server.js"},
 	}
-	client := mcp.NewClient(config)
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := client.Start(ctx)
+	err = client.Start(ctx)
 	if err != nil {
 		t.Fatalf("failed to start client: %v", err)
 	}
@@ -1587,12 +1657,15 @@ func TestClientListToolsInvalidJSON(t *testing.T) {
 		Command:   "node",
 		Args:      []string{"testdata/mock_server.js"},
 	}
-	client := mcp.NewClient(config)
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := client.Start(ctx)
+	err = client.Start(ctx)
 	if err != nil {
 		t.Fatalf("failed to start client: %v", err)
 	}
@@ -1615,12 +1688,15 @@ func TestClientCallToolWithNilArguments(t *testing.T) {
 		Command:   "node",
 		Args:      []string{"testdata/mock_server.js"},
 	}
-	client := mcp.NewClient(config)
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := client.Start(ctx)
+	err = client.Start(ctx)
 	if err != nil {
 		t.Fatalf("failed to start client: %v", err)
 	}
@@ -1653,12 +1729,15 @@ func TestClientCallToolWithEmptyArguments(t *testing.T) {
 		Command:   "node",
 		Args:      []string{"testdata/mock_server.js"},
 	}
-	client := mcp.NewClient(config)
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := client.Start(ctx)
+	err = client.Start(ctx)
 	if err != nil {
 		t.Fatalf("failed to start client: %v", err)
 	}
@@ -1682,12 +1761,15 @@ func TestClientConcurrentToolCalls(t *testing.T) {
 		Command:   "node",
 		Args:      []string{"testdata/mock_server.js"},
 	}
-	client := mcp.NewClient(config)
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	err := client.Start(ctx)
+	err = client.Start(ctx)
 	if err != nil {
 		t.Fatalf("failed to start client: %v", err)
 	}
@@ -1736,12 +1818,15 @@ func TestClientConcurrentMixedCalls(t *testing.T) {
 		Command:   "node",
 		Args:      []string{"testdata/mock_server.js"},
 	}
-	client := mcp.NewClient(config)
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	err := client.Start(ctx)
+	err = client.Start(ctx)
 	if err != nil {
 		t.Fatalf("failed to start client: %v", err)
 	}
@@ -1829,5 +1914,99 @@ func TestMCPErrors(t *testing.T) {
 	}
 	if mcp.ErrTransportClosed.Error() != "mcp: transport closed" {
 		t.Errorf("unexpected error message: %s", mcp.ErrTransportClosed.Error())
+	}
+}
+
+// Client interface tests
+
+func TestClientInterface(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:      "test",
+		Transport: "stdio",
+		Command:   "echo",
+	}
+
+	// NewClient should return (Client, error)
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	if client == nil {
+		t.Fatal("expected non-nil client")
+	}
+
+	// This assignment verifies client is a mcp.Client at compile time
+	_ = client
+}
+
+func TestNewClientUnsupportedTransport(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:      "test",
+		Transport: "unsupported",
+	}
+	_, err := mcp.NewClient(config)
+	if err == nil {
+		t.Fatal("expected error for unsupported transport")
+	}
+}
+
+func TestNewClientEmptyTransportDefaultsToStdio(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:    "test",
+		Command: "echo",
+	}
+
+	// Empty transport should default to stdio
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	if client == nil {
+		t.Fatal("expected non-nil client")
+	}
+}
+
+func TestNewClientHTTPTransportNotYetImplemented(t *testing.T) {
+	tests := []struct {
+		name      string
+		transport string
+	}{
+		{"http", "http"},
+		{"streamable-http", "streamable-http"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := mcp.ServerConfig{
+				Name:      "test",
+				Transport: tt.transport,
+				URL:       "https://example.com/mcp",
+			}
+			_, err := mcp.NewClient(config)
+			if err == nil {
+				t.Fatal("expected error for http transport")
+			}
+			if !strings.Contains(err.Error(), "not yet implemented") {
+				t.Errorf("expected 'not yet implemented' error, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestClientNotificationsReturnsNilForStdio(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:      "test",
+		Transport: "stdio",
+		Command:   "echo",
+	}
+
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+
+	// stdio clients don't support notifications (no SSE)
+	if client.Notifications() != nil {
+		t.Error("expected nil notifications channel for stdio transport")
 	}
 }
