@@ -302,3 +302,81 @@ func TestHTTPClientSessionExpiry(t *testing.T) {
 		t.Errorf("expected ErrSessionExpired, got %v", err)
 	}
 }
+
+func TestHTTPClientFullFlow(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req Request
+		json.NewDecoder(r.Body).Decode(&req)
+
+		w.Header().Set("Mcp-Session-Id", "integration-test")
+		w.Header().Set("Content-Type", "application/json")
+
+		var resp Response
+		resp.JSONRPC = "2.0"
+		resp.ID = req.ID
+
+		switch req.Method {
+		case "initialize":
+			resp.Result = json.RawMessage(`{"protocolVersion":"2025-06-18"}`)
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusOK)
+			return
+		case "tools/list":
+			resp.Result = json.RawMessage(`{"tools":[{"name":"add","description":"Add numbers"}]}`)
+		case "tools/call":
+			resp.Result = json.RawMessage(`{"content":[{"type":"text","text":"42"}]}`)
+		}
+
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	config := ServerConfig{
+		Name:      "integration",
+		Transport: "http",
+		URL:       server.URL,
+		Headers:   map[string]string{"X-Test": "true"},
+	}
+
+	client, err := NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+
+	ctx := context.Background()
+
+	// Start
+	if err := client.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer client.Close()
+
+	// ListTools
+	tools, err := client.ListTools(ctx)
+	if err != nil {
+		t.Fatalf("ListTools failed: %v", err)
+	}
+	if len(tools) != 1 || tools[0].Name != "add" {
+		t.Errorf("unexpected tools: %+v", tools)
+	}
+
+	// CallTool
+	result, err := client.CallTool(ctx, "add", map[string]any{"a": 1, "b": 2})
+	if err != nil {
+		t.Fatalf("CallTool failed: %v", err)
+	}
+	if result.Content[0].Text != "42" {
+		t.Errorf("unexpected result: %s", result.Content[0].Text)
+	}
+
+	// Notifications channel exists
+	ch := client.Notifications()
+	if ch == nil {
+		t.Error("expected non-nil notifications channel")
+	}
+
+	// Close
+	if err := client.Close(); err != nil {
+		t.Errorf("Close failed: %v", err)
+	}
+}
