@@ -32,7 +32,7 @@ func NewClient(config ServerConfig) (Client, error) {
 	case "stdio", "":
 		return newStdioClient(config), nil
 	case "http", "streamable-http":
-		return nil, fmt.Errorf("http transport not yet implemented")
+		return newHTTPClient(config), nil
 	default:
 		return nil, fmt.Errorf("unsupported transport: %s", config.Transport)
 	}

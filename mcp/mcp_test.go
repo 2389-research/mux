@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
@@ -1966,7 +1965,7 @@ func TestNewClientEmptyTransportDefaultsToStdio(t *testing.T) {
 	}
 }
 
-func TestNewClientHTTPTransportNotYetImplemented(t *testing.T) {
+func TestNewClientHTTPTransportCreatesClient(t *testing.T) {
 	tests := []struct {
 		name      string
 		transport string
@@ -1982,12 +1981,21 @@ func TestNewClientHTTPTransportNotYetImplemented(t *testing.T) {
 				Transport: tt.transport,
 				URL:       "https://example.com/mcp",
 			}
-			_, err := mcp.NewClient(config)
-			if err == nil {
-				t.Fatal("expected error for http transport")
+			client, err := mcp.NewClient(config)
+			if err != nil {
+				t.Fatalf("NewClient failed: %v", err)
 			}
-			if !strings.Contains(err.Error(), "not yet implemented") {
-				t.Errorf("expected 'not yet implemented' error, got: %v", err)
+			if client == nil {
+				t.Fatal("expected non-nil client")
+			}
+
+			// Verify Client interface implementation
+			var _ mcp.Client = client //nolint:staticcheck // intentional type assertion
+
+			// HTTP clients should return non-nil notifications channel
+			ch := client.Notifications()
+			if ch == nil {
+				t.Error("expected non-nil notifications channel for HTTP transport")
 			}
 		})
 	}
