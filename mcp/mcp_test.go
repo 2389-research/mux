@@ -1819,3 +1819,15 @@ func TestServerConfigHTTPFields(t *testing.T) {
 		t.Error("expected Authorization header")
 	}
 }
+
+func TestMCPErrors(t *testing.T) {
+	if mcp.ErrSessionExpired.Error() != "mcp: session expired" {
+		t.Errorf("unexpected error message: %s", mcp.ErrSessionExpired.Error())
+	}
+	if mcp.ErrNotConnected.Error() != "mcp: client not connected" {
+		t.Errorf("unexpected error message: %s", mcp.ErrNotConnected.Error())
+	}
+	if mcp.ErrTransportClosed.Error() != "mcp: transport closed" {
+		t.Errorf("unexpected error message: %s", mcp.ErrTransportClosed.Error())
+	}
+}

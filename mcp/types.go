@@ -4,7 +4,15 @@ package mcp
 
 import (
 	"encoding/json"
+	"errors"
 	"sync/atomic"
+)
+
+// Sentinel errors for MCP client operations.
+var (
+	ErrSessionExpired  = errors.New("mcp: session expired")
+	ErrNotConnected    = errors.New("mcp: client not connected")
+	ErrTransportClosed = errors.New("mcp: transport closed")
 )
 
 var requestID uint64
