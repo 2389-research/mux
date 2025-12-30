@@ -380,3 +380,34 @@ func TestHTTPClientFullFlow(t *testing.T) {
 		t.Errorf("Close failed: %v", err)
 	}
 }
+
+func TestHTTPClientDoubleClose(t *testing.T) {
+	// Double close should not panic
+	config := ServerConfig{Transport: "http", URL: "http://localhost"}
+	client := newHTTPClient(config)
+
+	// Close twice - should not panic
+	if err := client.Close(); err != nil {
+		t.Errorf("first Close failed: %v", err)
+	}
+	if err := client.Close(); err != nil {
+		t.Errorf("second Close failed: %v", err)
+	}
+}
+
+func TestHTTPClientNotConnected(t *testing.T) {
+	// Calling methods before Start() should return ErrNotConnected
+	config := ServerConfig{Transport: "http", URL: "http://localhost"}
+	client := newHTTPClient(config)
+	ctx := context.Background()
+
+	_, err := client.ListTools(ctx)
+	if err != ErrNotConnected {
+		t.Errorf("ListTools: expected ErrNotConnected, got %v", err)
+	}
+
+	_, err = client.CallTool(ctx, "test", nil)
+	if err != ErrNotConnected {
+		t.Errorf("CallTool: expected ErrNotConnected, got %v", err)
+	}
+}

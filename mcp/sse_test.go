@@ -103,3 +103,25 @@ data: {"jsonrpc":"2.0","method":"notification"}
 		t.Errorf("expected EOF, got %v", err)
 	}
 }
+
+func TestSSEDataWithoutSpace(t *testing.T) {
+	// SSE spec allows data:value without space after colon
+	input := `event:message
+data:{"jsonrpc":"2.0","id":1,"result":{}}
+
+`
+	reader := strings.NewReader(input)
+	events, err := parseSSEEvents(reader)
+	if err != nil {
+		t.Fatalf("parseSSEEvents failed: %v", err)
+	}
+
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+
+	expected := `{"jsonrpc":"2.0","id":1,"result":{}}`
+	if events[0].Data != expected {
+		t.Errorf("expected %q, got %q", expected, events[0].Data)
+	}
+}

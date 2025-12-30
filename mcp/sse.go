@@ -48,7 +48,10 @@ func (r *sseReader) Next() (*sseEvent, error) {
 		if strings.HasPrefix(line, "event:") {
 			r.event.Event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
 		} else if strings.HasPrefix(line, "data:") {
-			r.dataLines = append(r.dataLines, strings.TrimPrefix(line, "data: "))
+			// SSE spec allows both "data:value" and "data: value"
+			value := strings.TrimPrefix(line, "data:")
+			value = strings.TrimPrefix(value, " ")
+			r.dataLines = append(r.dataLines, value)
 		}
 	}
 
@@ -84,7 +87,10 @@ func parseSSEEvents(r io.Reader) ([]sseEvent, error) {
 		if strings.HasPrefix(line, "event:") {
 			currentEvent.Event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
 		} else if strings.HasPrefix(line, "data:") {
-			dataLines = append(dataLines, strings.TrimPrefix(line, "data: "))
+			// SSE spec allows both "data:value" and "data: value"
+			value := strings.TrimPrefix(line, "data:")
+			value = strings.TrimPrefix(value, " ")
+			dataLines = append(dataLines, value)
 		}
 		// Ignore other fields (id:, retry:, comments)
 	}

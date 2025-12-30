@@ -15,6 +15,9 @@ import (
 
 const httpProtocolVersion = "2025-06-18"
 
+// notificationBufferSize is the buffer size for the notifications channel.
+const notificationBufferSize = 100
+
 // httpClient implements Client for Streamable HTTP transport.
 type httpClient struct {
 	config ServerConfig
@@ -24,10 +27,8 @@ type httpClient struct {
 	running       bool
 	sessionID     string
 	notifications chan Notification
-	pending       map[uint64]chan *Response
 
-	closeChan chan struct{}
-	done      chan struct{}
+	closeOnce sync.Once
 }
 
 // newHTTPClient creates a new HTTP transport client.
@@ -35,10 +36,7 @@ func newHTTPClient(config ServerConfig) *httpClient {
 	return &httpClient{
 		config:        config,
 		http:          &http.Client{},
-		notifications: make(chan Notification, 100),
-		pending:       make(map[uint64]chan *Response),
-		closeChan:     make(chan struct{}),
-		done:          make(chan struct{}),
+		notifications: make(chan Notification, notificationBufferSize),
 	}
 }
 
@@ -143,6 +141,17 @@ func (c *httpClient) post(ctx context.Context, method string, params any) (*Resp
 			}
 
 			if event.Event == "message" {
+				// First try to parse as a notification (has Method, no ID in JSON-RPC)
+				var notif Notification
+				if err := json.Unmarshal([]byte(event.Data), &notif); err == nil && notif.Method != "" {
+					select {
+					case c.notifications <- notif:
+					default:
+					}
+					continue
+				}
+
+				// Otherwise parse as response
 				var candidate Response
 				if err := json.Unmarshal([]byte(event.Data), &candidate); err != nil {
 					continue // Skip malformed messages
@@ -150,16 +159,6 @@ func (c *httpClient) post(ctx context.Context, method string, params any) (*Resp
 				if candidate.ID == req.ID {
 					resp = candidate
 					break
-				}
-				// Handle notifications (ID is 0 and no result)
-				if candidate.ID == 0 && candidate.Result == nil {
-					var notif Notification
-					if err := json.Unmarshal([]byte(event.Data), &notif); err == nil && notif.Method != "" {
-						select {
-						case c.notifications <- notif:
-						default:
-						}
-					}
 				}
 			}
 		}
@@ -203,7 +202,11 @@ func (c *httpClient) notify(ctx context.Context, method string, params any) erro
 	if err != nil {
 		return fmt.Errorf("http request: %w", err)
 	}
-	httpResp.Body.Close()
+	defer httpResp.Body.Close()
+
+	if httpResp.StatusCode >= 400 {
+		return fmt.Errorf("notification failed: %s", httpResp.Status)
+	}
 
 	return nil
 }
@@ -262,16 +265,13 @@ func (c *httpClient) Notifications() <-chan Notification {
 	return c.notifications
 }
 
-// Close shuts down the HTTP client.
+// Close shuts down the HTTP client. Safe to call multiple times.
 func (c *httpClient) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if !c.running {
-		return nil
-	}
-	c.running = false
-	close(c.closeChan)
-	close(c.notifications)
+	c.closeOnce.Do(func() {
+		c.mu.Lock()
+		c.running = false
+		c.mu.Unlock()
+		close(c.notifications)
+	})
 	return nil
 }
