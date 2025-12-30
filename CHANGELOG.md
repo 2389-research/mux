@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2025-12-30
+
+### Added
+- Streamable HTTP transport for MCP client (2025-06-18 spec)
+- `Client` interface for transport abstraction
+- SSE (Server-Sent Events) response parsing
+- `Notification` type for server-initiated messages
+- `Notifications()` method returns channel for async server messages
+- Session management via `Mcp-Session-Id` header
+- Sentinel errors: `ErrSessionExpired`, `ErrNotConnected`, `ErrTransportClosed`
+- HTTP config fields: `URL` and `Headers` in `ServerConfig`
+
+### Changed
+- **BREAKING**: `NewClient` now returns `(Client, error)` instead of `*Client`
+- Refactored stdio transport to implement new `Client` interface
+
 ## [0.3.0] - 2025-12-29
 
 ### Added
