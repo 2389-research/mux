@@ -7,7 +7,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"sync"
 )
 
@@ -124,10 +126,47 @@ func (c *httpClient) post(ctx context.Context, method string, params any) (*Resp
 
 	// Extract session ID from response
 	sessionID := httpResp.Header.Get("Mcp-Session-Id")
+	contentType := httpResp.Header.Get("Content-Type")
 
 	var resp Response
-	if err := json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
-		return nil, "", fmt.Errorf("decode response: %w", err)
+
+	if strings.HasPrefix(contentType, "text/event-stream") {
+		// Parse SSE and find response with matching ID
+		reader := newSSEReader(httpResp.Body)
+		for {
+			event, err := reader.Next()
+			if err == io.EOF {
+				return nil, "", fmt.Errorf("response not found in SSE stream")
+			}
+			if err != nil {
+				return nil, "", fmt.Errorf("read SSE: %w", err)
+			}
+
+			if event.Event == "message" {
+				var candidate Response
+				if err := json.Unmarshal([]byte(event.Data), &candidate); err != nil {
+					continue // Skip malformed messages
+				}
+				if candidate.ID == req.ID {
+					resp = candidate
+					break
+				}
+				// Handle notifications (ID is 0 and no result)
+				if candidate.ID == 0 && candidate.Result == nil {
+					var notif Notification
+					if err := json.Unmarshal([]byte(event.Data), &notif); err == nil && notif.Method != "" {
+						select {
+						case c.notifications <- notif:
+						default:
+						}
+					}
+				}
+			}
+		}
+	} else {
+		if err := json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
+			return nil, "", fmt.Errorf("decode response: %w", err)
+		}
 	}
 
 	return &resp, sessionID, nil

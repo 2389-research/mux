@@ -197,3 +197,54 @@ func TestHTTPClientCallTool(t *testing.T) {
 		t.Errorf("expected 'tool result', got %q", result.Content[0].Text)
 	}
 }
+
+func TestHTTPClientSSEResponse(t *testing.T) {
+	// Server returns SSE instead of JSON
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req Request
+		json.NewDecoder(r.Body).Decode(&req)
+
+		switch req.Method {
+		case "initialize":
+			w.Header().Set("Mcp-Session-Id", "test-session")
+			w.Header().Set("Content-Type", "application/json")
+			resp := Response{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(`{}`)}
+			json.NewEncoder(w).Encode(resp)
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusOK)
+		case "tools/list":
+			// Return as SSE
+			w.Header().Set("Content-Type", "text/event-stream")
+			result := `{"jsonrpc":"2.0","id":` + idToString(req.ID) + `,"result":{"tools":[{"name":"sse_tool"}]}}`
+			w.Write([]byte("event: message\ndata: " + result + "\n\n"))
+		}
+	}))
+	defer server.Close()
+
+	config := ServerConfig{Transport: "http", URL: server.URL}
+	client := newHTTPClient(config)
+	ctx := context.Background()
+
+	if err := client.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer client.Close()
+
+	tools, err := client.ListTools(ctx)
+	if err != nil {
+		t.Fatalf("ListTools failed: %v", err)
+	}
+
+	if len(tools) != 1 || tools[0].Name != "sse_tool" {
+		t.Errorf("unexpected tools: %+v", tools)
+	}
+}
+
+// idToString converts a JSON-RPC ID to string for embedding in JSON.
+func idToString(id any) string {
+	if id == nil {
+		return "null"
+	}
+	b, _ := json.Marshal(id)
+	return string(b)
+}
