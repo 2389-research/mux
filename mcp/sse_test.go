@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"io"
 	"strings"
 	"testing"
 )
@@ -64,5 +65,41 @@ func TestSSEEventEmpty(t *testing.T) {
 	}
 	if len(events) != 0 {
 		t.Errorf("expected 0 events, got %d", len(events))
+	}
+}
+
+func TestNewSSEReader(t *testing.T) {
+	input := `event: message
+data: {"jsonrpc":"2.0","id":1,"result":{}}
+
+event: message
+data: {"jsonrpc":"2.0","method":"notification"}
+
+`
+	reader := strings.NewReader(input)
+	sseReader := newSSEReader(reader)
+
+	// Read first event
+	event, err := sseReader.Next()
+	if err != nil {
+		t.Fatalf("first Next() failed: %v", err)
+	}
+	if event.Event != "message" {
+		t.Errorf("expected 'message', got %q", event.Event)
+	}
+
+	// Read second event
+	event, err = sseReader.Next()
+	if err != nil {
+		t.Fatalf("second Next() failed: %v", err)
+	}
+	if !strings.Contains(event.Data, "notification") {
+		t.Errorf("expected notification in data, got %s", event.Data)
+	}
+
+	// Read EOF
+	_, err = sseReader.Next()
+	if err != io.EOF {
+		t.Errorf("expected EOF, got %v", err)
 	}
 }

@@ -14,6 +14,50 @@ type sseEvent struct {
 	Data  string
 }
 
+// sseReader reads SSE events one at a time from a stream.
+type sseReader struct {
+	scanner   *bufio.Scanner
+	event     sseEvent
+	dataLines []string
+}
+
+// newSSEReader creates a streaming SSE reader.
+func newSSEReader(r io.Reader) *sseReader {
+	return &sseReader{
+		scanner: bufio.NewScanner(r),
+	}
+}
+
+// Next returns the next SSE event, or io.EOF when done.
+func (r *sseReader) Next() (*sseEvent, error) {
+	r.event = sseEvent{}
+	r.dataLines = nil
+
+	for r.scanner.Scan() {
+		line := r.scanner.Text()
+
+		if line == "" {
+			// Blank line = end of event
+			if r.event.Event != "" || len(r.dataLines) > 0 {
+				r.event.Data = strings.Join(r.dataLines, "\n")
+				return &r.event, nil
+			}
+			continue
+		}
+
+		if strings.HasPrefix(line, "event:") {
+			r.event.Event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		} else if strings.HasPrefix(line, "data:") {
+			r.dataLines = append(r.dataLines, strings.TrimPrefix(line, "data: "))
+		}
+	}
+
+	if err := r.scanner.Err(); err != nil {
+		return nil, err
+	}
+	return nil, io.EOF
+}
+
 // parseSSEEvents reads SSE events from a reader.
 // Events are separated by blank lines.
 func parseSSEEvents(r io.Reader) ([]sseEvent, error) {
