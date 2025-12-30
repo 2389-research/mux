@@ -83,6 +83,16 @@ type ServerConfig struct {
 	Command   string            `json:"command"`
 	Args      []string          `json:"args,omitempty"`
 	Env       map[string]string `json:"env,omitempty"`
+
+	// HTTP transport fields
+	URL     string            `json:"url,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
+}
+
+// Notification is a server-initiated message (no ID field).
+type Notification struct {
+	Method string          `json:"method"`
+	Params json.RawMessage `json:"params,omitempty"`
 }
 
 // InitializeParams for MCP handshake.

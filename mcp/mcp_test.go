@@ -1790,3 +1790,32 @@ func TestClientConcurrentMixedCalls(t *testing.T) {
 		}
 	}
 }
+
+func TestNotificationType(t *testing.T) {
+	jsonData := `{"method":"tools/changed","params":{"reason":"update"}}`
+	var notif mcp.Notification
+	if err := json.Unmarshal([]byte(jsonData), &notif); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if notif.Method != "tools/changed" {
+		t.Errorf("expected 'tools/changed', got %q", notif.Method)
+	}
+	if notif.Params == nil {
+		t.Error("expected non-nil params")
+	}
+}
+
+func TestServerConfigHTTPFields(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:      "remote",
+		Transport: "http",
+		URL:       "https://example.com/mcp",
+		Headers:   map[string]string{"Authorization": "Bearer token"},
+	}
+	if config.URL != "https://example.com/mcp" {
+		t.Errorf("expected URL, got %q", config.URL)
+	}
+	if config.Headers["Authorization"] != "Bearer token" {
+		t.Error("expected Authorization header")
+	}
+}
