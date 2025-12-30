@@ -108,3 +108,92 @@ func TestHTTPClientStart(t *testing.T) {
 
 	client.Close()
 }
+
+func TestHTTPClientListTools(t *testing.T) {
+	// Create test server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req Request
+		json.NewDecoder(r.Body).Decode(&req)
+
+		w.Header().Set("Content-Type", "application/json")
+
+		switch req.Method {
+		case "initialize":
+			w.Header().Set("Mcp-Session-Id", "test-session")
+			resp := Response{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(`{}`)}
+			json.NewEncoder(w).Encode(resp)
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusOK)
+		case "tools/list":
+			result := `{"tools":[{"name":"test_tool","description":"A test tool"}]}`
+			resp := Response{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(result)}
+			json.NewEncoder(w).Encode(resp)
+		}
+	}))
+	defer server.Close()
+
+	config := ServerConfig{Transport: "http", URL: server.URL}
+	client := newHTTPClient(config)
+	ctx := context.Background()
+
+	if err := client.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer client.Close()
+
+	tools, err := client.ListTools(ctx)
+	if err != nil {
+		t.Fatalf("ListTools failed: %v", err)
+	}
+
+	if len(tools) != 1 {
+		t.Fatalf("expected 1 tool, got %d", len(tools))
+	}
+	if tools[0].Name != "test_tool" {
+		t.Errorf("expected 'test_tool', got %q", tools[0].Name)
+	}
+}
+
+func TestHTTPClientCallTool(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req Request
+		json.NewDecoder(r.Body).Decode(&req)
+
+		w.Header().Set("Content-Type", "application/json")
+
+		switch req.Method {
+		case "initialize":
+			w.Header().Set("Mcp-Session-Id", "test-session")
+			resp := Response{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(`{}`)}
+			json.NewEncoder(w).Encode(resp)
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusOK)
+		case "tools/call":
+			result := `{"content":[{"type":"text","text":"tool result"}]}`
+			resp := Response{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(result)}
+			json.NewEncoder(w).Encode(resp)
+		}
+	}))
+	defer server.Close()
+
+	config := ServerConfig{Transport: "http", URL: server.URL}
+	client := newHTTPClient(config)
+	ctx := context.Background()
+
+	if err := client.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer client.Close()
+
+	result, err := client.CallTool(ctx, "test_tool", map[string]any{"input": "test"})
+	if err != nil {
+		t.Fatalf("CallTool failed: %v", err)
+	}
+
+	if len(result.Content) != 1 {
+		t.Fatalf("expected 1 content block, got %d", len(result.Content))
+	}
+	if result.Content[0].Text != "tool result" {
+		t.Errorf("expected 'tool result', got %q", result.Content[0].Text)
+	}
+}

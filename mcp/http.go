@@ -171,12 +171,51 @@ func (c *httpClient) notify(ctx context.Context, method string, params any) erro
 
 // ListTools retrieves available tools from the server.
 func (c *httpClient) ListTools(ctx context.Context) ([]ToolInfo, error) {
-	return nil, ErrNotConnected // TODO: implement
+	c.mu.Lock()
+	if !c.running {
+		c.mu.Unlock()
+		return nil, ErrNotConnected
+	}
+	c.mu.Unlock()
+
+	resp, _, err := c.post(ctx, "tools/list", nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Error != nil {
+		return nil, resp.Error
+	}
+
+	var result ToolsListResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		return nil, fmt.Errorf("parse tools: %w", err)
+	}
+	return result.Tools, nil
 }
 
 // CallTool executes a tool on the server.
 func (c *httpClient) CallTool(ctx context.Context, name string, args map[string]any) (*ToolCallResult, error) {
-	return nil, ErrNotConnected // TODO: implement
+	c.mu.Lock()
+	if !c.running {
+		c.mu.Unlock()
+		return nil, ErrNotConnected
+	}
+	c.mu.Unlock()
+
+	params := ToolCallParams{Name: name, Arguments: args}
+	resp, _, err := c.post(ctx, "tools/call", params)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Error != nil {
+		return nil, resp.Error
+	}
+
+	var result ToolCallResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		return nil, fmt.Errorf("parse result: %w", err)
+	}
+	return &result, nil
 }
 
 // Notifications returns the channel for server-initiated messages.
