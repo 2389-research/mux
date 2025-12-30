@@ -248,3 +248,57 @@ func idToString(id any) string {
 	b, _ := json.Marshal(id)
 	return string(b)
 }
+
+func TestHTTPClientSessionExpiry(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		var req Request
+		json.NewDecoder(r.Body).Decode(&req)
+
+		if req.Method == "initialize" {
+			w.Header().Set("Mcp-Session-Id", "test-session")
+			w.Header().Set("Content-Type", "application/json")
+			resp := Response{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(`{}`)}
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+
+		if req.Method == "notifications/initialized" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		// Simulate session expiry on third call (after initialize + initialized)
+		if callCount > 3 {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		resp := Response{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(`{"tools":[]}`)}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	config := ServerConfig{Transport: "http", URL: server.URL}
+	client := newHTTPClient(config)
+	ctx := context.Background()
+
+	if err := client.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer client.Close()
+
+	// First call should work
+	_, err := client.ListTools(ctx)
+	if err != nil {
+		t.Fatalf("first ListTools failed: %v", err)
+	}
+
+	// Second call should get session expired
+	_, err = client.ListTools(ctx)
+	if err != ErrSessionExpired {
+		t.Errorf("expected ErrSessionExpired, got %v", err)
+	}
+}
