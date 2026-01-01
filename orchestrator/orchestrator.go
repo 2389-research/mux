@@ -51,6 +51,7 @@ type Orchestrator struct {
 	eventBus    *EventBus
 	hookManager *hooks.Manager
 	sessionID   string
+	usage       *TokenUsage
 	mu          sync.Mutex
 	messages    []llm.Message
 }
@@ -76,6 +77,7 @@ func NewWithConfig(client llm.Client, executor *tool.Executor, config Config) *O
 		eventBus:    NewEventBus(),
 		hookManager: config.HookManager,
 		sessionID:   generateSessionID(),
+		usage:       NewTokenUsage(),
 		messages:    make([]llm.Message, 0),
 	}
 }
@@ -98,6 +100,16 @@ func (o *Orchestrator) SessionID() string {
 // Hooks returns the hook manager, or nil if none was configured.
 func (o *Orchestrator) Hooks() *hooks.Manager {
 	return o.hookManager
+}
+
+// Usage returns a snapshot of the current token usage statistics.
+func (o *Orchestrator) Usage() TokenUsage {
+	return o.usage.Snapshot()
+}
+
+// ResetUsage clears the token usage statistics.
+func (o *Orchestrator) ResetUsage() {
+	o.usage.Reset()
 }
 
 // Messages returns a copy of the current conversation history.
@@ -218,6 +230,9 @@ func (o *Orchestrator) runLoop(ctx context.Context, prompt string) error {
 		if err != nil {
 			return o.handleError(err)
 		}
+
+		// Track token usage
+		o.usage.Add(resp.Usage)
 
 		o.processResponse(resp)
 

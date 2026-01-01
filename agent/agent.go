@@ -315,6 +315,16 @@ func (a *Agent) Hooks() *hooks.Manager {
 	return a.hookManager
 }
 
+// Usage returns a snapshot of the current token usage statistics.
+func (a *Agent) Usage() orchestrator.TokenUsage {
+	return a.orch.Usage()
+}
+
+// ResetUsage clears the token usage statistics.
+func (a *Agent) ResetUsage() {
+	a.orch.ResetUsage()
+}
+
 // RunChild runs a child agent with the given prompt and fires SubagentStop when complete.
 // This is the recommended way to run child agents when you want lifecycle hooks.
 // For direct control without hooks, call child.Run() directly.

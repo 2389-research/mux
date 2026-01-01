@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - JSON and JSONL format support
   - `SaveTranscript`/`RestoreTranscript` on agent
   - File-based save/load utilities
+- Token usage tracking
+  - `TokenUsage` type tracks input/output/cache tokens
+  - `Usage()` and `ResetUsage()` on orchestrator and agent
+  - Thread-safe accumulation across requests
+  - Snapshot for point-in-time usage data
 
 ## [0.5.1] - 2026-01-01
 
