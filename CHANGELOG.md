@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SessionID()` and `Hooks()` methods on orchestrator
 - `Hooks()` and `RunChild()` methods on agent
 - Hook manager inheritance for child agents
+- Background agent execution (`RunAsync`, `ContinueAsync`, `RunChildAsync`)
+  - `RunHandle` for status tracking, polling, and waiting
+  - `WaitWithTimeout` for bounded waits
+  - `Cancel` for cooperative cancellation
 
 ## [0.5.1] - 2026-01-01
 
