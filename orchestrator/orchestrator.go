@@ -4,13 +4,25 @@ package orchestrator
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"sync"
 
+	"github.com/2389-research/mux/hooks"
 	"github.com/2389-research/mux/llm"
 	"github.com/2389-research/mux/tool"
 )
+
+// generateSessionID creates a unique session identifier.
+func generateSessionID() string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return "session-unknown"
+	}
+	return "session-" + hex.EncodeToString(b)
+}
 
 const DefaultMaxIterations = 50
 
@@ -22,6 +34,7 @@ type Config struct {
 	MaxIterations int
 	SystemPrompt  string
 	Model         string
+	HookManager   *hooks.Manager // Optional hook manager for lifecycle events
 }
 
 // DefaultConfig returns sensible defaults.
@@ -31,13 +44,15 @@ func DefaultConfig() Config {
 
 // Orchestrator manages the agentic think-act loop.
 type Orchestrator struct {
-	client   llm.Client
-	executor *tool.Executor
-	config   Config
-	state    *StateMachine
-	eventBus *EventBus
-	mu       sync.Mutex
-	messages []llm.Message
+	client      llm.Client
+	executor    *tool.Executor
+	config      Config
+	state       *StateMachine
+	eventBus    *EventBus
+	hookManager *hooks.Manager
+	sessionID   string
+	mu          sync.Mutex
+	messages    []llm.Message
 }
 
 // New creates a new Orchestrator with default config.
@@ -54,12 +69,14 @@ func NewWithConfig(client llm.Client, executor *tool.Executor, config Config) *O
 		panic("mux: executor must not be nil")
 	}
 	return &Orchestrator{
-		client:   client,
-		executor: executor,
-		config:   config,
-		state:    NewStateMachine(),
-		eventBus: NewEventBus(),
-		messages: make([]llm.Message, 0),
+		client:      client,
+		executor:    executor,
+		config:      config,
+		state:       NewStateMachine(),
+		eventBus:    NewEventBus(),
+		hookManager: config.HookManager,
+		sessionID:   generateSessionID(),
+		messages:    make([]llm.Message, 0),
 	}
 }
 
@@ -71,6 +88,16 @@ func (o *Orchestrator) Subscribe() <-chan Event {
 // State returns the current state.
 func (o *Orchestrator) State() State {
 	return o.state.Current()
+}
+
+// SessionID returns the unique session identifier for this orchestrator.
+func (o *Orchestrator) SessionID() string {
+	return o.sessionID
+}
+
+// Hooks returns the hook manager, or nil if none was configured.
+func (o *Orchestrator) Hooks() *hooks.Manager {
+	return o.hookManager
 }
 
 // Messages returns a copy of the current conversation history.
@@ -112,7 +139,7 @@ func (o *Orchestrator) Run(ctx context.Context, prompt string) error {
 	// Reset at END instead of Close - allows orchestrator reuse
 	defer o.eventBus.Reset()
 
-	return o.runLoop(ctx, prompt)
+	return o.runWithHooks(ctx, prompt, "run")
 }
 
 // Continue appends the prompt to existing conversation history and runs the think-act loop.
@@ -129,7 +156,48 @@ func (o *Orchestrator) Continue(ctx context.Context, prompt string) error {
 	// Reset at END instead of Close - allows orchestrator reuse
 	defer o.eventBus.Reset()
 
-	return o.runLoop(ctx, prompt)
+	return o.runWithHooks(ctx, prompt, "continue")
+}
+
+// runWithHooks wraps runLoop with hook firing for session lifecycle.
+// Must be called with mutex held.
+func (o *Orchestrator) runWithHooks(ctx context.Context, prompt string, source string) error {
+	// Fire SessionStart hook
+	if o.hookManager != nil {
+		event := &hooks.SessionStartEvent{
+			SessionID: o.sessionID,
+			Source:    source,
+			Prompt:    prompt,
+		}
+		if err := o.hookManager.FireSessionStart(ctx, event); err != nil {
+			return o.handleError(err)
+		}
+	}
+
+	// Ensure SessionEnd fires when we return
+	var runErr error
+	defer func() {
+		if o.hookManager != nil {
+			reason := "complete"
+			if runErr != nil {
+				if ctx.Err() != nil {
+					reason = "cancelled"
+				} else {
+					reason = "error"
+				}
+			}
+			event := &hooks.SessionEndEvent{
+				SessionID: o.sessionID,
+				Error:     runErr,
+				Reason:    reason,
+			}
+			// Fire SessionEnd - errors don't override runErr (notification-only)
+			_ = o.hookManager.FireSessionEnd(ctx, event) //nolint:errcheck // notification-only hook
+		}
+	}()
+
+	runErr = o.runLoop(ctx, prompt)
+	return runErr
 }
 
 // runLoop executes the core think-act loop. Must be called with mutex held.
@@ -158,6 +226,23 @@ func (o *Orchestrator) runLoop(ctx context.Context, prompt string) error {
 				return o.handleError(err)
 			}
 			continue
+		}
+
+		// Fire Stop hook - allows hooks to prevent stopping
+		if o.hookManager != nil {
+			stopEvent := &hooks.StopEvent{
+				SessionID: o.sessionID,
+				FinalText: resp.TextContent(),
+			}
+			continueLoop, err := o.hookManager.FireStop(ctx, stopEvent)
+			if err != nil {
+				return o.handleError(err)
+			}
+			if continueLoop {
+				// Hook requested continuation - add a user message to trigger next iteration
+				o.messages = append(o.messages, llm.NewUserMessage("continue"))
+				continue
+			}
 		}
 
 		if err := o.transition(StateComplete); err != nil {

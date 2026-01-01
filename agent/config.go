@@ -3,6 +3,7 @@
 package agent
 
 import (
+	"github.com/2389-research/mux/hooks"
 	"github.com/2389-research/mux/llm"
 	"github.com/2389-research/mux/tool"
 )
@@ -34,4 +35,8 @@ type Config struct {
 
 	// MaxIterations limits the think-act loop (0 = default).
 	MaxIterations int
+
+	// HookManager enables lifecycle hooks for this agent and its children.
+	// If set, fires SubagentStart/SubagentStop events when children are spawned.
+	HookManager *hooks.Manager
 }

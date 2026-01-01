@@ -1,0 +1,235 @@
+// ABOUTME: Defines the hook system for lifecycle events in mux.
+// ABOUTME: Enables observability and control over session, agent, and tool lifecycle.
+package hooks
+
+import (
+	"context"
+	"sync"
+)
+
+// EventType identifies the kind of lifecycle event.
+type EventType string
+
+const (
+	// Session lifecycle events
+	EventSessionStart EventType = "SessionStart"
+	EventSessionEnd   EventType = "SessionEnd"
+
+	// Agent stop event (before returning from Run)
+	EventStop EventType = "Stop"
+
+	// Subagent lifecycle events
+	EventSubagentStart EventType = "SubagentStart"
+	EventSubagentStop  EventType = "SubagentStop"
+)
+
+// SessionStartEvent is fired when Run() or Continue() is called.
+type SessionStartEvent struct {
+	SessionID string
+	Source    string // "run", "continue"
+	Prompt    string
+}
+
+// SessionEndEvent is fired when the agentic loop completes.
+type SessionEndEvent struct {
+	SessionID string
+	Error     error  // nil if successful
+	Reason    string // "complete", "error", "cancelled"
+}
+
+// StopEvent is fired before the orchestrator returns.
+// Hooks can set Continue=true to force the loop to continue.
+// Once any hook sets Continue=true, the loop will continue regardless
+// of subsequent hooks setting it to false.
+type StopEvent struct {
+	SessionID string
+	FinalText string
+	Continue  bool // Set to true to prevent stopping
+}
+
+// SubagentStartEvent is fired when a child agent is created.
+type SubagentStartEvent struct {
+	ParentID string
+	ChildID  string
+	Name     string
+}
+
+// SubagentStopEvent is fired when a child agent's Run() completes.
+type SubagentStopEvent struct {
+	ParentID string
+	ChildID  string
+	Name     string
+	Error    error
+}
+
+// Hook is the interface for all lifecycle hooks.
+// Each hook type has its own signature for type safety.
+type Hook interface {
+	// Type returns the event type this hook handles.
+	Type() EventType
+}
+
+// SessionStartHook handles SessionStart events.
+type SessionStartHook func(ctx context.Context, event *SessionStartEvent) error
+
+func (h SessionStartHook) Type() EventType { return EventSessionStart }
+
+// SessionEndHook handles SessionEnd events.
+type SessionEndHook func(ctx context.Context, event *SessionEndEvent) error
+
+func (h SessionEndHook) Type() EventType { return EventSessionEnd }
+
+// StopHook handles Stop events. Can modify event.Continue to prevent stopping.
+type StopHook func(ctx context.Context, event *StopEvent) error
+
+func (h StopHook) Type() EventType { return EventStop }
+
+// SubagentStartHook handles SubagentStart events.
+type SubagentStartHook func(ctx context.Context, event *SubagentStartEvent) error
+
+func (h SubagentStartHook) Type() EventType { return EventSubagentStart }
+
+// SubagentStopHook handles SubagentStop events.
+type SubagentStopHook func(ctx context.Context, event *SubagentStopEvent) error
+
+func (h SubagentStopHook) Type() EventType { return EventSubagentStop }
+
+// Manager manages hook registration and dispatch.
+type Manager struct {
+	mu    sync.RWMutex
+	hooks map[EventType][]Hook
+}
+
+// NewManager creates a new hook manager.
+func NewManager() *Manager {
+	return &Manager{
+		hooks: make(map[EventType][]Hook),
+	}
+}
+
+// Register adds a hook for its event type.
+func (m *Manager) Register(hook Hook) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.hooks[hook.Type()] = append(m.hooks[hook.Type()], hook)
+}
+
+// OnSessionStart registers a SessionStart hook.
+func (m *Manager) OnSessionStart(fn func(ctx context.Context, event *SessionStartEvent) error) {
+	m.Register(SessionStartHook(fn))
+}
+
+// OnSessionEnd registers a SessionEnd hook.
+func (m *Manager) OnSessionEnd(fn func(ctx context.Context, event *SessionEndEvent) error) {
+	m.Register(SessionEndHook(fn))
+}
+
+// OnStop registers a Stop hook.
+func (m *Manager) OnStop(fn func(ctx context.Context, event *StopEvent) error) {
+	m.Register(StopHook(fn))
+}
+
+// OnSubagentStart registers a SubagentStart hook.
+func (m *Manager) OnSubagentStart(fn func(ctx context.Context, event *SubagentStartEvent) error) {
+	m.Register(SubagentStartHook(fn))
+}
+
+// OnSubagentStop registers a SubagentStop hook.
+func (m *Manager) OnSubagentStop(fn func(ctx context.Context, event *SubagentStopEvent) error) {
+	m.Register(SubagentStopHook(fn))
+}
+
+// FireSessionStart dispatches SessionStart event to all registered hooks.
+func (m *Manager) FireSessionStart(ctx context.Context, event *SessionStartEvent) error {
+	m.mu.RLock()
+	original := m.hooks[EventSessionStart]
+	hooks := make([]Hook, len(original))
+	copy(hooks, original)
+	m.mu.RUnlock()
+
+	for _, h := range hooks {
+		if fn, ok := h.(SessionStartHook); ok {
+			if err := fn(ctx, event); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// FireSessionEnd dispatches SessionEnd event to all registered hooks.
+func (m *Manager) FireSessionEnd(ctx context.Context, event *SessionEndEvent) error {
+	m.mu.RLock()
+	original := m.hooks[EventSessionEnd]
+	hooks := make([]Hook, len(original))
+	copy(hooks, original)
+	m.mu.RUnlock()
+
+	for _, h := range hooks {
+		if fn, ok := h.(SessionEndHook); ok {
+			if err := fn(ctx, event); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// FireStop dispatches Stop event to all registered hooks.
+// Returns true if any hook set event.Continue = true.
+// Once any hook sets Continue=true, the loop will continue regardless of subsequent hooks.
+func (m *Manager) FireStop(ctx context.Context, event *StopEvent) (continueLoop bool, err error) {
+	m.mu.RLock()
+	original := m.hooks[EventStop]
+	hooks := make([]Hook, len(original))
+	copy(hooks, original)
+	m.mu.RUnlock()
+
+	for _, h := range hooks {
+		if fn, ok := h.(StopHook); ok {
+			if err := fn(ctx, event); err != nil {
+				return false, err
+			}
+			if event.Continue {
+				continueLoop = true
+			}
+		}
+	}
+	return continueLoop, nil
+}
+
+// FireSubagentStart dispatches SubagentStart event to all registered hooks.
+func (m *Manager) FireSubagentStart(ctx context.Context, event *SubagentStartEvent) error {
+	m.mu.RLock()
+	original := m.hooks[EventSubagentStart]
+	hooks := make([]Hook, len(original))
+	copy(hooks, original)
+	m.mu.RUnlock()
+
+	for _, h := range hooks {
+		if fn, ok := h.(SubagentStartHook); ok {
+			if err := fn(ctx, event); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// FireSubagentStop dispatches SubagentStop event to all registered hooks.
+func (m *Manager) FireSubagentStop(ctx context.Context, event *SubagentStopEvent) error {
+	m.mu.RLock()
+	original := m.hooks[EventSubagentStop]
+	hooks := make([]Hook, len(original))
+	copy(hooks, original)
+	m.mu.RUnlock()
+
+	for _, h := range hooks {
+		if fn, ok := h.(SubagentStopHook); ok {
+			if err := fn(ctx, event); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}

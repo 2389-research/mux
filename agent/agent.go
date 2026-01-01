@@ -7,6 +7,7 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/2389-research/mux/hooks"
 	"github.com/2389-research/mux/llm"
 	"github.com/2389-research/mux/orchestrator"
 	"github.com/2389-research/mux/tool"
@@ -20,9 +21,10 @@ type Agent struct {
 	parent   *Agent
 	children []*Agent
 
-	filtered *tool.FilteredRegistry
-	executor *tool.Executor
-	orch     *orchestrator.Orchestrator
+	filtered    *tool.FilteredRegistry
+	executor    *tool.Executor
+	orch        *orchestrator.Orchestrator
+	hookManager *hooks.Manager
 
 	// cachedConfig is lazily initialized to avoid expensive deep copies
 	cachedConfig     *Config
@@ -43,9 +45,10 @@ func New(cfg Config) *Agent {
 	}
 
 	a := &Agent{
-		id:       cfg.Name,
-		config:   cfg,
-		children: make([]*Agent, 0),
+		id:          cfg.Name,
+		config:      cfg,
+		children:    make([]*Agent, 0),
+		hookManager: cfg.HookManager,
 	}
 	a.init()
 	return a
@@ -78,6 +81,7 @@ func (a *Agent) init() {
 	if a.config.MaxIterations > 0 {
 		orchConfig.MaxIterations = a.config.MaxIterations
 	}
+	orchConfig.HookManager = a.hookManager
 
 	// Create orchestrator
 	a.orch = orchestrator.NewWithConfig(a.config.LLMClient, a.executor, orchConfig)
@@ -154,6 +158,7 @@ var (
 // SpawnChild creates a child agent with inherited configuration.
 // Child tools are restricted to parent's allowed tools.
 // Child denied tools accumulate (union of parent and child denied).
+// Fires SubagentStart hook if a hook manager is configured.
 func (a *Agent) SpawnChild(cfg Config) (*Agent, error) {
 	// First, prepare the child config while holding a read lock
 	a.mu.RLock()
@@ -165,6 +170,11 @@ func (a *Agent) SpawnChild(cfg Config) (*Agent, error) {
 	// Inherit LLM client if not specified
 	if cfg.LLMClient == nil {
 		cfg.LLMClient = a.config.LLMClient
+	}
+
+	// Inherit hook manager if not specified
+	if cfg.HookManager == nil {
+		cfg.HookManager = a.hookManager
 	}
 
 	// Empty AllowedTools = inherit parent's allowed tools
@@ -186,14 +196,17 @@ func (a *Agent) SpawnChild(cfg Config) (*Agent, error) {
 
 	// Create child ID
 	childID := a.id + "." + cfg.Name
+	parentID := a.id
+	hookMgr := a.hookManager
 	a.mu.RUnlock()
 
 	// Initialize child without holding parent lock (expensive operation)
 	child := &Agent{
-		id:       childID,
-		config:   cfg,
-		parent:   a,
-		children: make([]*Agent, 0),
+		id:          childID,
+		config:      cfg,
+		parent:      a,
+		children:    make([]*Agent, 0),
+		hookManager: cfg.HookManager,
 	}
 	child.init()
 
@@ -201,6 +214,18 @@ func (a *Agent) SpawnChild(cfg Config) (*Agent, error) {
 	a.mu.Lock()
 	a.children = append(a.children, child)
 	a.mu.Unlock()
+
+	// Fire SubagentStart hook
+	if hookMgr != nil {
+		event := &hooks.SubagentStartEvent{
+			ParentID: parentID,
+			ChildID:  childID,
+			Name:     cfg.Name,
+		}
+		// Fire hook with background context since SpawnChild doesn't take ctx
+		//nolint:errcheck // SubagentStart is notification-only
+		_ = hookMgr.FireSubagentStart(context.Background(), event)
+	}
 
 	return child, nil
 }
@@ -283,4 +308,30 @@ func (a *Agent) RemoveAllChildren() {
 // Executor returns the agent's tool executor.
 func (a *Agent) Executor() *tool.Executor {
 	return a.executor
+}
+
+// Hooks returns the agent's hook manager, or nil if none was configured.
+func (a *Agent) Hooks() *hooks.Manager {
+	return a.hookManager
+}
+
+// RunChild runs a child agent with the given prompt and fires SubagentStop when complete.
+// This is the recommended way to run child agents when you want lifecycle hooks.
+// For direct control without hooks, call child.Run() directly.
+func (a *Agent) RunChild(ctx context.Context, child *Agent, prompt string) error {
+	runErr := child.Run(ctx, prompt)
+
+	// Fire SubagentStop hook
+	if a.hookManager != nil {
+		event := &hooks.SubagentStopEvent{
+			ParentID: a.id,
+			ChildID:  child.id,
+			Name:     child.config.Name,
+			Error:    runErr,
+		}
+		//nolint:errcheck // SubagentStop is notification-only
+		_ = a.hookManager.FireSubagentStop(ctx, event)
+	}
+
+	return runErr
 }
