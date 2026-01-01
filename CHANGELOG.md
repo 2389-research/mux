@@ -30,6 +30,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `Usage()` and `ResetUsage()` on orchestrator and agent
   - Thread-safe accumulation across requests
   - Snapshot for point-in-time usage data
+- Preset agent configurations for common patterns
+  - `ExplorerPreset` - codebase exploration with read-only tools
+  - `PlannerPreset` - architecture and planning
+  - `ResearcherPreset` - multi-source research with web access
+  - `WriterPreset` - code implementation
+  - `ReviewerPreset` - code review
+  - `SpawnExplorer`, `SpawnPlanner`, etc. convenience methods
+  - Fluent API for customizing presets (`WithName`, `WithMaxIterations`, etc.)
 
 ## [0.5.1] - 2026-01-01
 
