@@ -233,7 +233,10 @@ func (o *Orchestrator) executeTools(ctx context.Context, toolUses []llm.ContentB
 
 	resultBlocks := make([]llm.ContentBlock, 0, len(toolUses))
 	for _, use := range toolUses {
-		// Check context before each tool execution to handle cancellation during long-running operations
+		// Check context before each tool execution to handle cancellation during long-running operations.
+		// On cancellation, we abandon all results (including any already collected) rather than sending
+		// partial results to the LLM. This is intentional: partial tool execution state could confuse
+		// the LLM's understanding of what happened.
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -245,15 +248,21 @@ func (o *Orchestrator) executeTools(ctx context.Context, toolUses []llm.ContentB
 			resultBlocks = append(resultBlocks, llm.ContentBlock{
 				Type:      llm.ContentTypeToolResult,
 				ToolUseID: use.ID,
+				Name:      use.Name, // Include tool name for Gemini compatibility
 				Text:      fmt.Sprintf("Error: %v", err),
 				IsError:   true,
 			})
 			o.eventBus.Publish(NewToolResultEvent(tool.NewErrorResult(use.Name, err.Error())))
 			continue
 		}
+		// Defensive nil check - tools should never return (nil, nil) but handle gracefully
+		if result == nil {
+			result = &tool.Result{Success: true, Output: ""}
+		}
 		resultBlocks = append(resultBlocks, llm.ContentBlock{
 			Type:      llm.ContentTypeToolResult,
 			ToolUseID: use.ID,
+			Name:      use.Name, // Include tool name for Gemini compatibility
 			Text:      result.Output,
 			IsError:   !result.Success,
 		})
