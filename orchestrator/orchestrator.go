@@ -26,15 +26,23 @@ func generateSessionID() string {
 
 const DefaultMaxIterations = 50
 
+// DefaultContextBudget is the default token budget before compaction (0 = disabled by default).
+const DefaultContextBudget = 0
+
+// CompactUserMessageMaxTokens is the maximum tokens of recent user messages to preserve.
+const CompactUserMessageMaxTokens = 20000
+
 // warnedSchemaTools tracks tools we've warned about missing schemas (to avoid spam)
 var warnedSchemaTools sync.Map
 
 // Config holds orchestrator configuration.
 type Config struct {
-	MaxIterations int
-	SystemPrompt  string
-	Model         string
-	HookManager   *hooks.Manager // Optional hook manager for lifecycle events
+	MaxIterations   int
+	SystemPrompt    string
+	Model           string
+	HookManager     *hooks.Manager // Optional hook manager for lifecycle events
+	ContextBudget   int            // Max tokens before compaction triggers (0 = disabled)
+	CompactionModel string         // Model to use for summarization (defaults to main Model)
 }
 
 // DefaultConfig returns sensible defaults.
