@@ -265,7 +265,8 @@ func (o *Orchestrator) runLoop(ctx context.Context, prompt string) error {
 				return o.handleError(err)
 			}
 			if continueLoop {
-				// Hook requested continuation - add a user message to trigger next iteration
+				// Hook requested continuation - reset state and add user message for next iteration
+				o.state.Reset()
 				o.messages = append(o.messages, llm.NewUserMessage("continue"))
 				continue
 			}
