@@ -24,6 +24,9 @@ const (
 	// Subagent lifecycle events
 	EventSubagentStart EventType = "SubagentStart"
 	EventSubagentStop  EventType = "SubagentStop"
+
+	// Compaction event (fired when context is compacted)
+	EventCompaction EventType = "Compaction"
 )
 
 // SessionStartEvent is fired when Run() or Continue() is called.
@@ -73,6 +76,15 @@ type SubagentStopEvent struct {
 	Error    error
 }
 
+// CompactionEvent is fired when conversation history is compacted.
+type CompactionEvent struct {
+	SessionID       string
+	OriginalTokens  int
+	CompactedTokens int
+	MessagesRemoved int
+	Summary         string // The generated summary
+}
+
 // Hook is the interface for all lifecycle hooks.
 // Each hook type has its own signature for type safety.
 type Hook interface {
@@ -109,6 +121,11 @@ func (h SubagentStartHook) Type() EventType { return EventSubagentStart }
 type SubagentStopHook func(ctx context.Context, event *SubagentStopEvent) error
 
 func (h SubagentStopHook) Type() EventType { return EventSubagentStop }
+
+// CompactionHook handles Compaction events.
+type CompactionHook func(ctx context.Context, event *CompactionEvent) error
+
+func (h CompactionHook) Type() EventType { return EventCompaction }
 
 // Manager manages hook registration and dispatch.
 type Manager struct {
@@ -158,6 +175,11 @@ func (m *Manager) OnSubagentStart(fn func(ctx context.Context, event *SubagentSt
 // OnSubagentStop registers a SubagentStop hook.
 func (m *Manager) OnSubagentStop(fn func(ctx context.Context, event *SubagentStopEvent) error) {
 	m.Register(SubagentStopHook(fn))
+}
+
+// OnCompaction registers a Compaction hook.
+func (m *Manager) OnCompaction(fn func(ctx context.Context, event *CompactionEvent) error) {
+	m.Register(CompactionHook(fn))
 }
 
 // FireSessionStart dispatches SessionStart event to all registered hooks.
@@ -265,6 +287,24 @@ func (m *Manager) FireSubagentStop(ctx context.Context, event *SubagentStopEvent
 
 	for _, h := range hooks {
 		if fn, ok := h.(SubagentStopHook); ok {
+			if err := fn(ctx, event); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// FireCompaction dispatches Compaction event to all registered hooks.
+func (m *Manager) FireCompaction(ctx context.Context, event *CompactionEvent) error {
+	m.mu.RLock()
+	original := m.hooks[EventCompaction]
+	hooks := make([]Hook, len(original))
+	copy(hooks, original)
+	m.mu.RUnlock()
+
+	for _, h := range hooks {
+		if fn, ok := h.(CompactionHook); ok {
 			if err := fn(ctx, event); err != nil {
 				return err
 			}

@@ -288,6 +288,63 @@ func TestIterationHook_Error(t *testing.T) {
 	}
 }
 
+func TestCompactionHook(t *testing.T) {
+	m := NewManager()
+	var called int32
+
+	m.OnCompaction(func(ctx context.Context, event *CompactionEvent) error {
+		atomic.AddInt32(&called, 1)
+		if event.SessionID != "test-session" {
+			t.Errorf("expected session ID 'test-session', got %q", event.SessionID)
+		}
+		if event.OriginalTokens != 10000 {
+			t.Errorf("expected original tokens 10000, got %d", event.OriginalTokens)
+		}
+		if event.CompactedTokens != 2000 {
+			t.Errorf("expected compacted tokens 2000, got %d", event.CompactedTokens)
+		}
+		if event.MessagesRemoved != 15 {
+			t.Errorf("expected messages removed 15, got %d", event.MessagesRemoved)
+		}
+		if event.Summary != "Summary of conversation" {
+			t.Errorf("expected summary 'Summary of conversation', got %q", event.Summary)
+		}
+		return nil
+	})
+
+	event := &CompactionEvent{
+		SessionID:       "test-session",
+		OriginalTokens:  10000,
+		CompactedTokens: 2000,
+		MessagesRemoved: 15,
+		Summary:         "Summary of conversation",
+	}
+
+	err := m.FireCompaction(context.Background(), event)
+	if err != nil {
+		t.Fatalf("FireCompaction failed: %v", err)
+	}
+
+	if atomic.LoadInt32(&called) != 1 {
+		t.Errorf("hook called %d times, expected 1", called)
+	}
+}
+
+func TestCompactionHook_Error(t *testing.T) {
+	m := NewManager()
+	expectedErr := errors.New("compaction hook failed")
+
+	m.OnCompaction(func(ctx context.Context, event *CompactionEvent) error {
+		return expectedErr
+	})
+
+	event := &CompactionEvent{SessionID: "test"}
+	err := m.FireCompaction(context.Background(), event)
+	if err != expectedErr {
+		t.Errorf("expected error %v, got %v", expectedErr, err)
+	}
+}
+
 func TestMultipleHooks(t *testing.T) {
 	m := NewManager()
 	var order []int
@@ -394,6 +451,11 @@ func TestNoHooksRegistered(t *testing.T) {
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
+
+	err = m.FireCompaction(context.Background(), &CompactionEvent{})
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
 }
 
 func TestHookType(t *testing.T) {
@@ -409,6 +471,7 @@ func TestHookType(t *testing.T) {
 		{"IterationHook", IterationHook(func(ctx context.Context, e *IterationEvent) error { return nil }), EventIteration},
 		{"SubagentStartHook", SubagentStartHook(func(ctx context.Context, e *SubagentStartEvent) error { return nil }), EventSubagentStart},
 		{"SubagentStopHook", SubagentStopHook(func(ctx context.Context, e *SubagentStopEvent) error { return nil }), EventSubagentStop},
+		{"CompactionHook", CompactionHook(func(ctx context.Context, e *CompactionEvent) error { return nil }), EventCompaction},
 	}
 
 	for _, tt := range tests {
