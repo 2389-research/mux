@@ -18,6 +18,9 @@ const (
 	// Agent stop event (before returning from Run)
 	EventStop EventType = "Stop"
 
+	// Iteration event (fired at start of each think-act loop iteration)
+	EventIteration EventType = "Iteration"
+
 	// Subagent lifecycle events
 	EventSubagentStart EventType = "SubagentStart"
 	EventSubagentStop  EventType = "SubagentStop"
@@ -45,6 +48,12 @@ type StopEvent struct {
 	SessionID string
 	FinalText string
 	Continue  bool // Set to true to prevent stopping
+}
+
+// IterationEvent is fired at the start of each think-act loop iteration.
+type IterationEvent struct {
+	SessionID string
+	Iteration int // 0-indexed: 0 = first LLM call, increments each loop cycle
 }
 
 // SubagentStartEvent is fired when a child agent is created.
@@ -83,6 +92,11 @@ func (h SessionEndHook) Type() EventType { return EventSessionEnd }
 type StopHook func(ctx context.Context, event *StopEvent) error
 
 func (h StopHook) Type() EventType { return EventStop }
+
+// IterationHook handles Iteration events.
+type IterationHook func(ctx context.Context, event *IterationEvent) error
+
+func (h IterationHook) Type() EventType { return EventIteration }
 
 // SubagentStartHook handles SubagentStart events.
 type SubagentStartHook func(ctx context.Context, event *SubagentStartEvent) error
@@ -127,6 +141,11 @@ func (m *Manager) OnSessionEnd(fn func(ctx context.Context, event *SessionEndEve
 // OnStop registers a Stop hook.
 func (m *Manager) OnStop(fn func(ctx context.Context, event *StopEvent) error) {
 	m.Register(StopHook(fn))
+}
+
+// OnIteration registers an Iteration hook.
+func (m *Manager) OnIteration(fn func(ctx context.Context, event *IterationEvent) error) {
+	m.Register(IterationHook(fn))
 }
 
 // OnSubagentStart registers a SubagentStart hook.
@@ -196,6 +215,24 @@ func (m *Manager) FireStop(ctx context.Context, event *StopEvent) (continueLoop 
 		}
 	}
 	return continueLoop, nil
+}
+
+// FireIteration dispatches Iteration event to all registered hooks.
+func (m *Manager) FireIteration(ctx context.Context, event *IterationEvent) error {
+	m.mu.RLock()
+	original := m.hooks[EventIteration]
+	hooks := make([]Hook, len(original))
+	copy(hooks, original)
+	m.mu.RUnlock()
+
+	for _, h := range hooks {
+		if fn, ok := h.(IterationHook); ok {
+			if err := fn(ctx, event); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // FireSubagentStart dispatches SubagentStart event to all registered hooks.

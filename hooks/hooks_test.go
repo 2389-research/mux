@@ -237,6 +237,57 @@ func TestSubagentStopHook(t *testing.T) {
 	}
 }
 
+func TestIterationHook(t *testing.T) {
+	m := NewManager()
+	var iterations []int
+
+	m.OnIteration(func(ctx context.Context, event *IterationEvent) error {
+		iterations = append(iterations, event.Iteration)
+		if event.SessionID != "test-session" {
+			t.Errorf("expected session ID 'test-session', got %q", event.SessionID)
+		}
+		return nil
+	})
+
+	// Simulate firing iteration events for 3 iterations
+	for i := 0; i < 3; i++ {
+		event := &IterationEvent{
+			SessionID: "test-session",
+			Iteration: i,
+		}
+		err := m.FireIteration(context.Background(), event)
+		if err != nil {
+			t.Fatalf("FireIteration failed: %v", err)
+		}
+	}
+
+	if len(iterations) != 3 {
+		t.Fatalf("expected 3 iterations recorded, got %d", len(iterations))
+	}
+
+	// Verify iteration numbers
+	for i, iter := range iterations {
+		if iter != i {
+			t.Errorf("iterations[%d] = %d, expected %d", i, iter, i)
+		}
+	}
+}
+
+func TestIterationHook_Error(t *testing.T) {
+	m := NewManager()
+	expectedErr := errors.New("iteration failed")
+
+	m.OnIteration(func(ctx context.Context, event *IterationEvent) error {
+		return expectedErr
+	})
+
+	event := &IterationEvent{SessionID: "test", Iteration: 0}
+	err := m.FireIteration(context.Background(), event)
+	if err != expectedErr {
+		t.Errorf("expected error %v, got %v", expectedErr, err)
+	}
+}
+
 func TestMultipleHooks(t *testing.T) {
 	m := NewManager()
 	var order []int
@@ -338,6 +389,11 @@ func TestNoHooksRegistered(t *testing.T) {
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
+
+	err = m.FireIteration(context.Background(), &IterationEvent{})
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
 }
 
 func TestHookType(t *testing.T) {
@@ -350,6 +406,7 @@ func TestHookType(t *testing.T) {
 		{"SessionStartHook", SessionStartHook(func(ctx context.Context, e *SessionStartEvent) error { return nil }), EventSessionStart},
 		{"SessionEndHook", SessionEndHook(func(ctx context.Context, e *SessionEndEvent) error { return nil }), EventSessionEnd},
 		{"StopHook", StopHook(func(ctx context.Context, e *StopEvent) error { return nil }), EventStop},
+		{"IterationHook", IterationHook(func(ctx context.Context, e *IterationEvent) error { return nil }), EventIteration},
 		{"SubagentStartHook", SubagentStartHook(func(ctx context.Context, e *SubagentStartEvent) error { return nil }), EventSubagentStart},
 		{"SubagentStopHook", SubagentStopHook(func(ctx context.Context, e *SubagentStopEvent) error { return nil }), EventSubagentStop},
 	}

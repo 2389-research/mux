@@ -222,6 +222,17 @@ func (o *Orchestrator) runLoop(ctx context.Context, prompt string) error {
 		default:
 		}
 
+		// Fire Iteration hook at start of each loop iteration
+		if o.hookManager != nil {
+			event := &hooks.IterationEvent{
+				SessionID: o.sessionID,
+				Iteration: i,
+			}
+			if err := o.hookManager.FireIteration(ctx, event); err != nil {
+				return o.handleError(err)
+			}
+		}
+
 		if err := o.transition(StateStreaming); err != nil {
 			return o.handleError(err)
 		}
