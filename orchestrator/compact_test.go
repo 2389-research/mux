@@ -4,6 +4,7 @@ package orchestrator
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/2389-research/mux/llm"
@@ -171,20 +172,22 @@ func TestBuildCompactedHistory(t *testing.T) {
 	compacted := orch.buildCompactedHistory(summary, recentMsgs)
 	orch.mu.Unlock()
 
-	// Should have 2 messages: summary (as user) and the recent user messages
+	// Should have 2 messages: summary (as assistant) + most recent user message
 	if len(compacted) != 2 {
 		t.Fatalf("expected 2 messages in compacted history, got %d", len(compacted))
 	}
 
-	// First message should be the summary with prefix
-	if compacted[0].Role != llm.RoleUser {
-		t.Errorf("expected first message to be user role, got %v", compacted[0].Role)
+	// First message should be the summary with prefix as assistant
+	if compacted[0].Role != llm.RoleAssistant {
+		t.Errorf("expected first message to be assistant role, got %v", compacted[0].Role)
 	}
-	if compacted[0].Content == "" {
+	if len(compacted[0].Blocks) == 0 {
+		t.Error("expected first message to have content blocks")
+	} else if compacted[0].Blocks[0].Text == "" || !strings.Contains(compacted[0].Blocks[0].Text, summary) {
 		t.Error("expected first message to contain summary content")
 	}
 
-	// Second message should be the recent user message
+	// Second message should be the most recent user message
 	if compacted[1].Content != "Recent user question" {
 		t.Errorf("expected second message to be recent user question, got %q", compacted[1].Content)
 	}
@@ -302,8 +305,11 @@ func TestCompactIntegration(t *testing.T) {
 	if result.OriginalTokens != originalTokens {
 		t.Errorf("expected original tokens %d, got %d", originalTokens, result.OriginalTokens)
 	}
-	if result.MessagesRemoved != originalLen {
-		t.Errorf("expected %d messages removed, got %d", originalLen, result.MessagesRemoved)
+	// After compaction: assistant(summary) + most recent user message = 2
+	// MessagesRemoved = originalLen - 2
+	expectedRemoved := originalLen - 2
+	if result.MessagesRemoved != expectedRemoved {
+		t.Errorf("expected %d messages removed, got %d", expectedRemoved, result.MessagesRemoved)
 	}
 
 	// Verify LLM was called

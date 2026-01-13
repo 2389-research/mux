@@ -4,9 +4,13 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 
 	"github.com/2389-research/mux/llm"
 )
+
+// ErrEmptySummary is returned when compaction produces an empty summary.
+var ErrEmptySummary = errors.New("compaction produced empty summary")
 
 // SummarizationPrompt is sent to LLM to generate conversation summary.
 const SummarizationPrompt = `You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
@@ -61,6 +65,9 @@ func (o *Orchestrator) compact(ctx context.Context) (*CompactionResult, error) {
 
 	// Extract summary text from response
 	summary := resp.TextContent()
+	if summary == "" {
+		return nil, ErrEmptySummary
+	}
 
 	// 7. Collect recent user messages (up to CompactUserMessageMaxTokens)
 	recentUserMsgs := o.collectRecentUserMessages(CompactUserMessageMaxTokens)
@@ -75,7 +82,7 @@ func (o *Orchestrator) compact(ctx context.Context) (*CompactionResult, error) {
 		Summary:         summary,
 		OriginalTokens:  originalTokens,
 		CompactedTokens: compactedTokens,
-		MessagesRemoved: originalMsgCount,
+		MessagesRemoved: originalMsgCount - len(o.messages),
 	}, nil
 }
 
@@ -103,7 +110,8 @@ func (o *Orchestrator) collectRecentUserMessages(maxTokens int) []llm.Message {
 	var recentFirst []llm.Message
 	for i := len(o.messages) - 1; i >= 0; i-- {
 		msg := o.messages[i]
-		if msg.Role == llm.RoleUser && msg.Content != "" {
+		// Include user messages with content in either Content field or Blocks
+		if msg.Role == llm.RoleUser && (msg.Content != "" || len(msg.Blocks) > 0) {
 			recentFirst = append(recentFirst, msg)
 		}
 	}
@@ -134,16 +142,21 @@ func (o *Orchestrator) collectRecentUserMessages(maxTokens int) []llm.Message {
 }
 
 // buildCompactedHistory creates new message history with summary + recent messages.
+// The summary becomes an assistant message to maintain valid alternating roles.
+// Only the most recent user message is kept to ensure user/assistant alternation.
 func (o *Orchestrator) buildCompactedHistory(summary string, recentUserMsgs []llm.Message) []llm.Message {
-	// Start with summary message as user message with prefix
+	// Summary becomes assistant message with prefix
 	summaryContent := SummaryPrefix + "\n\n" + summary
+	summaryMsg := llm.Message{
+		Role:   llm.RoleAssistant,
+		Blocks: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: summaryContent}},
+	}
 
-	// Preallocate with capacity for summary message + recent user messages
-	messages := make([]llm.Message, 0, 1+len(recentUserMsgs))
-	messages = append(messages, llm.NewUserMessage(summaryContent))
+	// Only keep the most recent user message to ensure valid alternation
+	// (assistant -> user is valid, but assistant -> user -> user is not)
+	if len(recentUserMsgs) > 0 {
+		return []llm.Message{summaryMsg, recentUserMsgs[len(recentUserMsgs)-1]}
+	}
 
-	// Append recent user messages
-	messages = append(messages, recentUserMsgs...)
-
-	return messages
+	return []llm.Message{summaryMsg}
 }
