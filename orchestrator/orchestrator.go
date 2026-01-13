@@ -230,6 +230,25 @@ func (o *Orchestrator) runLoop(ctx context.Context, prompt string) error {
 		default:
 		}
 
+		// Check for compaction before LLM call
+		if result, err := o.compact(ctx); err != nil {
+			return o.handleError(fmt.Errorf("compaction failed: %w", err))
+		} else if result != nil {
+			// Fire compaction hook
+			if o.hookManager != nil {
+				event := &hooks.CompactionEvent{
+					SessionID:       o.sessionID,
+					OriginalTokens:  result.OriginalTokens,
+					CompactedTokens: result.CompactedTokens,
+					MessagesRemoved: result.MessagesRemoved,
+					Summary:         result.Summary,
+				}
+				if err := o.hookManager.FireCompaction(ctx, event); err != nil {
+					return o.handleError(err)
+				}
+			}
+		}
+
 		// Fire Iteration hook at start of each loop iteration
 		if o.hookManager != nil {
 			event := &hooks.IterationEvent{
