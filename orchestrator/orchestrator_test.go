@@ -823,6 +823,25 @@ func (m *mockLoopingLLMClient) CreateMessageStream(ctx context.Context, req *llm
 	return ch, nil
 }
 
+// mockDynamicLLMClient returns responses from a function for dynamic testing.
+type mockDynamicLLMClient struct {
+	responseFn func() *llm.Response
+}
+
+func (m *mockDynamicLLMClient) CreateMessage(ctx context.Context, req *llm.Request) (*llm.Response, error) {
+	return m.responseFn(), nil
+}
+
+func (m *mockDynamicLLMClient) CreateMessageStream(ctx context.Context, req *llm.Request) (<-chan llm.StreamEvent, error) {
+	ch := make(chan llm.StreamEvent)
+	go func() {
+		resp := m.responseFn()
+		ch <- llm.StreamEvent{Type: llm.EventMessageStop, Response: resp}
+		close(ch)
+	}()
+	return ch, nil
+}
+
 // TestEventBusSlowSubscriberBufferOverflow tests that slow subscribers don't block
 // publishing and that events are dropped when the buffer overflows.
 func TestEventBusSlowSubscriberBufferOverflow(t *testing.T) {

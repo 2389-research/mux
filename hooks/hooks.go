@@ -44,6 +44,8 @@ type SessionEndEvent struct {
 // Hooks can set Continue=true to force the loop to continue.
 // Once any hook sets Continue=true, the loop will continue regardless
 // of subsequent hooks setting it to false.
+// When Continue=true, a "continue" user message is automatically injected
+// into the conversation to prompt the LLM for another response.
 type StopEvent struct {
 	SessionID string
 	FinalText string

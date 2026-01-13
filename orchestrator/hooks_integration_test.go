@@ -31,6 +31,19 @@ func newHookRecorder() *hookRecorder {
 	return &hookRecorder{}
 }
 
+// drainEvents spawns a goroutine to consume all events and returns a function
+// to wait for completion. This prevents goroutine leaks in tests.
+func drainEvents(events <-chan orchestrator.Event) func() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for range events {
+		}
+	}()
+	return wg.Wait
+}
+
 func (r *hookRecorder) registerAll(m *hooks.Manager) {
 	m.OnSessionStart(func(ctx context.Context, e *hooks.SessionStartEvent) error {
 		r.mu.Lock()
@@ -103,12 +116,9 @@ func TestHookSessionStartOnRun(t *testing.T) {
 	config.HookManager = hookMgr
 	orch := orchestrator.NewWithConfig(client, executor, config)
 
-	// Drain events
-	events := orch.Subscribe()
-	go func() {
-		for range events {
-		}
-	}()
+	// Drain events and ensure cleanup
+	wait := drainEvents(orch.Subscribe())
+	defer wait()
 
 	err := orch.Run(context.Background(), "Test prompt")
 	if err != nil {
@@ -154,11 +164,8 @@ func TestHookSessionStartOnContinue(t *testing.T) {
 	config.HookManager = hookMgr
 	orch := orchestrator.NewWithConfig(client, executor, config)
 
-	events := orch.Subscribe()
-	go func() {
-		for range events {
-		}
-	}()
+	wait := drainEvents(orch.Subscribe())
+	defer wait()
 
 	err := orch.Continue(context.Background(), "Continue prompt")
 	if err != nil {
@@ -194,11 +201,8 @@ func TestHookSessionEndOnComplete(t *testing.T) {
 	config.HookManager = hookMgr
 	orch := orchestrator.NewWithConfig(client, executor, config)
 
-	events := orch.Subscribe()
-	go func() {
-		for range events {
-		}
-	}()
+	wait := drainEvents(orch.Subscribe())
+	defer wait()
 
 	err := orch.Run(context.Background(), "Test")
 	if err != nil {
@@ -232,11 +236,8 @@ func TestHookSessionEndOnError(t *testing.T) {
 	config.HookManager = hookMgr
 	orch := orchestrator.NewWithConfig(client, executor, config)
 
-	events := orch.Subscribe()
-	go func() {
-		for range events {
-		}
-	}()
+	wait := drainEvents(orch.Subscribe())
+	defer wait()
 
 	err := orch.Run(context.Background(), "Test")
 	if err == nil {
@@ -278,11 +279,8 @@ func TestHookSessionEndOnCancelled(t *testing.T) {
 	config.HookManager = hookMgr
 	orch := orchestrator.NewWithConfig(client, executor, config)
 
-	events := orch.Subscribe()
-	go func() {
-		for range events {
-		}
-	}()
+	wait := drainEvents(orch.Subscribe())
+	defer wait()
 
 	err := orch.Run(ctx, "Test")
 	if err != context.Canceled {
@@ -342,11 +340,8 @@ func TestHookIterationFiringCorrectly(t *testing.T) {
 	config.HookManager = hookMgr
 	orch := orchestrator.NewWithConfig(client, executor, config)
 
-	events := orch.Subscribe()
-	go func() {
-		for range events {
-		}
-	}()
+	wait := drainEvents(orch.Subscribe())
+	defer wait()
 
 	err := orch.Run(context.Background(), "Test")
 	if err != nil {
@@ -387,11 +382,8 @@ func TestHookIterationSingleIteration(t *testing.T) {
 	config.HookManager = hookMgr
 	orch := orchestrator.NewWithConfig(client, executor, config)
 
-	events := orch.Subscribe()
-	go func() {
-		for range events {
-		}
-	}()
+	wait := drainEvents(orch.Subscribe())
+	defer wait()
 
 	err := orch.Run(context.Background(), "Test")
 	if err != nil {
@@ -427,11 +419,8 @@ func TestHookStopFires(t *testing.T) {
 	config.HookManager = hookMgr
 	orch := orchestrator.NewWithConfig(client, executor, config)
 
-	events := orch.Subscribe()
-	go func() {
-		for range events {
-		}
-	}()
+	wait := drainEvents(orch.Subscribe())
+	defer wait()
 
 	err := orch.Run(context.Background(), "Test")
 	if err != nil {
@@ -479,11 +468,8 @@ func TestHookStopContinue(t *testing.T) {
 	config.HookManager = hookMgr
 	orch := orchestrator.NewWithConfig(client, executor, config)
 
-	events := orch.Subscribe()
-	go func() {
-		for range events {
-		}
-	}()
+	wait := drainEvents(orch.Subscribe())
+	defer wait()
 
 	err := orch.Run(context.Background(), "Test")
 	if err != nil {
@@ -549,11 +535,8 @@ func TestHookOrderingWithinIteration(t *testing.T) {
 	config.HookManager = hookMgr
 	orch := orchestrator.NewWithConfig(client, executor, config)
 
-	orchEvents := orch.Subscribe()
-	go func() {
-		for range orchEvents {
-		}
-	}()
+	wait := drainEvents(orch.Subscribe())
+	defer wait()
 
 	err := orch.Run(context.Background(), "Test")
 	if err != nil {
@@ -592,11 +575,8 @@ func TestHookMaxIterationsWithIterationHook(t *testing.T) {
 	config.HookManager = hookMgr
 	orch := orchestrator.NewWithConfig(loopingClient, executor, config)
 
-	events := orch.Subscribe()
-	go func() {
-		for range events {
-		}
-	}()
+	wait := drainEvents(orch.Subscribe())
+	defer wait()
 
 	err := orch.Run(context.Background(), "Test")
 	if err == nil {
@@ -624,6 +604,81 @@ func TestHookMaxIterationsWithIterationHook(t *testing.T) {
 	}
 }
 
+// TestHookIterationError verifies that iteration hook errors propagate correctly.
+func TestHookIterationError(t *testing.T) {
+	expectedErr := fmt.Errorf("iteration hook failed")
+	var sessionEnds []hooks.SessionEndEvent
+	var mu sync.Mutex
+
+	hookMgr := hooks.NewManager()
+
+	// Register an iteration hook that fails on iteration 1
+	hookMgr.OnIteration(func(ctx context.Context, e *hooks.IterationEvent) error {
+		if e.Iteration == 1 {
+			return expectedErr
+		}
+		return nil
+	})
+
+	hookMgr.OnSessionEnd(func(ctx context.Context, e *hooks.SessionEndEvent) error {
+		mu.Lock()
+		defer mu.Unlock()
+		sessionEnds = append(sessionEnds, *e)
+		return nil
+	})
+
+	// Client that requires 2 iterations (tool use then text)
+	client := &mockLLMClient{
+		responses: []*llm.Response{
+			{
+				Content: []llm.ContentBlock{{
+					Type:  llm.ContentTypeToolUse,
+					ID:    "tool_1",
+					Name:  "test_tool",
+					Input: map[string]any{},
+				}},
+				StopReason: llm.StopReasonToolUse,
+			},
+			{
+				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done"}},
+				StopReason: llm.StopReasonEndTurn,
+			},
+		},
+	}
+
+	registry := tool.NewRegistry()
+	testTool := &mockTool{name: "test_tool"}
+	registry.Register(testTool)
+	executor := tool.NewExecutor(registry)
+
+	config := orchestrator.DefaultConfig()
+	config.HookManager = hookMgr
+	orch := orchestrator.NewWithConfig(client, executor, config)
+
+	wait := drainEvents(orch.Subscribe())
+	defer wait()
+
+	err := orch.Run(context.Background(), "Test")
+
+	// Should get the iteration hook error
+	if err != expectedErr {
+		t.Fatalf("expected iteration hook error, got %v", err)
+	}
+
+	// SessionEnd should fire with error reason
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sessionEnds) != 1 {
+		t.Fatalf("expected 1 SessionEnd event, got %d", len(sessionEnds))
+	}
+	if sessionEnds[0].Reason != "error" {
+		t.Errorf("expected reason 'error', got %q", sessionEnds[0].Reason)
+	}
+	if sessionEnds[0].Error != expectedErr {
+		t.Errorf("expected error %v in SessionEnd, got %v", expectedErr, sessionEnds[0].Error)
+	}
+}
+
 // TestHookNoHookManager verifies orchestrator works without hook manager.
 func TestHookNoHookManager(t *testing.T) {
 	client := &mockLLMClient{
@@ -638,11 +693,8 @@ func TestHookNoHookManager(t *testing.T) {
 	// No hook manager configured
 	orch := orchestrator.New(client, executor)
 
-	events := orch.Subscribe()
-	go func() {
-		for range events {
-		}
-	}()
+	wait := drainEvents(orch.Subscribe())
+	defer wait()
 
 	err := orch.Run(context.Background(), "Test")
 	if err != nil {
@@ -653,23 +705,4 @@ func TestHookNoHookManager(t *testing.T) {
 	if orch.State() != orchestrator.StateComplete {
 		t.Errorf("expected StateComplete, got %s", orch.State())
 	}
-}
-
-// mockDynamicLLMClient returns responses from a function for dynamic testing.
-type mockDynamicLLMClient struct {
-	responseFn func() *llm.Response
-}
-
-func (m *mockDynamicLLMClient) CreateMessage(ctx context.Context, req *llm.Request) (*llm.Response, error) {
-	return m.responseFn(), nil
-}
-
-func (m *mockDynamicLLMClient) CreateMessageStream(ctx context.Context, req *llm.Request) (<-chan llm.StreamEvent, error) {
-	ch := make(chan llm.StreamEvent)
-	go func() {
-		resp := m.responseFn()
-		ch <- llm.StreamEvent{Type: llm.EventMessageStop, Response: resp}
-		close(ch)
-	}()
-	return ch, nil
 }
