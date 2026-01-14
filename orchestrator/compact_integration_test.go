@@ -106,26 +106,33 @@ func TestCompactionTriggers(t *testing.T) {
 	hookMgr := hooks.NewManager()
 	hookMgr.OnCompaction(recorder.record)
 
-	// Client that returns large responses to build up context
-	client := &compactionTestClient{
-		responseSize: 2000, // ~500 tokens per response
-	}
+	// Client returns small responses so compaction can reduce tokens
+	client := &compactionTestClient{}
 
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
 
 	config := orchestrator.DefaultConfig()
 	config.HookManager = hookMgr
-	config.ContextBudget = 200 // Very low budget to trigger compaction
+	config.ContextBudget = 500 // Budget that's exceeded by pre-populated messages
 	orch := orchestrator.NewWithConfig(client, executor, config)
+
+	// Pre-populate conversation history with many large messages
+	// so that compaction can actually reduce tokens
+	largeText := strings.Repeat("x", 2000) // ~500 tokens
+	orch.SetMessages([]llm.Message{
+		llm.NewUserMessage(largeText),
+		{Role: llm.RoleAssistant, Blocks: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: largeText}}},
+		llm.NewUserMessage(largeText),
+		{Role: llm.RoleAssistant, Blocks: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: largeText}}},
+	})
 
 	// Drain events to prevent goroutine leak
 	wait := drainEvents(orch.Subscribe())
 	defer wait()
 
-	// Run with a large prompt that will exceed budget on second iteration
-	largePrompt := strings.Repeat("This is a test message. ", 100) // ~2400 chars ~600 tokens
-	err := orch.Run(context.Background(), largePrompt)
+	// Continue with a small prompt (this is the "recent" message that gets kept)
+	err := orch.Continue(context.Background(), "What's the summary?")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -145,6 +152,11 @@ func TestCompactionTriggers(t *testing.T) {
 	}
 	if event.Summary == "" {
 		t.Error("expected non-empty Summary in CompactionEvent")
+	}
+	// Verify tokens were actually reduced
+	if event.CompactedTokens >= event.OriginalTokens {
+		t.Errorf("expected compaction to reduce tokens, got original=%d compacted=%d",
+			event.OriginalTokens, event.CompactedTokens)
 	}
 }
 
@@ -273,16 +285,24 @@ func TestCompactionHookFires(t *testing.T) {
 
 	config := orchestrator.DefaultConfig()
 	config.HookManager = hookMgr
-	config.ContextBudget = 100 // Low to ensure compaction triggers
+	config.ContextBudget = 500 // Budget that's exceeded by pre-populated messages
 	orch := orchestrator.NewWithConfig(client, executor, config)
+
+	// Pre-populate conversation history with multiple large messages
+	// so that compaction can actually reduce tokens (summary replaces many messages)
+	largeText := strings.Repeat("x", 2000) // ~500 tokens each
+	orch.SetMessages([]llm.Message{
+		llm.NewUserMessage(largeText),
+		{Role: llm.RoleAssistant, Blocks: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: largeText}}},
+		llm.NewUserMessage(largeText),
+		{Role: llm.RoleAssistant, Blocks: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: largeText}}},
+	})
 
 	wait := drainEvents(orch.Subscribe())
 	defer wait()
 
-	// Create a very large prompt to exceed budget
-	// Must be large enough that compaction actually reduces tokens (summary prefix is ~300 chars)
-	largePrompt := strings.Repeat("This is a very long test message with lots of words to analyze. ", 500) // ~32000 chars ~8000 tokens
-	err := orch.Run(context.Background(), largePrompt)
+	// Continue with a small prompt (this becomes the recent user message that gets kept)
+	err := orch.Continue(context.Background(), "What's the summary?")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -308,10 +328,11 @@ func TestCompactionHookFires(t *testing.T) {
 	if capturedEvent.CompactedTokens <= 0 {
 		t.Errorf("expected positive CompactedTokens, got %d", capturedEvent.CompactedTokens)
 	}
-	// MessagesRemoved can be negative if original had few messages (e.g., 1 user message)
-	// but compacted has summary + recent user = 2 messages.
-	// Note: With a single large user message, compaction may not reduce tokens because
-	// the recent message is kept. Token reduction is most effective with multiple messages.
+	// Verify tokens were actually reduced
+	if capturedEvent.CompactedTokens >= capturedEvent.OriginalTokens {
+		t.Errorf("expected compaction to reduce tokens, got original=%d compacted=%d",
+			capturedEvent.OriginalTokens, capturedEvent.CompactedTokens)
+	}
 	t.Logf("Compaction: OriginalTokens=%d, CompactedTokens=%d, MessagesRemoved=%d",
 		capturedEvent.OriginalTokens, capturedEvent.CompactedTokens, capturedEvent.MessagesRemoved)
 	if capturedEvent.Summary == "" {

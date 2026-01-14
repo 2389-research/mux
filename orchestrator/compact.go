@@ -74,10 +74,18 @@ func (o *Orchestrator) compact(ctx context.Context) (*CompactionResult, error) {
 
 	// 8. Build compacted history
 	originalMsgCount := len(o.messages)
-	o.messages = o.buildCompactedHistory(summary, recentUserMsgs)
+	compactedMsgs := o.buildCompactedHistory(summary, recentUserMsgs)
 
-	// 9. Return result
-	compactedTokens := EstimateMessagesTokens(o.messages)
+	// 9. Check if compaction would actually reduce tokens
+	// Skip if compaction would increase tokens (prevents infinite loop)
+	compactedTokens := EstimateMessagesTokens(compactedMsgs)
+	if compactedTokens >= originalTokens {
+		// Compaction wouldn't help - skip it
+		return nil, nil
+	}
+
+	// 10. Commit the compaction
+	o.messages = compactedMsgs
 	return &CompactionResult{
 		Summary:         summary,
 		OriginalTokens:  originalTokens,

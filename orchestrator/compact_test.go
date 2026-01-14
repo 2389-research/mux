@@ -4,6 +4,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -92,6 +93,60 @@ func TestCompactUnderBudget(t *testing.T) {
 	}
 	if result != nil {
 		t.Fatalf("expected nil result when under budget, got: %+v", result)
+	}
+}
+
+func TestCompactEmptySummary(t *testing.T) {
+	// When LLM returns empty response, ErrEmptySummary should be returned
+	client := &compactMockClient{
+		response: &llm.Response{
+			Content:    []llm.ContentBlock{}, // Empty content
+			StopReason: llm.StopReasonEndTurn,
+			Usage:      llm.Usage{InputTokens: 100, OutputTokens: 0},
+		},
+	}
+	executor := newTestExecutor()
+	config := Config{
+		MaxIterations: 10,
+		ContextBudget: 10, // Low budget to trigger compaction
+	}
+	orch := NewWithConfig(client, executor, config)
+
+	// Add messages that exceed budget
+	orch.mu.Lock()
+	orch.messages = []llm.Message{
+		llm.NewUserMessage(strings.Repeat("test ", 100)), // ~500 chars = ~125 tokens
+	}
+	_, err := orch.compact(context.Background())
+	orch.mu.Unlock()
+
+	if err != ErrEmptySummary {
+		t.Errorf("expected ErrEmptySummary, got: %v", err)
+	}
+}
+
+func TestCompactLLMError(t *testing.T) {
+	// When LLM returns error, it should be propagated
+	expectedErr := errors.New("LLM API error")
+	client := &compactMockClient{
+		err: expectedErr,
+	}
+	executor := newTestExecutor()
+	config := Config{
+		MaxIterations: 10,
+		ContextBudget: 10, // Low budget to trigger compaction
+	}
+	orch := NewWithConfig(client, executor, config)
+
+	orch.mu.Lock()
+	orch.messages = []llm.Message{
+		llm.NewUserMessage(strings.Repeat("test ", 100)),
+	}
+	_, err := orch.compact(context.Background())
+	orch.mu.Unlock()
+
+	if err != expectedErr {
+		t.Errorf("expected %v, got: %v", expectedErr, err)
 	}
 }
 
@@ -267,11 +322,9 @@ func TestCompactIntegration(t *testing.T) {
 	executor := newTestExecutor()
 
 	// Create a large conversation that exceeds budget
-	// Each character is roughly 0.25 tokens, so 4000 chars ~ 1000 tokens
-	largeText := make([]byte, 4000)
-	for i := range largeText {
-		largeText[i] = 'x'
-	}
+	// Create conversation with many large messages and a small recent message
+	// so that compaction actually reduces tokens
+	largeText := strings.Repeat("x", 2000) // ~500 tokens
 
 	config := Config{
 		MaxIterations: 10,
@@ -281,9 +334,13 @@ func TestCompactIntegration(t *testing.T) {
 	orch := NewWithConfig(client, executor, config)
 
 	orch.mu.Lock()
+	// Multiple large messages (will be removed) + small recent user message (will be kept)
 	orch.messages = []llm.Message{
-		llm.NewUserMessage(string(largeText)),
-		llm.NewAssistantMessage("Response to the large message"),
+		llm.NewUserMessage(largeText),      // Large old message
+		llm.NewAssistantMessage(largeText), // Large response
+		llm.NewUserMessage(largeText),      // Another large message
+		llm.NewAssistantMessage(largeText), // Another response
+		llm.NewUserMessage("What's next?"), // Small recent user message (kept)
 	}
 	originalLen := len(orch.messages)
 	originalTokens := EstimateMessagesTokens(orch.messages)
@@ -305,11 +362,17 @@ func TestCompactIntegration(t *testing.T) {
 	if result.OriginalTokens != originalTokens {
 		t.Errorf("expected original tokens %d, got %d", originalTokens, result.OriginalTokens)
 	}
-	// After compaction: assistant(summary) + most recent user message = 2
-	// MessagesRemoved = originalLen - 2
+	// Compacted = assistant(summary) + user("What's next?") = 2 messages
+	// MessagesRemoved = 5 - 2 = 3
 	expectedRemoved := originalLen - 2
 	if result.MessagesRemoved != expectedRemoved {
 		t.Errorf("expected %d messages removed, got %d", expectedRemoved, result.MessagesRemoved)
+	}
+
+	// Verify compaction actually reduced tokens
+	if result.CompactedTokens >= result.OriginalTokens {
+		t.Errorf("compaction should reduce tokens, got original=%d compacted=%d",
+			result.OriginalTokens, result.CompactedTokens)
 	}
 
 	// Verify LLM was called
