@@ -30,6 +30,22 @@ func NewOpenAIClient(apiKey, model string) *OpenAIClient {
 	}
 }
 
+// NewOpenAIClientWithBaseURL creates an OpenAI API client with a custom base URL.
+// Useful for Azure OpenAI, proxies, or OpenAI-compatible endpoints.
+func NewOpenAIClientWithBaseURL(apiKey, model, baseURL string) *OpenAIClient {
+	if model == "" {
+		model = "gpt-5.2"
+	}
+	opts := []option.RequestOption{option.WithAPIKey(apiKey)}
+	if baseURL != "" {
+		opts = append(opts, option.WithBaseURL(baseURL))
+	}
+	return &OpenAIClient{
+		client: openai.NewClient(opts...),
+		model:  model,
+	}
+}
+
 // convertOpenAIRequest converts our Request to OpenAI's ChatCompletionNewParams.
 func convertOpenAIRequest(req *Request) openai.ChatCompletionNewParams {
 	params := openai.ChatCompletionNewParams{

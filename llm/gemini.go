@@ -38,6 +38,34 @@ func NewGeminiClient(ctx context.Context, apiKey, model string) (*GeminiClient, 
 	}, nil
 }
 
+// NewGeminiClientWithBaseURL creates a Gemini API client with a custom base URL.
+// Useful for proxies or compatible endpoints.
+func NewGeminiClientWithBaseURL(ctx context.Context, apiKey, model, baseURL string) (*GeminiClient, error) {
+	if model == "" {
+		model = "gemini-2.0-flash"
+	}
+
+	config := &genai.ClientConfig{
+		APIKey:  apiKey,
+		Backend: genai.BackendGeminiAPI,
+	}
+	if baseURL != "" {
+		config.HTTPOptions = genai.HTTPOptions{
+			BaseURL: baseURL,
+		}
+	}
+
+	client, err := genai.NewClient(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Gemini client: %w", err)
+	}
+
+	return &GeminiClient{
+		client: client,
+		model:  model,
+	}, nil
+}
+
 // convertGeminiRequest converts our Request to Gemini's content and config.
 func convertGeminiRequest(req *Request) ([]*genai.Content, *genai.GenerateContentConfig) {
 	config := &genai.GenerateContentConfig{}

@@ -30,6 +30,22 @@ func NewAnthropicClient(apiKey, model string) *AnthropicClient {
 	}
 }
 
+// NewAnthropicClientWithBaseURL creates an Anthropic API client with a custom base URL.
+// Useful for proxies, API gateways, or compatible endpoints.
+func NewAnthropicClientWithBaseURL(apiKey, model, baseURL string) *AnthropicClient {
+	if model == "" {
+		model = "claude-sonnet-4-20250514"
+	}
+	opts := []option.RequestOption{option.WithAPIKey(apiKey)}
+	if baseURL != "" {
+		opts = append(opts, option.WithBaseURL(baseURL))
+	}
+	return &AnthropicClient{
+		client: anthropic.NewClient(opts...),
+		model:  model,
+	}
+}
+
 // convertRequest converts our Request to Anthropic's MessageNewParams.
 func convertRequest(req *Request) anthropic.MessageNewParams {
 	params := anthropic.MessageNewParams{
