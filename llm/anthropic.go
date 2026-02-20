@@ -173,7 +173,7 @@ func (a *AnthropicClient) CreateMessage(ctx context.Context, req *Request) (*Res
 		req.Model = a.model
 	}
 	if req.MaxTokens == 0 {
-		req.MaxTokens = 4096
+		req.MaxTokens = DefaultMaxTokens
 	}
 
 	params := convertRequest(req)
@@ -191,7 +191,7 @@ func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request)
 		req.Model = a.model
 	}
 	if req.MaxTokens == 0 {
-		req.MaxTokens = 4096
+		req.MaxTokens = DefaultMaxTokens
 	}
 
 	params := convertRequest(req)

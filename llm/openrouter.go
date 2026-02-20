@@ -77,7 +77,7 @@ func (o *OpenRouterClient) CreateMessage(ctx context.Context, req *Request) (*Re
 		req.Model = o.model
 	}
 	if req.MaxTokens == 0 {
-		req.MaxTokens = 4096
+		req.MaxTokens = DefaultMaxTokens
 	}
 
 	params := convertOpenAIRequest(req)
@@ -95,7 +95,7 @@ func (o *OpenRouterClient) CreateMessageStream(ctx context.Context, req *Request
 		req.Model = o.model
 	}
 	if req.MaxTokens == 0 {
-		req.MaxTokens = 4096
+		req.MaxTokens = DefaultMaxTokens
 	}
 
 	params := convertOpenAIRequest(req)

@@ -28,6 +28,11 @@ const (
 	StopReasonMaxTokens StopReason = "max_tokens"
 )
 
+// DefaultMaxTokens is the max output tokens used when a request does not
+// specify MaxTokens. 16 384 is a safe floor across all major providers
+// (Anthropic 64-128K, OpenAI 32K, Gemini 8-65K, Ollama varies).
+const DefaultMaxTokens = 16384
+
 // Message represents a conversation message.
 type Message struct {
 	Role    Role           `json:"role"`

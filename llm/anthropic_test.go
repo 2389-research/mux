@@ -1019,8 +1019,8 @@ func TestCreateMessageStream_DefaultModelAndMaxTokens(t *testing.T) {
 		if reqBody["model"] != "claude-sonnet-4-20250514" {
 			t.Errorf("expected default model, got %v", reqBody["model"])
 		}
-		if reqBody["max_tokens"] != float64(4096) {
-			t.Errorf("expected default max_tokens 4096, got %v", reqBody["max_tokens"])
+		if reqBody["max_tokens"] != float64(DefaultMaxTokens) {
+			t.Errorf("expected default max_tokens %d, got %v", DefaultMaxTokens, reqBody["max_tokens"])
 		}
 
 		w.Header().Set("Content-Type", "text/event-stream")

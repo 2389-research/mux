@@ -49,7 +49,7 @@ func (o *OllamaClient) CreateMessage(ctx context.Context, req *Request) (*Respon
 		req.Model = o.model
 	}
 	if req.MaxTokens == 0 {
-		req.MaxTokens = 4096
+		req.MaxTokens = DefaultMaxTokens
 	}
 
 	params := convertOpenAIRequest(req)
@@ -67,7 +67,7 @@ func (o *OllamaClient) CreateMessageStream(ctx context.Context, req *Request) (<
 		req.Model = o.model
 	}
 	if req.MaxTokens == 0 {
-		req.MaxTokens = 4096
+		req.MaxTokens = DefaultMaxTokens
 	}
 
 	params := convertOpenAIRequest(req)

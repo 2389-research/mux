@@ -396,7 +396,7 @@ func TestOpenRouterClient_DefaultMaxTokens(t *testing.T) {
 	ctx := context.Background()
 	req := &Request{
 		Messages: []Message{NewUserMessage("Hello")},
-		// MaxTokens not set - should default to 4096
+		// MaxTokens not set - should use DefaultMaxTokens
 	}
 
 	_, err := client.CreateMessage(ctx, req)
@@ -404,8 +404,8 @@ func TestOpenRouterClient_DefaultMaxTokens(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if receivedMaxTokens != 4096 {
-		t.Errorf("expected max_completion_tokens 4096, got %d", receivedMaxTokens)
+	if receivedMaxTokens != DefaultMaxTokens {
+		t.Errorf("expected max_completion_tokens %d, got %d", DefaultMaxTokens, receivedMaxTokens)
 	}
 }
 

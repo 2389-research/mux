@@ -690,8 +690,8 @@ func TestOllamaClient_DefaultMaxTokens(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if receivedMaxTokens != 4096 {
-		t.Errorf("expected default max_tokens 4096, got %d", receivedMaxTokens)
+	if receivedMaxTokens != DefaultMaxTokens {
+		t.Errorf("expected default max_tokens %d, got %d", DefaultMaxTokens, receivedMaxTokens)
 	}
 }
 

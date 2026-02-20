@@ -226,7 +226,7 @@ func (g *GeminiClient) CreateMessage(ctx context.Context, req *Request) (*Respon
 		model = g.model
 	}
 	if req.MaxTokens == 0 {
-		req.MaxTokens = 4096
+		req.MaxTokens = DefaultMaxTokens
 	}
 
 	contents, config := convertGeminiRequest(req)
@@ -245,7 +245,7 @@ func (g *GeminiClient) CreateMessageStream(ctx context.Context, req *Request) (<
 		model = g.model
 	}
 	if req.MaxTokens == 0 {
-		req.MaxTokens = 4096
+		req.MaxTokens = DefaultMaxTokens
 	}
 
 	contents, config := convertGeminiRequest(req)
