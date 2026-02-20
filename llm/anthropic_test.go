@@ -850,13 +850,48 @@ func TestCreateMessageStream_WithToolUse(t *testing.T) {
 	}
 
 	// Verify we have content blocks for both text and tool use (indices 0 and 1)
-	var foundTextDelta, foundToolStart bool
+	var foundTextDelta, foundToolStart, foundToolDelta, foundMessageDelta bool
 	for _, event := range events {
 		if event.Type == EventContentDelta && event.Index == 0 && event.Text == "Let me help" {
 			foundTextDelta = true
 		}
 		if event.Type == EventContentStart && event.Index == 1 {
 			foundToolStart = true
+			// Verify Block is populated with tool_use metadata
+			if event.Block == nil {
+				t.Error("expected Block to be populated for tool_use content_block_start")
+			} else {
+				if event.Block.Type != ContentTypeToolUse {
+					t.Errorf("expected Block.Type = tool_use, got %s", event.Block.Type)
+				}
+				if event.Block.ID != "tool_abc" {
+					t.Errorf("expected Block.ID = tool_abc, got %s", event.Block.ID)
+				}
+				if event.Block.Name != "read_file" {
+					t.Errorf("expected Block.Name = read_file, got %s", event.Block.Name)
+				}
+			}
+		}
+		if event.Type == EventContentDelta && event.Index == 1 {
+			foundToolDelta = true
+			// input_json_delta should be forwarded as text
+			if event.Text != "{\"path\":" {
+				t.Errorf("expected input_json_delta text = '{\"path\":', got '%s'", event.Text)
+			}
+		}
+		if event.Type == EventMessageDelta {
+			foundMessageDelta = true
+			// message_delta should carry stop_reason and usage
+			if event.Response == nil {
+				t.Error("expected Response to be populated for message_delta")
+			} else {
+				if event.Response.StopReason != "tool_use" {
+					t.Errorf("expected StopReason = tool_use, got %s", event.Response.StopReason)
+				}
+				if event.Response.Usage.OutputTokens != 12 {
+					t.Errorf("expected OutputTokens = 12, got %d", event.Response.Usage.OutputTokens)
+				}
+			}
 		}
 	}
 
@@ -866,6 +901,12 @@ func TestCreateMessageStream_WithToolUse(t *testing.T) {
 	if !foundToolStart {
 		t.Error("expected to find content_start event for tool use at index 1")
 	}
+	if !foundToolDelta {
+		t.Error("expected to find content_delta event for tool use at index 1")
+	}
+	if !foundMessageDelta {
+		t.Error("expected to find message_delta event")
+	}
 
 	// Verify final events
 	lastEvent := events[len(events)-1]
@@ -874,7 +915,7 @@ func TestCreateMessageStream_WithToolUse(t *testing.T) {
 	}
 }
 
-func TestCreateMessageStream_ContentDeltaNonTextType(t *testing.T) {
+func TestCreateMessageStream_InputJSONDelta(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
@@ -886,11 +927,11 @@ func TestCreateMessageStream_ContentDeltaNonTextType(t *testing.T) {
 		w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_789\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-20250514\",\"stop_reason\":null,\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n"))
 		flusher.Flush()
 
-		// Send content_block_start
+		// Send content_block_start for tool_use
 		w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool_123\",\"name\":\"test\"}}\n\n"))
 		flusher.Flush()
 
-		// Send content_block_delta with non-text type (e.g., input_json_delta)
+		// Send content_block_delta with input_json_delta — carries tool call arguments
 		w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}\n\n"))
 		flusher.Flush()
 
@@ -931,18 +972,39 @@ func TestCreateMessageStream_ContentDeltaNonTextType(t *testing.T) {
 		}
 	}
 
-	// Find the content_delta event
+	// Verify content_block_start carries Block with tool_use metadata
+	var foundStart bool
+	for _, event := range events {
+		if event.Type == EventContentStart {
+			foundStart = true
+			if event.Block == nil {
+				t.Fatal("expected Block to be populated for content_block_start")
+			}
+			if event.Block.Type != ContentTypeToolUse {
+				t.Errorf("expected Block.Type = tool_use, got %s", event.Block.Type)
+			}
+			if event.Block.ID != "tool_123" {
+				t.Errorf("expected Block.ID = tool_123, got %s", event.Block.ID)
+			}
+			if event.Block.Name != "test" {
+				t.Errorf("expected Block.Name = test, got %s", event.Block.Name)
+			}
+		}
+	}
+	if !foundStart {
+		t.Error("expected to find content_start event")
+	}
+
+	// Verify input_json_delta is forwarded as text (carries tool call arguments)
 	var foundDelta bool
 	for _, event := range events {
 		if event.Type == EventContentDelta {
 			foundDelta = true
-			// For non-text delta types, text should be empty
-			if event.Text != "" {
-				t.Errorf("expected empty text for non-text delta type, got '%s'", event.Text)
+			if event.Text != "{}" {
+				t.Errorf("expected input_json_delta text = '{}', got '%s'", event.Text)
 			}
 		}
 	}
-
 	if !foundDelta {
 		t.Error("expected to find content_delta event")
 	}

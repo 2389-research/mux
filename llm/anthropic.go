@@ -220,14 +220,28 @@ func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request)
 					Response: convertResponse(&event.Message),
 				}
 			case "content_block_start":
-				eventChan <- StreamEvent{
+				se := StreamEvent{
 					Type:  EventContentStart,
 					Index: int(event.Index),
 				}
+				// Populate Block so consumers can distinguish text from tool_use
+				if event.ContentBlock.Type != "" {
+					se.Block = &ContentBlock{
+						Type: ContentType(event.ContentBlock.Type),
+						ID:   event.ContentBlock.ID,
+						Name: event.ContentBlock.Name,
+					}
+				}
+				eventChan <- se
 			case "content_block_delta":
 				var text string
-				if event.Delta.Type == "text_delta" {
+				switch event.Delta.Type {
+				case "text_delta":
 					text = event.Delta.Text
+				case "input_json_delta":
+					text = event.Delta.PartialJSON
+				case "thinking_delta":
+					text = event.Delta.Thinking
 				}
 				eventChan <- StreamEvent{
 					Type:  EventContentDelta,
@@ -240,9 +254,19 @@ func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request)
 					Index: int(event.Index),
 				}
 			case "message_delta":
-				eventChan <- StreamEvent{
+				se := StreamEvent{
 					Type: EventMessageDelta,
 				}
+				// Carry stop_reason and usage from the final message_delta
+				if event.Delta.StopReason != "" || event.Usage.OutputTokens > 0 {
+					se.Response = &Response{
+						StopReason: StopReason(event.Delta.StopReason),
+						Usage: Usage{
+							OutputTokens: int(event.Usage.OutputTokens),
+						},
+					}
+				}
+				eventChan <- se
 			case "message_stop":
 				eventChan <- StreamEvent{
 					Type: EventMessageStop,
