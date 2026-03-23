@@ -17,6 +17,7 @@ const (
 	ContentTypeText       ContentType = "text"
 	ContentTypeToolUse    ContentType = "tool_use"
 	ContentTypeToolResult ContentType = "tool_result"
+	ContentTypeThinking   ContentType = "thinking"
 )
 
 // StopReason indicates why the model stopped generating.
@@ -65,6 +66,9 @@ type ContentBlock struct {
 	// For tool result
 	ToolUseID string `json:"tool_use_id,omitempty"`
 	IsError   bool   `json:"is_error,omitempty"`
+
+	// For thinking content
+	Thinking string `json:"thinking,omitempty"`
 }
 
 // ToolDefinition describes a tool for the LLM.
@@ -72,6 +76,12 @@ type ToolDefinition struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description"`
 	InputSchema map[string]any `json:"input_schema"`
+}
+
+// ThinkingConfig controls extended thinking / reasoning for providers that support it.
+type ThinkingConfig struct {
+	Enabled bool
+	Budget  int // token budget; interpretation varies by provider
 }
 
 // Request is the input for CreateMessage.
@@ -82,6 +92,7 @@ type Request struct {
 	MaxTokens   int              `json:"max_tokens,omitempty"`
 	System      string           `json:"system,omitempty"`
 	Temperature *float64         `json:"temperature,omitempty"`
+	Thinking    *ThinkingConfig  `json:"thinking,omitempty"`
 }
 
 // Response is the output from CreateMessage.
@@ -95,8 +106,9 @@ type Response struct {
 
 // Usage tracks token consumption.
 type Usage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens    int `json:"input_tokens"`
+	OutputTokens   int `json:"output_tokens"`
+	ThinkingTokens int `json:"thinking_tokens,omitempty"`
 }
 
 // HasToolUse returns true if the response contains tool use blocks.
