@@ -79,6 +79,14 @@ func convertGeminiRequest(req *Request) ([]*genai.Content, *genai.GenerateConten
 		config.Temperature = &temp
 	}
 
+	if req.Thinking != nil && req.Thinking.Enabled && req.Thinking.Budget > 0 && req.Thinking.Budget <= math.MaxInt32 {
+		budget := int32(req.Thinking.Budget) //nolint:gosec // bounds checked above
+		config.ThinkingConfig = &genai.ThinkingConfig{
+			ThinkingBudget:  &budget,
+			IncludeThoughts: true,
+		}
+	}
+
 	// System instruction
 	if req.System != "" {
 		config.SystemInstruction = genai.NewContentFromText(req.System, genai.RoleUser)
@@ -170,8 +178,9 @@ func convertGeminiResponse(resp *genai.GenerateContentResponse, model string) *R
 	// Usage metadata
 	if resp.UsageMetadata != nil {
 		result.Usage = Usage{
-			InputTokens:  int(resp.UsageMetadata.PromptTokenCount),
-			OutputTokens: int(resp.UsageMetadata.CandidatesTokenCount),
+			InputTokens:    int(resp.UsageMetadata.PromptTokenCount),
+			OutputTokens:   int(resp.UsageMetadata.CandidatesTokenCount),
+			ThinkingTokens: int(resp.UsageMetadata.ThoughtsTokenCount),
 		}
 	}
 
@@ -199,7 +208,12 @@ func convertGeminiResponse(resp *genai.GenerateContentResponse, model string) *R
 	// Extract content from candidate
 	if candidate.Content != nil {
 		for _, part := range candidate.Content.Parts {
-			if part.Text != "" {
+			if part.Thought {
+				result.Content = append(result.Content, ContentBlock{
+					Type:     ContentTypeThinking,
+					Thinking: part.Text,
+				})
+			} else if part.Text != "" {
 				result.Content = append(result.Content, ContentBlock{
 					Type: ContentTypeText,
 					Text: part.Text,

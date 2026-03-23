@@ -5,6 +5,8 @@ package llm
 import (
 	"context"
 	"testing"
+
+	"google.golang.org/genai"
 )
 
 func TestNewGeminiClient(t *testing.T) {
@@ -429,6 +431,84 @@ func TestConvertMessage_ToolWithNilInput(t *testing.T) {
 func TestGeminiClient_InterfaceCompliance(t *testing.T) {
 	// Compile-time check that GeminiClient implements Client
 	var _ Client = (*GeminiClient)(nil)
+}
+
+func TestConvertGeminiRequest_WithThinking(t *testing.T) {
+	req := &Request{
+		Model: "gemini-2.5-pro", Messages: []Message{NewUserMessage("Think hard")},
+		Thinking: &ThinkingConfig{Enabled: true, Budget: 8000},
+	}
+	_, config := convertGeminiRequest(req)
+	if config.ThinkingConfig == nil {
+		t.Fatal("expected ThinkingConfig to be set")
+	}
+	if config.ThinkingConfig.ThinkingBudget == nil || *config.ThinkingConfig.ThinkingBudget != 8000 {
+		t.Errorf("expected ThinkingBudget 8000, got %v", config.ThinkingConfig.ThinkingBudget)
+	}
+	if !config.ThinkingConfig.IncludeThoughts {
+		t.Error("expected IncludeThoughts to be true")
+	}
+}
+
+func TestConvertGeminiRequest_WithoutThinking(t *testing.T) {
+	req := &Request{
+		Model: "gemini-2.0-flash", Messages: []Message{NewUserMessage("Hello")},
+	}
+	_, config := convertGeminiRequest(req)
+	if config.ThinkingConfig != nil {
+		t.Error("expected ThinkingConfig to be nil")
+	}
+}
+
+func TestConvertGeminiResponse_ThinkingParts(t *testing.T) {
+	resp := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{Text: "Let me think...", Thought: true},
+						{Text: "Here is the answer."},
+					},
+				},
+				FinishReason: genai.FinishReasonStop,
+			},
+		},
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount: 10, CandidatesTokenCount: 50,
+		},
+	}
+	result := convertGeminiResponse(resp, "gemini-2.5-pro")
+	if len(result.Content) != 2 {
+		t.Fatalf("expected 2 blocks, got %d", len(result.Content))
+	}
+	if result.Content[0].Type != ContentTypeThinking {
+		t.Errorf("expected thinking, got %s", result.Content[0].Type)
+	}
+	if result.Content[0].Thinking != "Let me think..." {
+		t.Errorf("wrong thinking text: %s", result.Content[0].Thinking)
+	}
+	if result.Content[1].Type != ContentTypeText {
+		t.Errorf("expected text, got %s", result.Content[1].Type)
+	}
+}
+
+func TestConvertGeminiResponse_ThinkingTokens(t *testing.T) {
+	resp := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content:      &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "answer"}}},
+				FinishReason: genai.FinishReasonStop,
+			},
+		},
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount: 10, CandidatesTokenCount: 50, ThoughtsTokenCount: 200,
+		},
+	}
+	result := convertGeminiResponse(resp, "gemini-2.5-pro")
+	if result.Usage.ThinkingTokens != 200 {
+		t.Errorf("expected ThinkingTokens 200, got %d", result.Usage.ThinkingTokens)
+	}
 }
 
 // Compile-time interface check
