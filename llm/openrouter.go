@@ -71,6 +71,24 @@ func NewOpenRouterClientWithHeaders(apiKey, model, referer, appTitle string) *Op
 	}
 }
 
+// NewOpenRouterClientWithBaseURL creates an OpenRouter client with a custom base URL.
+// Empty model falls back to OpenRouterDefaultModel; empty baseURL falls back to OpenRouterBaseURL.
+func NewOpenRouterClientWithBaseURL(apiKey, model, baseURL string) *OpenRouterClient {
+	if model == "" {
+		model = OpenRouterDefaultModel
+	}
+	if baseURL == "" {
+		baseURL = OpenRouterBaseURL
+	}
+	return &OpenRouterClient{
+		client: openai.NewClient(
+			option.WithAPIKey(apiKey),
+			option.WithBaseURL(baseURL),
+		),
+		model: model,
+	}
+}
+
 // CreateMessage sends a message and returns the complete response.
 func (o *OpenRouterClient) CreateMessage(ctx context.Context, req *Request) (*Response, error) {
 	if req.Model == "" {

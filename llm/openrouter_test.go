@@ -723,6 +723,68 @@ func TestOpenRouterClient_StreamContextCancellation(t *testing.T) {
 	}
 }
 
+func TestNewOpenRouterClientWithBaseURL(t *testing.T) {
+	client := NewOpenRouterClientWithBaseURL("test-api-key", "anthropic/claude-3-opus", "https://custom.example.com/api/v1")
+	if client == nil {
+		t.Fatal("expected non-nil client")
+	}
+	if client.model != "anthropic/claude-3-opus" {
+		t.Errorf("expected model anthropic/claude-3-opus, got %s", client.model)
+	}
+}
+
+func TestNewOpenRouterClientWithBaseURL_EmptyFallsBack(t *testing.T) {
+	client := NewOpenRouterClientWithBaseURL("test-api-key", "", "")
+	if client == nil {
+		t.Fatal("expected non-nil client")
+	}
+	if client.model != OpenRouterDefaultModel {
+		t.Errorf("expected default model %s, got %s", OpenRouterDefaultModel, client.model)
+	}
+}
+
+func TestNewOpenRouterClientWithBaseURL_CustomURL(t *testing.T) {
+	var requestURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestURL = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"id":    "chatcmpl-custom",
+			"model": OpenRouterDefaultModel,
+			"choices": []map[string]any{
+				{
+					"message": map[string]any{
+						"role":    "assistant",
+						"content": "Hello from custom URL!",
+					},
+					"finish_reason": "stop",
+				},
+			},
+			"usage": map[string]any{
+				"prompt_tokens":     5,
+				"completion_tokens": 5,
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := NewOpenRouterClientWithBaseURL("test-api-key", "", server.URL)
+
+	ctx := context.Background()
+	req := &Request{
+		Messages: []Message{NewUserMessage("Hello")},
+	}
+
+	_, err := client.CreateMessage(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if requestURL != "/chat/completions" {
+		t.Errorf("expected /chat/completions, got %s", requestURL)
+	}
+}
+
 // Constants verification
 
 func TestOpenRouterConstants(t *testing.T) {
