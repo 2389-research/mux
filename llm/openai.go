@@ -73,7 +73,7 @@ func convertOpenAIRequest(req *Request) openai.ChatCompletionNewParams {
 	for _, msg := range req.Messages {
 		switch msg.Role {
 		case RoleUser:
-			messages = append(messages, convertUserMessage(msg))
+			messages = append(messages, convertUserMessages(msg)...)
 		case RoleAssistant:
 			messages = append(messages, convertAssistantMessage(msg))
 		}
@@ -122,6 +122,54 @@ func convertUserMessage(msg Message) openai.ChatCompletionMessageParamUnion {
 	}
 
 	return openai.UserMessage("")
+}
+
+// convertUserMessages converts a mux user message to one or more OpenAI messages.
+// When a user message contains multiple tool results (packed by the orchestrator),
+// each tool result becomes a separate ToolMessage. Any text content is emitted as
+// a UserMessage before the tool messages.
+func convertUserMessages(msg Message) []openai.ChatCompletionMessageParamUnion {
+	var toolMessages []openai.ChatCompletionMessageParamUnion
+	var hasText bool
+
+	for _, block := range msg.Blocks {
+		if block.Type == ContentTypeToolResult {
+			toolMessages = append(toolMessages, openai.ToolMessage(block.Text, block.ToolUseID))
+		}
+	}
+
+	if len(toolMessages) == 0 {
+		// No tool results — fall back to single user message behavior
+		return []openai.ChatCompletionMessageParamUnion{convertUserMessage(msg)}
+	}
+
+	// Check if there is also text content alongside tool results
+	if msg.Content != "" {
+		hasText = true
+	} else {
+		for _, block := range msg.Blocks {
+			if block.Type == ContentTypeText {
+				hasText = true
+				break
+			}
+		}
+	}
+
+	var result []openai.ChatCompletionMessageParamUnion
+	if hasText {
+		text := msg.Content
+		if text == "" {
+			for _, block := range msg.Blocks {
+				if block.Type == ContentTypeText {
+					text = block.Text
+					break
+				}
+			}
+		}
+		result = append(result, openai.UserMessage(text))
+	}
+	result = append(result, toolMessages...)
+	return result
 }
 
 // convertAssistantMessage converts a mux assistant message to OpenAI format.

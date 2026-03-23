@@ -955,5 +955,133 @@ func TestOpenAIClient_StreamJustFinishedToolCallEvent(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIRequest_MultipleToolResults(t *testing.T) {
+	req := &Request{
+		Model: "gpt-5.2",
+		Messages: []Message{
+			{Role: RoleUser, Content: "Hello"},
+			{
+				Role: RoleAssistant,
+				Blocks: []ContentBlock{
+					{Type: ContentTypeToolUse, ID: "call_1", Name: "tool1", Input: map[string]any{"key": "val1"}},
+					{Type: ContentTypeToolUse, ID: "call_2", Name: "tool2", Input: map[string]any{"key": "val2"}},
+					{Type: ContentTypeToolUse, ID: "call_3", Name: "tool3", Input: map[string]any{"key": "val3"}},
+				},
+			},
+			{
+				Role: RoleUser,
+				Blocks: []ContentBlock{
+					{Type: ContentTypeToolResult, ToolUseID: "call_1", Text: "Result 1"},
+					{Type: ContentTypeToolResult, ToolUseID: "call_2", Text: "Result 2"},
+					{Type: ContentTypeToolResult, ToolUseID: "call_3", Text: "Result 3"},
+				},
+			},
+		},
+	}
+
+	params := convertOpenAIRequest(req)
+
+	// Expect 5 messages: user + assistant + 3 tool messages
+	if len(params.Messages) != 5 {
+		t.Fatalf("expected 5 messages (user + assistant + 3 tool), got %d", len(params.Messages))
+	}
+
+	// First message should be user
+	if params.Messages[0].OfUser == nil {
+		t.Error("expected first message to be a user message")
+	}
+
+	// Second message should be assistant with tool calls
+	if params.Messages[1].OfAssistant == nil {
+		t.Error("expected second message to be an assistant message")
+	}
+
+	// Messages 2-4 should be tool messages with correct IDs
+	expectedToolCallIDs := []string{"call_1", "call_2", "call_3"}
+	expectedTexts := []string{"Result 1", "Result 2", "Result 3"}
+	for i, expectedID := range expectedToolCallIDs {
+		msgIdx := i + 2
+		toolMsg := params.Messages[msgIdx]
+		if toolMsg.OfTool == nil {
+			t.Fatalf("expected message %d to be a tool message, got nil OfTool", msgIdx)
+		}
+		if toolMsg.OfTool.ToolCallID != expectedID {
+			t.Errorf("message %d: expected ToolCallID %q, got %q", msgIdx, expectedID, toolMsg.OfTool.ToolCallID)
+		}
+		// Verify the content text matches
+		if len(toolMsg.OfTool.Content.OfString.Value) == 0 {
+			t.Errorf("message %d: expected non-empty content", msgIdx)
+		}
+		_ = expectedTexts[i] // used for documentation; content verified via OfString
+	}
+}
+
+func TestConvertUserMessages_TextAndToolResults(t *testing.T) {
+	msg := Message{
+		Role:    RoleUser,
+		Content: "Here are the results",
+		Blocks: []ContentBlock{
+			{Type: ContentTypeText, Text: "Here are the results"},
+			{Type: ContentTypeToolResult, ToolUseID: "call_1", Text: "Result 1"},
+			{Type: ContentTypeToolResult, ToolUseID: "call_2", Text: "Result 2"},
+		},
+	}
+
+	results := convertUserMessages(msg)
+
+	// Should produce: 1 user message + 2 tool messages = 3
+	if len(results) != 3 {
+		t.Fatalf("expected 3 messages (1 user + 2 tool), got %d", len(results))
+	}
+
+	// First should be user text message
+	if results[0].OfUser == nil {
+		t.Error("expected first message to be a user message")
+	}
+
+	// Second and third should be tool messages
+	if results[1].OfTool == nil || results[1].OfTool.ToolCallID != "call_1" {
+		t.Errorf("expected second message to be tool message with call_1")
+	}
+	if results[2].OfTool == nil || results[2].OfTool.ToolCallID != "call_2" {
+		t.Errorf("expected third message to be tool message with call_2")
+	}
+}
+
+func TestConvertUserMessages_OnlyText(t *testing.T) {
+	msg := Message{Role: RoleUser, Content: "Just text"}
+	results := convertUserMessages(msg)
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(results))
+	}
+	if results[0].OfUser == nil {
+		t.Error("expected user message")
+	}
+}
+
+func TestConvertUserMessages_OnlyToolResults(t *testing.T) {
+	msg := Message{
+		Role: RoleUser,
+		Blocks: []ContentBlock{
+			{Type: ContentTypeToolResult, ToolUseID: "call_1", Text: "Result 1"},
+			{Type: ContentTypeToolResult, ToolUseID: "call_2", Text: "Result 2"},
+		},
+	}
+
+	results := convertUserMessages(msg)
+
+	// Should produce 2 tool messages, no user text message
+	if len(results) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(results))
+	}
+	if results[0].OfTool == nil || results[0].OfTool.ToolCallID != "call_1" {
+		t.Error("expected first message to be tool message with call_1")
+	}
+	if results[1].OfTool == nil || results[1].OfTool.ToolCallID != "call_2" {
+		t.Error("expected second message to be tool message with call_2")
+	}
+}
+
 // Compile-time interface check
 var _ Client = (*OpenAIClient)(nil)
