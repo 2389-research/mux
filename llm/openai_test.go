@@ -1083,5 +1083,65 @@ func TestConvertUserMessages_OnlyToolResults(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIRequest_ReasoningEffortLow(t *testing.T) {
+	req := &Request{
+		Model: "gpt-5.2", Messages: []Message{NewUserMessage("Think")},
+		Thinking: &ThinkingConfig{Enabled: true, Budget: 2000},
+	}
+	params := convertOpenAIRequest(req)
+	if params.ReasoningEffort != openai.ReasoningEffortLow {
+		t.Errorf("expected low, got %s", params.ReasoningEffort)
+	}
+}
+
+func TestConvertOpenAIRequest_ReasoningEffortMedium(t *testing.T) {
+	req := &Request{
+		Model: "gpt-5.2", Messages: []Message{NewUserMessage("Think")},
+		Thinking: &ThinkingConfig{Enabled: true, Budget: 10000},
+	}
+	params := convertOpenAIRequest(req)
+	if params.ReasoningEffort != openai.ReasoningEffortMedium {
+		t.Errorf("expected medium, got %s", params.ReasoningEffort)
+	}
+}
+
+func TestConvertOpenAIRequest_ReasoningEffortHigh(t *testing.T) {
+	req := &Request{
+		Model: "gpt-5.2", Messages: []Message{NewUserMessage("Think")},
+		Thinking: &ThinkingConfig{Enabled: true, Budget: 32000},
+	}
+	params := convertOpenAIRequest(req)
+	if params.ReasoningEffort != openai.ReasoningEffortHigh {
+		t.Errorf("expected high, got %s", params.ReasoningEffort)
+	}
+}
+
+func TestConvertOpenAIRequest_NoThinking(t *testing.T) {
+	req := &Request{
+		Model: "gpt-5.2", Messages: []Message{NewUserMessage("Hello")},
+	}
+	params := convertOpenAIRequest(req)
+	if params.ReasoningEffort != "" {
+		t.Errorf("expected empty, got %s", params.ReasoningEffort)
+	}
+}
+
+func TestConvertOpenAIResponse_ReasoningTokens(t *testing.T) {
+	resp := &openai.ChatCompletion{
+		ID: "chatcmpl-123", Model: "gpt-5.2",
+		Choices: []openai.ChatCompletionChoice{
+			{Message: openai.ChatCompletionMessage{Role: "assistant", Content: "Answer"}, FinishReason: "stop"},
+		},
+		Usage: openai.CompletionUsage{
+			PromptTokens: 100, CompletionTokens: 50,
+			CompletionTokensDetails: openai.CompletionUsageCompletionTokensDetails{ReasoningTokens: 30},
+		},
+	}
+	result := convertOpenAIResponse(resp)
+	if result.Usage.ThinkingTokens != 30 {
+		t.Errorf("expected 30 thinking tokens, got %d", result.Usage.ThinkingTokens)
+	}
+}
+
 // Compile-time interface check
 var _ Client = (*OpenAIClient)(nil)

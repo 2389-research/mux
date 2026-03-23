@@ -61,6 +61,18 @@ func convertOpenAIRequest(req *Request) openai.ChatCompletionNewParams {
 		params.Temperature = openai.Float(*req.Temperature)
 	}
 
+	// Map thinking config to reasoning effort
+	if req.Thinking != nil && req.Thinking.Enabled {
+		switch {
+		case req.Thinking.Budget <= 4096:
+			params.ReasoningEffort = openai.ReasoningEffortLow
+		case req.Thinking.Budget <= 16384:
+			params.ReasoningEffort = openai.ReasoningEffortMedium
+		default:
+			params.ReasoningEffort = openai.ReasoningEffortHigh
+		}
+	}
+
 	// Build messages
 	messages := []openai.ChatCompletionMessageParamUnion{}
 
@@ -221,8 +233,9 @@ func convertOpenAIResponse(resp *openai.ChatCompletion) *Response {
 		ID:    resp.ID,
 		Model: resp.Model,
 		Usage: Usage{
-			InputTokens:  int(resp.Usage.PromptTokens),
-			OutputTokens: int(resp.Usage.CompletionTokens),
+			InputTokens:    int(resp.Usage.PromptTokens),
+			OutputTokens:   int(resp.Usage.CompletionTokens),
+			ThinkingTokens: int(resp.Usage.CompletionTokensDetails.ReasoningTokens),
 		},
 	}
 
