@@ -1010,6 +1010,73 @@ func TestCreateMessageStream_InputJSONDelta(t *testing.T) {
 	}
 }
 
+func TestConvertRequest_WithThinking(t *testing.T) {
+	req := &Request{
+		Model:     "claude-opus-4-6-20250414",
+		MaxTokens: 16384,
+		Messages:  []Message{NewUserMessage("Think about this")},
+		Thinking:  &ThinkingConfig{Enabled: true, Budget: 10000},
+	}
+	params := convertRequest(req)
+	if params.Thinking.OfEnabled == nil {
+		t.Fatal("expected thinking to be enabled")
+	}
+	if params.Thinking.OfEnabled.BudgetTokens != 10000 {
+		t.Errorf("expected budget_tokens 10000, got %d", params.Thinking.OfEnabled.BudgetTokens)
+	}
+}
+
+func TestConvertRequest_WithThinkingBumpsMaxTokens(t *testing.T) {
+	req := &Request{
+		Model:     "claude-opus-4-6-20250414",
+		MaxTokens: 4096,
+		Messages:  []Message{NewUserMessage("Think")},
+		Thinking:  &ThinkingConfig{Enabled: true, Budget: 10000},
+	}
+	params := convertRequest(req)
+	if params.MaxTokens < 10000 {
+		t.Errorf("expected MaxTokens >= 10000, got %d", params.MaxTokens)
+	}
+}
+
+func TestConvertResponse_ThinkingBlock(t *testing.T) {
+	msg := &anthropic.Message{
+		ID:    "msg_123",
+		Model: "claude-opus-4-6-20250414",
+		Content: []anthropic.ContentBlockUnion{
+			{Type: "thinking", Thinking: "Let me reason..."},
+			{Type: "text", Text: "Here's my answer."},
+		},
+		StopReason: "end_turn",
+		Usage:      anthropic.Usage{InputTokens: 10, OutputTokens: 50},
+	}
+	resp := convertResponse(msg)
+	if len(resp.Content) != 2 {
+		t.Fatalf("expected 2 blocks, got %d", len(resp.Content))
+	}
+	if resp.Content[0].Type != ContentTypeThinking {
+		t.Errorf("expected thinking, got %s", resp.Content[0].Type)
+	}
+	if resp.Content[0].Thinking != "Let me reason..." {
+		t.Errorf("wrong thinking text: %s", resp.Content[0].Thinking)
+	}
+	if resp.Content[1].Type != ContentTypeText {
+		t.Errorf("expected text, got %s", resp.Content[1].Type)
+	}
+}
+
+func TestConvertRequest_WithoutThinking(t *testing.T) {
+	req := &Request{
+		Model:     "claude-sonnet-4-20250514",
+		MaxTokens: 1024,
+		Messages:  []Message{NewUserMessage("Hello")},
+	}
+	params := convertRequest(req)
+	if params.Thinking.OfEnabled != nil {
+		t.Error("expected thinking to not be set")
+	}
+}
+
 func TestCreateMessageStream_DefaultModelAndMaxTokens(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Verify request has defaults applied

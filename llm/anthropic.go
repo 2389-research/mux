@@ -53,6 +53,18 @@ func convertRequest(req *Request) anthropic.MessageNewParams {
 		MaxTokens: int64(req.MaxTokens),
 	}
 
+	// Enable extended thinking if configured
+	if req.Thinking != nil && req.Thinking.Enabled {
+		if int64(req.MaxTokens) < int64(req.Thinking.Budget) {
+			params.MaxTokens = int64(req.Thinking.Budget)
+		}
+		params.Thinking = anthropic.ThinkingConfigParamUnion{
+			OfEnabled: &anthropic.ThinkingConfigEnabledParam{
+				BudgetTokens: int64(req.Thinking.Budget),
+			},
+		}
+	}
+
 	// Convert messages
 	messages := make([]anthropic.MessageParam, 0, len(req.Messages))
 	for _, msg := range req.Messages {
@@ -145,6 +157,11 @@ func convertResponse(msg *anthropic.Message) *Response {
 			resp.Content = append(resp.Content, ContentBlock{
 				Type: ContentTypeText,
 				Text: block.Text,
+			})
+		case "thinking":
+			resp.Content = append(resp.Content, ContentBlock{
+				Type:     ContentTypeThinking,
+				Thinking: block.Thinking,
 			})
 		case "tool_use":
 			// Unmarshal the raw JSON input to map[string]any
