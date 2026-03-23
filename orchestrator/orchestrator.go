@@ -315,7 +315,7 @@ func (o *Orchestrator) buildRequest() *llm.Request {
 		Messages:  o.messages,
 		System:    o.config.SystemPrompt,
 		Model:     o.config.Model,
-		MaxTokens: 4096,
+		MaxTokens: llm.DefaultMaxTokens,
 		Tools:     tools,
 	}
 }
