@@ -1651,3 +1651,84 @@ func TestThinkingNilSettings(t *testing.T) {
 		t.Error("nil ThinkingSettings: expected Thinking to be nil")
 	}
 }
+
+func TestThinkingAdaptiveFullCycle(t *testing.T) {
+	// Scenario:
+	// Call 0: first call → thinking ON (iteration 0)
+	// Call 1: tool success → thinking OFF (1 consecutive)
+	// Call 2: tool error → thinking ON next call (error trigger)
+	// Call 3: thinking ON (re-enabled by error) → done
+
+	responses := []*llm.Response{
+		// Call 0 → tool use (success)
+		{
+			Content: []llm.ContentBlock{{
+				Type: llm.ContentTypeToolUse, ID: "t0", Name: "good_tool",
+				Input: map[string]any{},
+			}},
+			StopReason: llm.StopReasonToolUse,
+		},
+		// Call 1 → tool use (will error)
+		{
+			Content: []llm.ContentBlock{{
+				Type: llm.ContentTypeToolUse, ID: "t1", Name: "bad_tool",
+				Input: map[string]any{},
+			}},
+			StopReason: llm.StopReasonToolUse,
+		},
+		// Call 2 → tool use (success, after error re-enable)
+		{
+			Content: []llm.ContentBlock{{
+				Type: llm.ContentTypeToolUse, ID: "t2", Name: "good_tool",
+				Input: map[string]any{},
+			}},
+			StopReason: llm.StopReasonToolUse,
+		},
+		// Call 3 → done
+		{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
+			StopReason: llm.StopReasonEndTurn,
+		},
+	}
+
+	client := &capturingLLMClient{responses: responses}
+	registry := tool.NewRegistry()
+	registry.Register(&mockTool{name: "good_tool"})
+	registry.Register(&mockTool{
+		name: "bad_tool",
+		execFunc: func(ctx context.Context, params map[string]any) (*tool.Result, error) {
+			return nil, fmt.Errorf("tool failed")
+		},
+	})
+	executor := tool.NewExecutor(registry)
+
+	config := orchestrator.DefaultConfig()
+	config.ThinkingSettings = &orchestrator.ThinkingSettings{
+		Strategy:                 orchestrator.ThinkingAdaptive,
+		Budget:                   8192,
+		ConsecutiveToolThreshold: 5,
+	}
+	orch := orchestrator.NewWithConfig(client, executor, config)
+	_ = orch.Subscribe()
+
+	err := orch.Run(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(client.requests) != 4 {
+		t.Fatalf("expected 4 requests, got %d", len(client.requests))
+	}
+
+	// Call 0: thinking ON (first call)
+	// Call 1: thinking OFF (1 consecutive tool, no error)
+	// Call 2: thinking ON (previous tool had error)
+	// Call 3: thinking OFF (no error from previous, 1 consecutive tool)
+	expected := []bool{true, false, true, false}
+	for i, req := range client.requests {
+		hasThinking := req.Thinking != nil
+		if hasThinking != expected[i] {
+			t.Errorf("request %d: thinking=%v, want %v", i, hasThinking, expected[i])
+		}
+	}
+}
