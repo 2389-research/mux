@@ -13,8 +13,9 @@ type TokenUsage struct {
 	mu sync.RWMutex
 
 	// Core token counts
-	InputTokens  int64 `json:"input_tokens"`
-	OutputTokens int64 `json:"output_tokens"`
+	InputTokens    int64 `json:"input_tokens"`
+	OutputTokens   int64 `json:"output_tokens"`
+	ThinkingTokens int64 `json:"thinking_tokens,omitempty"`
 
 	// Cache tokens (if supported by provider)
 	CacheReadTokens  int64 `json:"cache_read_tokens,omitempty"`
@@ -36,6 +37,7 @@ func (u *TokenUsage) Add(usage llm.Usage) {
 
 	u.InputTokens += int64(usage.InputTokens)
 	u.OutputTokens += int64(usage.OutputTokens)
+	u.ThinkingTokens += int64(usage.ThinkingTokens)
 	u.RequestCount++
 }
 
@@ -46,6 +48,7 @@ func (u *TokenUsage) AddWithCache(usage llm.Usage, cacheRead, cacheWrite int) {
 
 	u.InputTokens += int64(usage.InputTokens)
 	u.OutputTokens += int64(usage.OutputTokens)
+	u.ThinkingTokens += int64(usage.ThinkingTokens)
 	u.CacheReadTokens += int64(cacheRead)
 	u.CacheWriteTokens += int64(cacheWrite)
 	u.RequestCount++
@@ -65,6 +68,7 @@ func (u *TokenUsage) Snapshot() TokenUsage {
 	return TokenUsage{
 		InputTokens:      u.InputTokens,
 		OutputTokens:     u.OutputTokens,
+		ThinkingTokens:   u.ThinkingTokens,
 		CacheReadTokens:  u.CacheReadTokens,
 		CacheWriteTokens: u.CacheWriteTokens,
 		RequestCount:     u.RequestCount,
@@ -77,6 +81,7 @@ func (u *TokenUsage) Reset() {
 	defer u.mu.Unlock()
 	u.InputTokens = 0
 	u.OutputTokens = 0
+	u.ThinkingTokens = 0
 	u.CacheReadTokens = 0
 	u.CacheWriteTokens = 0
 	u.RequestCount = 0

@@ -123,6 +123,35 @@ func contains(s, substr string) bool {
 	return false
 }
 
+func TestTokenUsageAddThinkingTokens(t *testing.T) {
+	u := NewTokenUsage()
+	u.Add(llm.Usage{InputTokens: 100, OutputTokens: 50, ThinkingTokens: 200})
+	snapshot := u.Snapshot()
+	if snapshot.ThinkingTokens != 200 {
+		t.Errorf("ThinkingTokens = %d, want 200", snapshot.ThinkingTokens)
+	}
+}
+
+func TestTokenUsageAddMultipleWithThinking(t *testing.T) {
+	u := NewTokenUsage()
+	u.Add(llm.Usage{InputTokens: 100, OutputTokens: 50, ThinkingTokens: 200})
+	u.Add(llm.Usage{InputTokens: 100, OutputTokens: 50, ThinkingTokens: 300})
+	snapshot := u.Snapshot()
+	if snapshot.ThinkingTokens != 500 {
+		t.Errorf("ThinkingTokens = %d, want 500", snapshot.ThinkingTokens)
+	}
+}
+
+func TestTokenUsageResetClearsThinking(t *testing.T) {
+	u := NewTokenUsage()
+	u.Add(llm.Usage{InputTokens: 100, OutputTokens: 50, ThinkingTokens: 200})
+	u.Reset()
+	snapshot := u.Snapshot()
+	if snapshot.ThinkingTokens != 0 {
+		t.Errorf("ThinkingTokens after reset = %d, want 0", snapshot.ThinkingTokens)
+	}
+}
+
 func TestTokenUsageConcurrent(t *testing.T) {
 	u := NewTokenUsage()
 	done := make(chan bool)
