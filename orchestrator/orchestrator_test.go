@@ -1351,3 +1351,303 @@ func indexOf(s, substr string) int {
 	}
 	return -1
 }
+
+// capturingLLMClient records the requests it receives for assertion.
+type capturingLLMClient struct {
+	requests  []*llm.Request
+	responses []*llm.Response
+	callIndex int
+	mu        sync.Mutex
+}
+
+func (c *capturingLLMClient) CreateMessage(ctx context.Context, req *llm.Request) (*llm.Response, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.requests = append(c.requests, req)
+	if c.callIndex >= len(c.responses) {
+		return &llm.Response{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
+			StopReason: llm.StopReasonEndTurn,
+		}, nil
+	}
+	resp := c.responses[c.callIndex]
+	c.callIndex++
+	return resp, nil
+}
+
+func (c *capturingLLMClient) CreateMessageStream(ctx context.Context, req *llm.Request) (<-chan llm.StreamEvent, error) {
+	ch := make(chan llm.StreamEvent)
+	go func() {
+		resp, _ := c.CreateMessage(ctx, req)
+		ch <- llm.StreamEvent{Type: llm.EventMessageStop, Response: resp}
+		close(ch)
+	}()
+	return ch, nil
+}
+
+func TestThinkingStrategyOff(t *testing.T) {
+	client := &capturingLLMClient{
+		responses: []*llm.Response{{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
+			StopReason: llm.StopReasonEndTurn,
+		}},
+	}
+	registry := tool.NewRegistry()
+	executor := tool.NewExecutor(registry)
+	config := orchestrator.DefaultConfig()
+	config.ThinkingSettings = &orchestrator.ThinkingSettings{
+		Strategy: orchestrator.ThinkingOff,
+		Budget:   8192,
+	}
+	orch := orchestrator.NewWithConfig(client, executor, config)
+	_ = orch.Subscribe()
+	err := orch.Run(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(client.requests))
+	}
+	if client.requests[0].Thinking != nil {
+		t.Error("ThinkingOff: expected Thinking to be nil")
+	}
+}
+
+func TestThinkingStrategyAlways(t *testing.T) {
+	client := &capturingLLMClient{
+		responses: []*llm.Response{
+			{
+				Content: []llm.ContentBlock{{
+					Type: llm.ContentTypeToolUse, ID: "t1", Name: "test_tool",
+					Input: map[string]any{},
+				}},
+				StopReason: llm.StopReasonToolUse,
+			},
+			{
+				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
+				StopReason: llm.StopReasonEndTurn,
+			},
+		},
+	}
+	registry := tool.NewRegistry()
+	registry.Register(&mockTool{name: "test_tool"})
+	executor := tool.NewExecutor(registry)
+	config := orchestrator.DefaultConfig()
+	config.ThinkingSettings = &orchestrator.ThinkingSettings{
+		Strategy: orchestrator.ThinkingAlways,
+		Budget:   8192,
+	}
+	orch := orchestrator.NewWithConfig(client, executor, config)
+	_ = orch.Subscribe()
+	err := orch.Run(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(client.requests))
+	}
+	for i, req := range client.requests {
+		if req.Thinking == nil {
+			t.Errorf("request %d: ThinkingAlways: expected Thinking to be set", i)
+		} else if req.Thinking.Budget != 8192 {
+			t.Errorf("request %d: Budget = %d, want 8192", i, req.Thinking.Budget)
+		}
+	}
+}
+
+func TestThinkingStrategyFirstOnly(t *testing.T) {
+	client := &capturingLLMClient{
+		responses: []*llm.Response{
+			{
+				Content: []llm.ContentBlock{{
+					Type: llm.ContentTypeToolUse, ID: "t1", Name: "test_tool",
+					Input: map[string]any{},
+				}},
+				StopReason: llm.StopReasonToolUse,
+			},
+			{
+				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
+				StopReason: llm.StopReasonEndTurn,
+			},
+		},
+	}
+	registry := tool.NewRegistry()
+	registry.Register(&mockTool{name: "test_tool"})
+	executor := tool.NewExecutor(registry)
+	config := orchestrator.DefaultConfig()
+	config.ThinkingSettings = &orchestrator.ThinkingSettings{
+		Strategy: orchestrator.ThinkingFirstOnly,
+		Budget:   8192,
+	}
+	orch := orchestrator.NewWithConfig(client, executor, config)
+	_ = orch.Subscribe()
+	err := orch.Run(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(client.requests))
+	}
+	if client.requests[0].Thinking == nil {
+		t.Error("request 0: ThinkingFirstOnly: expected Thinking to be set")
+	}
+	if client.requests[1].Thinking != nil {
+		t.Error("request 1: ThinkingFirstOnly: expected Thinking to be nil")
+	}
+}
+
+func TestThinkingStrategyAdaptiveFirstCall(t *testing.T) {
+	client := &capturingLLMClient{
+		responses: []*llm.Response{
+			{
+				Content: []llm.ContentBlock{{
+					Type: llm.ContentTypeToolUse, ID: "t1", Name: "test_tool",
+					Input: map[string]any{},
+				}},
+				StopReason: llm.StopReasonToolUse,
+			},
+			{
+				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
+				StopReason: llm.StopReasonEndTurn,
+			},
+		},
+	}
+	registry := tool.NewRegistry()
+	registry.Register(&mockTool{name: "test_tool"})
+	executor := tool.NewExecutor(registry)
+	config := orchestrator.DefaultConfig()
+	config.ThinkingSettings = &orchestrator.ThinkingSettings{
+		Strategy:                 orchestrator.ThinkingAdaptive,
+		Budget:                   8192,
+		ConsecutiveToolThreshold: 5,
+	}
+	orch := orchestrator.NewWithConfig(client, executor, config)
+	_ = orch.Subscribe()
+	err := orch.Run(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if client.requests[0].Thinking == nil {
+		t.Error("request 0: Adaptive: expected Thinking on first call")
+	}
+	if client.requests[1].Thinking != nil {
+		t.Error("request 1: Adaptive: expected no Thinking on second call")
+	}
+}
+
+func TestThinkingStrategyAdaptiveToolError(t *testing.T) {
+	client := &capturingLLMClient{
+		responses: []*llm.Response{
+			{
+				Content: []llm.ContentBlock{{
+					Type: llm.ContentTypeToolUse, ID: "t1", Name: "error_tool",
+					Input: map[string]any{},
+				}},
+				StopReason: llm.StopReasonToolUse,
+			},
+			{
+				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
+				StopReason: llm.StopReasonEndTurn,
+			},
+		},
+	}
+	registry := tool.NewRegistry()
+	registry.Register(&mockTool{
+		name: "error_tool",
+		execFunc: func(ctx context.Context, params map[string]any) (*tool.Result, error) {
+			return nil, fmt.Errorf("something went wrong")
+		},
+	})
+	executor := tool.NewExecutor(registry)
+	config := orchestrator.DefaultConfig()
+	config.ThinkingSettings = &orchestrator.ThinkingSettings{
+		Strategy:                 orchestrator.ThinkingAdaptive,
+		Budget:                   8192,
+		ConsecutiveToolThreshold: 5,
+	}
+	orch := orchestrator.NewWithConfig(client, executor, config)
+	_ = orch.Subscribe()
+	err := orch.Run(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(client.requests))
+	}
+	if client.requests[0].Thinking == nil {
+		t.Error("request 0: expected Thinking on first call")
+	}
+	if client.requests[1].Thinking == nil {
+		t.Error("request 1: expected Thinking re-enabled after tool error")
+	}
+}
+
+func TestThinkingStrategyAdaptiveConsecutiveTools(t *testing.T) {
+	responses := make([]*llm.Response, 0, 7)
+	for i := 0; i < 6; i++ {
+		responses = append(responses, &llm.Response{
+			Content: []llm.ContentBlock{{
+				Type: llm.ContentTypeToolUse, ID: fmt.Sprintf("t%d", i), Name: "test_tool",
+				Input: map[string]any{},
+			}},
+			StopReason: llm.StopReasonToolUse,
+		})
+	}
+	responses = append(responses, &llm.Response{
+		Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
+		StopReason: llm.StopReasonEndTurn,
+	})
+	client := &capturingLLMClient{responses: responses}
+	registry := tool.NewRegistry()
+	registry.Register(&mockTool{name: "test_tool"})
+	executor := tool.NewExecutor(registry)
+	config := orchestrator.DefaultConfig()
+	config.ThinkingSettings = &orchestrator.ThinkingSettings{
+		Strategy:                 orchestrator.ThinkingAdaptive,
+		Budget:                   8192,
+		ConsecutiveToolThreshold: 3,
+	}
+	orch := orchestrator.NewWithConfig(client, executor, config)
+	_ = orch.Subscribe()
+	err := orch.Run(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(client.requests) != 7 {
+		t.Fatalf("expected 7 requests, got %d", len(client.requests))
+	}
+	// Request 0: thinking (first call)
+	// Request 1: no thinking (1 consecutive tool)
+	// Request 2: no thinking (2 consecutive tools)
+	// Request 3: thinking (3 consecutive tools >= threshold)
+	// Request 4: thinking (4 >= threshold)
+	// Request 5: thinking (5 >= threshold)
+	// Request 6: thinking (6 >= threshold)
+	expected := []bool{true, false, false, true, true, true, true}
+	for i, req := range client.requests {
+		hasThinking := req.Thinking != nil
+		if hasThinking != expected[i] {
+			t.Errorf("request %d: thinking=%v, want %v", i, hasThinking, expected[i])
+		}
+	}
+}
+
+func TestThinkingNilSettings(t *testing.T) {
+	client := &capturingLLMClient{
+		responses: []*llm.Response{{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
+			StopReason: llm.StopReasonEndTurn,
+		}},
+	}
+	registry := tool.NewRegistry()
+	executor := tool.NewExecutor(registry)
+	orch := orchestrator.New(client, executor)
+	_ = orch.Subscribe()
+	err := orch.Run(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if client.requests[0].Thinking != nil {
+		t.Error("nil ThinkingSettings: expected Thinking to be nil")
+	}
+}

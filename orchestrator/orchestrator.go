@@ -29,6 +29,30 @@ const DefaultMaxIterations = 50
 // DefaultContextBudget is the default token budget before compaction (0 = disabled by default).
 const DefaultContextBudget = 0
 
+// ThinkingStrategy controls when the orchestrator enables thinking on API calls.
+type ThinkingStrategy int
+
+const (
+	ThinkingOff       ThinkingStrategy = iota // No thinking on any call
+	ThinkingAlways                            // Thinking on every call
+	ThinkingFirstOnly                         // Thinking on iteration 0 only
+	ThinkingAdaptive                          // First call + re-enable on errors/stuck/compaction
+)
+
+// DefaultThinkingBudget is the default thinking token budget when thinking is enabled.
+const DefaultThinkingBudget = 8192
+
+// DefaultConsecutiveToolThreshold is the default number of consecutive tool iterations
+// before adaptive thinking re-enables thinking.
+const DefaultConsecutiveToolThreshold = 5
+
+// ThinkingSettings configures per-call thinking behavior in the orchestrator.
+type ThinkingSettings struct {
+	Strategy                 ThinkingStrategy
+	Budget                   int // Token budget when thinking is enabled
+	ConsecutiveToolThreshold int // Re-enable after N consecutive tool iterations (Adaptive only)
+}
+
 // CompactUserMessageMaxTokens is the maximum tokens of recent user messages to preserve.
 const CompactUserMessageMaxTokens = 20000
 
@@ -37,12 +61,13 @@ var warnedSchemaTools sync.Map
 
 // Config holds orchestrator configuration.
 type Config struct {
-	MaxIterations   int
-	SystemPrompt    string
-	Model           string
-	HookManager     *hooks.Manager // Optional hook manager for lifecycle events
-	ContextBudget   int            // Max tokens before compaction triggers (0 = disabled)
-	CompactionModel string         // Model to use for summarization (defaults to main Model)
+	MaxIterations    int
+	SystemPrompt     string
+	Model            string
+	HookManager      *hooks.Manager    // Optional hook manager for lifecycle events
+	ContextBudget    int               // Max tokens before compaction triggers (0 = disabled)
+	CompactionModel  string            // Model to use for summarization (defaults to main Model)
+	ThinkingSettings *ThinkingSettings // Per-call thinking control (nil = no thinking)
 }
 
 // DefaultConfig returns sensible defaults.
@@ -62,6 +87,10 @@ type Orchestrator struct {
 	usage       *TokenUsage
 	mu          sync.Mutex
 	messages    []llm.Message
+	// Thinking state tracking
+	iteration                 int
+	consecutiveToolIterations int
+	justCompacted             bool
 }
 
 // New creates a new Orchestrator with default config.
@@ -222,7 +251,11 @@ func (o *Orchestrator) runWithHooks(ctx context.Context, prompt string, source s
 
 // runLoop executes the core think-act loop. Must be called with mutex held.
 func (o *Orchestrator) runLoop(ctx context.Context, prompt string) error {
+	o.iteration = 0
+	o.consecutiveToolIterations = 0
+	o.justCompacted = false
 	for i := 0; i < o.config.MaxIterations; i++ {
+		o.iteration = i
 		// Check context at start of each iteration
 		select {
 		case <-ctx.Done():
@@ -234,6 +267,7 @@ func (o *Orchestrator) runLoop(ctx context.Context, prompt string) error {
 		if result, err := o.compact(ctx); err != nil {
 			return o.handleError(fmt.Errorf("compaction failed: %w", err))
 		} else if result != nil {
+			o.justCompacted = true
 			// Fire compaction hook
 			if o.hookManager != nil {
 				event := &hooks.CompactionEvent{
@@ -265,6 +299,7 @@ func (o *Orchestrator) runLoop(ctx context.Context, prompt string) error {
 		}
 
 		resp, err := o.client.CreateMessage(ctx, o.buildRequest())
+		o.justCompacted = false
 		if err != nil {
 			return o.handleError(err)
 		}
@@ -275,11 +310,13 @@ func (o *Orchestrator) runLoop(ctx context.Context, prompt string) error {
 		o.processResponse(resp)
 
 		if resp.HasToolUse() {
+			o.consecutiveToolIterations++
 			if err := o.executeTools(ctx, resp.ToolUses()); err != nil {
 				return o.handleError(err)
 			}
 			continue
 		}
+		o.consecutiveToolIterations = 0
 
 		// Fire Stop hook - allows hooks to prevent stopping
 		if o.hookManager != nil {
@@ -309,15 +346,69 @@ func (o *Orchestrator) runLoop(ctx context.Context, prompt string) error {
 	return o.handleError(fmt.Errorf("exceeded max iterations (%d) while processing: %s", o.config.MaxIterations, prompt))
 }
 
+// shouldEnableThinking decides whether to enable thinking for the current API call.
+func (o *Orchestrator) shouldEnableThinking() bool {
+	if o.config.ThinkingSettings == nil {
+		return false
+	}
+	switch o.config.ThinkingSettings.Strategy {
+	case ThinkingOff:
+		return false
+	case ThinkingAlways:
+		return true
+	case ThinkingFirstOnly:
+		return o.iteration == 0
+	case ThinkingAdaptive:
+		if o.iteration == 0 {
+			return true
+		}
+		if o.justCompacted {
+			return true
+		}
+		if o.consecutiveToolIterations >= o.config.ThinkingSettings.ConsecutiveToolThreshold {
+			return true
+		}
+		if o.lastToolResultHadError() {
+			return true
+		}
+		return false
+	}
+	return false
+}
+
+// lastToolResultHadError checks if any tool result in the last user message had an error.
+func (o *Orchestrator) lastToolResultHadError() bool {
+	if len(o.messages) == 0 {
+		return false
+	}
+	last := o.messages[len(o.messages)-1]
+	if last.Role != llm.RoleUser {
+		return false
+	}
+	for _, block := range last.Blocks {
+		if block.Type == llm.ContentTypeToolResult && block.IsError {
+			return true
+		}
+	}
+	return false
+}
+
 func (o *Orchestrator) buildRequest() *llm.Request {
 	tools := o.buildToolDefinitions()
-	return &llm.Request{
+	req := &llm.Request{
 		Messages:  o.messages,
 		System:    o.config.SystemPrompt,
 		Model:     o.config.Model,
 		MaxTokens: llm.DefaultMaxTokens,
 		Tools:     tools,
 	}
+	if o.shouldEnableThinking() {
+		req.Thinking = &llm.ThinkingConfig{
+			Enabled: true,
+			Budget:  o.config.ThinkingSettings.Budget,
+		}
+	}
+	return req
 }
 
 // buildToolDefinitions constructs tool definitions from the executor's source.
