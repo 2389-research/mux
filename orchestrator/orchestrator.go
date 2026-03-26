@@ -358,6 +358,8 @@ func (o *Orchestrator) processResponse(resp *llm.Response) {
 		switch block.Type {
 		case llm.ContentTypeText:
 			o.eventBus.Publish(NewTextEvent(block.Text))
+		case llm.ContentTypeThinking:
+			o.eventBus.Publish(NewThinkingEvent(block.Thinking))
 		case llm.ContentTypeToolUse:
 			o.eventBus.Publish(NewToolCallEvent(block.ID, block.Name, block.Input))
 		}

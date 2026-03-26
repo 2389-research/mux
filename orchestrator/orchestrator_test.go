@@ -1298,6 +1298,45 @@ func TestEventBusRaceConditions(t *testing.T) {
 	subscriberWg.Wait()
 }
 
+func TestOrchestratorThinkingEvent(t *testing.T) {
+	client := &mockLLMClient{
+		responses: []*llm.Response{{
+			Content: []llm.ContentBlock{
+				{Type: llm.ContentTypeThinking, Thinking: "Let me reason about this..."},
+				{Type: llm.ContentTypeText, Text: "Hello!"},
+			},
+			StopReason: llm.StopReasonEndTurn,
+		}},
+	}
+	registry := tool.NewRegistry()
+	executor := tool.NewExecutor(registry)
+
+	orch := orchestrator.New(client, executor)
+	events := orch.Subscribe()
+
+	ctx := context.Background()
+	err := orch.Run(ctx, "Think about something")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var hasThinking bool
+	var thinkingText string
+	for event := range events {
+		if event.Type == orchestrator.EventThinking {
+			hasThinking = true
+			thinkingText = event.Thinking
+		}
+	}
+
+	if !hasThinking {
+		t.Error("expected thinking event")
+	}
+	if thinkingText != "Let me reason about this..." {
+		t.Errorf("thinking text = %q, want 'Let me reason about this...'", thinkingText)
+	}
+}
+
 // contains checks if a string contains a substring.
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||

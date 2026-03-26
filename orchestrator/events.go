@@ -13,6 +13,7 @@ type EventType string
 
 const (
 	EventText        EventType = "text"
+	EventThinking    EventType = "thinking"
 	EventToolCall    EventType = "tool_call"
 	EventToolResult  EventType = "tool_result"
 	EventStateChange EventType = "state_change"
@@ -26,6 +27,9 @@ type Event struct {
 
 	// For EventText
 	Text string
+
+	// For EventThinking
+	Thinking string
 
 	// For EventToolCall
 	ToolID     string
@@ -49,6 +53,11 @@ type Event struct {
 // NewTextEvent creates a text content event.
 func NewTextEvent(text string) Event {
 	return Event{Type: EventText, Text: text}
+}
+
+// NewThinkingEvent creates a thinking content event.
+func NewThinkingEvent(thinking string) Event {
+	return Event{Type: EventThinking, Thinking: thinking}
 }
 
 // NewToolCallEvent creates a tool call event.
