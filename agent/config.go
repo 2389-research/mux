@@ -5,6 +5,7 @@ package agent
 import (
 	"github.com/2389-research/mux/hooks"
 	"github.com/2389-research/mux/llm"
+	"github.com/2389-research/mux/orchestrator"
 	"github.com/2389-research/mux/tool"
 )
 
@@ -39,4 +40,7 @@ type Config struct {
 	// HookManager enables lifecycle hooks for this agent and its children.
 	// If set, fires SubagentStart/SubagentStop events when children are spawned.
 	HookManager *hooks.Manager
+
+	// ThinkingSettings configures per-call thinking behavior (nil = no thinking).
+	ThinkingSettings *orchestrator.ThinkingSettings
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/2389-research/mux/agent"
 	"github.com/2389-research/mux/llm"
+	"github.com/2389-research/mux/orchestrator"
 	"github.com/2389-research/mux/tool"
 )
 
@@ -1204,5 +1205,57 @@ func TestConcurrentChildRemoval(t *testing.T) {
 	remaining := parent.Children()
 	if len(remaining) != 0 {
 		t.Errorf("expected 0 children after concurrent removal, got %d", len(remaining))
+	}
+}
+
+// capturingClient captures the last request sent to CreateMessage.
+type capturingClient struct {
+	lastRequest *llm.Request
+	response    *llm.Response
+}
+
+func (c *capturingClient) CreateMessage(ctx context.Context, req *llm.Request) (*llm.Response, error) {
+	c.lastRequest = req
+	return c.response, nil
+}
+
+func (c *capturingClient) CreateMessageStream(ctx context.Context, req *llm.Request) (<-chan llm.StreamEvent, error) {
+	return nil, nil
+}
+
+func TestAgentThinkingSettingsPassthrough(t *testing.T) {
+	registry := tool.NewRegistry()
+
+	client := &capturingClient{
+		response: &llm.Response{
+			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
+		},
+	}
+
+	const thinkingBudget = 4096
+
+	a := agent.New(agent.Config{
+		Name:      "thinking-agent",
+		Registry:  registry,
+		LLMClient: client,
+		ThinkingSettings: &orchestrator.ThinkingSettings{
+			Strategy: orchestrator.ThinkingAlways,
+			Budget:   thinkingBudget,
+		},
+	})
+
+	ctx := context.Background()
+	if err := a.Run(ctx, "hello"); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	if client.lastRequest == nil {
+		t.Fatal("no request was captured")
+	}
+	if client.lastRequest.Thinking == nil {
+		t.Fatal("expected Thinking to be set on request, got nil")
+	}
+	if client.lastRequest.Thinking.Budget != thinkingBudget {
+		t.Errorf("expected Thinking.Budget %d, got %d", thinkingBudget, client.lastRequest.Thinking.Budget)
 	}
 }

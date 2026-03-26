@@ -82,6 +82,7 @@ func (a *Agent) init() {
 		orchConfig.MaxIterations = a.config.MaxIterations
 	}
 	orchConfig.HookManager = a.hookManager
+	orchConfig.ThinkingSettings = a.config.ThinkingSettings
 
 	// Create orchestrator
 	a.orch = orchestrator.NewWithConfig(a.config.LLMClient, a.executor, orchConfig)
