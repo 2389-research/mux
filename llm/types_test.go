@@ -211,3 +211,48 @@ func TestNewImageFromFile_UnknownExtension(t *testing.T) {
 		t.Errorf("expected 'could not infer' error, got %v", err)
 	}
 }
+
+func TestNewPDFFromURL(t *testing.T) {
+	b := NewPDFFromURL("https://example.com/x.pdf")
+	if b.Type != ContentTypePDF || b.Source.Kind != SourceKindURL {
+		t.Errorf("block: %+v", b)
+	}
+}
+
+func TestNewPDFFromBytes_OK(t *testing.T) {
+	b, err := NewPDFFromBytes([]byte("%PDF-1.4\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.MediaType != "application/pdf" {
+		t.Errorf("MediaType: %q", b.MediaType)
+	}
+}
+
+func TestNewPDFFromBytes_RejectsEmpty(t *testing.T) {
+	if _, err := NewPDFFromBytes(nil); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestNewPDFFromFile_OK(t *testing.T) {
+	b, err := NewPDFFromFile(filepath.Join("testdata", "tiny.pdf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.MediaType != "application/pdf" {
+		t.Errorf("MediaType: %q", b.MediaType)
+	}
+	if !bytes.HasPrefix(b.Source.Bytes, []byte("%PDF")) {
+		t.Errorf("bytes should start with %%PDF")
+	}
+}
+
+func TestNewPDFFromFile_WrongExtension(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "foo.png")
+	_ = os.WriteFile(p, []byte("x"), 0o644)
+	if _, err := NewPDFFromFile(p); err == nil {
+		t.Fatal("expected error for non-pdf extension")
+	}
+}
