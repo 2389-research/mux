@@ -2,6 +2,8 @@
 // ABOUTME: blocks, tool definitions, and tool use/results.
 package llm
 
+import "fmt"
+
 // Role represents the role of a message sender.
 type Role string
 
@@ -164,4 +166,25 @@ func (r *Response) TextContent() string {
 		}
 	}
 	return text
+}
+
+// ErrUnsupportedMedia indicates a provider cannot handle the requested media type at all.
+type ErrUnsupportedMedia struct {
+	Provider string
+	Media    string
+}
+
+func (e *ErrUnsupportedMedia) Error() string {
+	return fmt.Sprintf("%s does not support media type %q", e.Provider, e.Media)
+}
+
+// ErrUnsupportedSource indicates a provider supports the media type but not this source form.
+type ErrUnsupportedSource struct {
+	Provider string
+	Media    string
+	Kind     string
+}
+
+func (e *ErrUnsupportedSource) Error() string {
+	return fmt.Sprintf("%s does not support source kind %q for media type %q", e.Provider, e.Kind, e.Media)
 }

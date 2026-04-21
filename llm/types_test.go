@@ -4,6 +4,7 @@ package llm
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 )
 
@@ -73,5 +74,39 @@ func TestContentBlock_TextHasNoSource(t *testing.T) {
 	_ = json.Unmarshal(data, &restored)
 	if restored.Source != nil {
 		t.Errorf("Source should be nil for text block, got %+v", restored.Source)
+	}
+}
+
+func TestErrUnsupportedMedia_Error(t *testing.T) {
+	err := &ErrUnsupportedMedia{Provider: "anthropic", Media: "audio"}
+	if err.Error() != "anthropic does not support media type \"audio\"" {
+		t.Errorf("message: %q", err.Error())
+	}
+}
+
+func TestErrUnsupportedMedia_ErrorsAs(t *testing.T) {
+	err := error(&ErrUnsupportedMedia{Provider: "anthropic", Media: "audio"})
+	var target *ErrUnsupportedMedia
+	if !errors.As(err, &target) {
+		t.Fatal("errors.As should match")
+	}
+	if target.Provider != "anthropic" || target.Media != "audio" {
+		t.Errorf("target fields wrong: %+v", target)
+	}
+}
+
+func TestErrUnsupportedSource_Error(t *testing.T) {
+	err := &ErrUnsupportedSource{Provider: "openai", Media: "audio", Kind: "url"}
+	want := "openai does not support source kind \"url\" for media type \"audio\""
+	if err.Error() != want {
+		t.Errorf("message: got %q want %q", err.Error(), want)
+	}
+}
+
+func TestErrUnsupportedSource_ErrorsAs(t *testing.T) {
+	err := error(&ErrUnsupportedSource{Provider: "openai", Media: "pdf", Kind: "url"})
+	var target *ErrUnsupportedSource
+	if !errors.As(err, &target) {
+		t.Fatal("errors.As should match")
 	}
 }
