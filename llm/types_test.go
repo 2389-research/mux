@@ -299,3 +299,66 @@ func TestNewAudioFromFile_OK(t *testing.T) {
 		t.Errorf("MediaType: %q", b.MediaType)
 	}
 }
+
+func TestNewUserMessageWithBlocks(t *testing.T) {
+	img := NewImageFromURL("https://example.com/x.png")
+	text := ContentBlock{Type: ContentTypeText, Text: "describe this"}
+	msg := NewUserMessageWithBlocks(text, img)
+	if msg.Role != RoleUser {
+		t.Errorf("Role: %q", msg.Role)
+	}
+	if len(msg.Blocks) != 2 || msg.Blocks[0].Type != ContentTypeText || msg.Blocks[1].Type != ContentTypeImage {
+		t.Errorf("Blocks: %+v", msg.Blocks)
+	}
+}
+
+func TestValidateRequest_AllowsSupportedMedia(t *testing.T) {
+	caps := Capabilities{Image: true, PDF: true, Audio: true}
+	req := &Request{
+		Messages: []Message{
+			NewUserMessageWithBlocks(NewImageFromURL("https://x"), mustPDFBytes(t)),
+		},
+	}
+	if err := validateRequest("test", caps, req); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateRequest_RejectsUnsupportedMedia(t *testing.T) {
+	caps := Capabilities{Image: true, PDF: true, Audio: false}
+	req := &Request{
+		Messages: []Message{
+			{Role: RoleUser, Blocks: []ContentBlock{NewAudioFromURL("https://x.mp3")}},
+		},
+	}
+	err := validateRequest("anthropic", caps, req)
+	var unsup *ErrUnsupportedMedia
+	if !errors.As(err, &unsup) {
+		t.Fatalf("expected *ErrUnsupportedMedia, got %T: %v", err, err)
+	}
+	if unsup.Provider != "anthropic" || unsup.Media != "audio" {
+		t.Errorf("err fields: %+v", unsup)
+	}
+}
+
+func TestValidateRequest_IgnoresNonMediaBlocks(t *testing.T) {
+	caps := Capabilities{} // no media support at all
+	req := &Request{
+		Messages: []Message{
+			NewUserMessage("hi"),
+			{Role: RoleAssistant, Blocks: []ContentBlock{{Type: ContentTypeToolUse, ID: "1", Name: "t"}}},
+		},
+	}
+	if err := validateRequest("test", caps, req); err != nil {
+		t.Errorf("text/tool blocks shouldn't trigger media validation: %v", err)
+	}
+}
+
+func mustPDFBytes(t *testing.T) ContentBlock {
+	t.Helper()
+	b, err := NewPDFFromBytes([]byte("%PDF"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
