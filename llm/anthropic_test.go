@@ -1233,3 +1233,98 @@ func TestCreateMessageStream_MessageDeltaOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestAnthropicConvertRequest_ImageBytes(t *testing.T) {
+	img, err := NewImageFromBytes("image/png", []byte{0x89, 'P', 'N', 'G'})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := &Request{
+		Model:    "claude-sonnet-4-20250514",
+		Messages: []Message{NewUserMessageWithBlocks(img)},
+	}
+	params := convertRequest(req)
+	if len(params.Messages) != 1 || len(params.Messages[0].Content) != 1 {
+		t.Fatalf("expected 1 content block, got %+v", params.Messages)
+	}
+	block := params.Messages[0].Content[0]
+	if block.OfImage == nil {
+		t.Fatalf("expected OfImage set, got %+v", block)
+	}
+	if block.OfImage.Source.OfBase64 == nil {
+		t.Fatalf("expected base64 source")
+	}
+	if string(block.OfImage.Source.OfBase64.MediaType) != "image/png" {
+		t.Errorf("media type: %q", block.OfImage.Source.OfBase64.MediaType)
+	}
+	if block.OfImage.Source.OfBase64.Data == "" {
+		t.Error("expected non-empty base64 data")
+	}
+}
+
+func TestAnthropicConvertRequest_ImageURL(t *testing.T) {
+	img := NewImageFromURL("https://example.com/cat.png")
+	req := &Request{Messages: []Message{NewUserMessageWithBlocks(img)}}
+	params := convertRequest(req)
+	block := params.Messages[0].Content[0]
+	if block.OfImage == nil || block.OfImage.Source.OfURL == nil {
+		t.Fatalf("expected URL image source, got %+v", block.OfImage)
+	}
+	if block.OfImage.Source.OfURL.URL != "https://example.com/cat.png" {
+		t.Errorf("URL: %q", block.OfImage.Source.OfURL.URL)
+	}
+}
+
+func TestAnthropicConvertRequest_PDFBytes(t *testing.T) {
+	pdf, err := NewPDFFromBytes([]byte("%PDF-1.4"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := &Request{Messages: []Message{NewUserMessageWithBlocks(pdf)}}
+	params := convertRequest(req)
+	block := params.Messages[0].Content[0]
+	if block.OfDocument == nil || block.OfDocument.Source.OfBase64 == nil {
+		t.Fatalf("expected base64 PDF source, got %+v", block.OfDocument)
+	}
+	if block.OfDocument.Source.OfBase64.Data == "" {
+		t.Error("expected non-empty base64 data")
+	}
+}
+
+func TestAnthropicConvertRequest_PDFURL(t *testing.T) {
+	pdf := NewPDFFromURL("https://example.com/x.pdf")
+	req := &Request{Messages: []Message{NewUserMessageWithBlocks(pdf)}}
+	params := convertRequest(req)
+	block := params.Messages[0].Content[0]
+	if block.OfDocument == nil || block.OfDocument.Source.OfURL == nil {
+		t.Fatalf("expected URL PDF source")
+	}
+	if block.OfDocument.Source.OfURL.URL != "https://example.com/x.pdf" {
+		t.Errorf("URL: %q", block.OfDocument.Source.OfURL.URL)
+	}
+}
+
+func TestAnthropicCreateMessage_RejectsAudio(t *testing.T) {
+	audio := NewAudioFromURL("https://example.com/a.mp3")
+	c := NewAnthropicClient("fake-key", "")
+	req := &Request{Messages: []Message{NewUserMessageWithBlocks(audio)}}
+	_, err := c.CreateMessage(context.Background(), req)
+	var unsup *ErrUnsupportedMedia
+	if !errors.As(err, &unsup) {
+		t.Fatalf("expected *ErrUnsupportedMedia, got %T: %v", err, err)
+	}
+	if unsup.Provider != "anthropic" || unsup.Media != "audio" {
+		t.Errorf("err fields: %+v", unsup)
+	}
+}
+
+func TestAnthropicCreateMessageStream_RejectsAudio(t *testing.T) {
+	audio := NewAudioFromURL("https://example.com/a.mp3")
+	c := NewAnthropicClient("fake-key", "")
+	req := &Request{Messages: []Message{NewUserMessageWithBlocks(audio)}}
+	_, err := c.CreateMessageStream(context.Background(), req)
+	var unsup *ErrUnsupportedMedia
+	if !errors.As(err, &unsup) {
+		t.Fatalf("expected *ErrUnsupportedMedia, got %T: %v", err, err)
+	}
+}
