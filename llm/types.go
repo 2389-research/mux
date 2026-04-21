@@ -263,6 +263,8 @@ func NewPDFFromURL(url string) ContentBlock {
 }
 
 // NewPDFFromBytes constructs a PDF content block from inline bytes.
+// The media type is fixed to "application/pdf" (the only PDF MIME type),
+// so no mediaType parameter is needed. data must be non-empty.
 func NewPDFFromBytes(data []byte) (ContentBlock, error) {
 	if len(data) == 0 {
 		return ContentBlock{}, fmt.Errorf("NewPDFFromBytes: data is empty")
@@ -274,7 +276,8 @@ func NewPDFFromBytes(data []byte) (ContentBlock, error) {
 	}, nil
 }
 
-// NewPDFFromFile reads a PDF file and returns a ready-to-send content block.
+// NewPDFFromFile reads a PDF file (extension must map to application/pdf) and
+// returns a ready-to-send content block.
 func NewPDFFromFile(path string) (ContentBlock, error) {
 	data, mediaType, err := readMediaFile(path, "pdf")
 	if err != nil {

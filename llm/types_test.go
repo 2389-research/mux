@@ -252,7 +252,11 @@ func TestNewPDFFromFile_WrongExtension(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "foo.png")
 	_ = os.WriteFile(p, []byte("x"), 0o644)
-	if _, err := NewPDFFromFile(p); err == nil {
+	_, err := NewPDFFromFile(p)
+	if err == nil {
 		t.Fatal("expected error for non-pdf extension")
+	}
+	if !strings.Contains(err.Error(), "application/pdf") {
+		t.Errorf("expected error to mention application/pdf, got %v", err)
 	}
 }
