@@ -1313,5 +1313,35 @@ func TestOpenAICreateMessage_AudioFromURL_ErrUnsupportedSource(t *testing.T) {
 	}
 }
 
+func TestOpenAICreateMessageStream_PDFFromURL_ErrUnsupportedSource(t *testing.T) {
+	pdf := NewPDFFromURL("https://example.com/x.pdf")
+	c := NewOpenAIClient("fake-key", "")
+	_, err := c.CreateMessageStream(context.Background(), &Request{
+		Messages: []Message{NewUserMessageWithBlocks(pdf)},
+	})
+	var ue *ErrUnsupportedSource
+	if !errors.As(err, &ue) {
+		t.Fatalf("expected *ErrUnsupportedSource, got %T: %v", err, err)
+	}
+	if ue.Provider != "openai" || ue.Media != "pdf" || ue.Kind != "url" {
+		t.Errorf("err fields: %+v", ue)
+	}
+}
+
+func TestOpenAICreateMessageStream_AudioFromURL_ErrUnsupportedSource(t *testing.T) {
+	audio := NewAudioFromURL("https://example.com/a.mp3")
+	c := NewOpenAIClient("fake-key", "")
+	_, err := c.CreateMessageStream(context.Background(), &Request{
+		Messages: []Message{NewUserMessageWithBlocks(audio)},
+	})
+	var ue *ErrUnsupportedSource
+	if !errors.As(err, &ue) {
+		t.Fatalf("expected *ErrUnsupportedSource, got %T: %v", err, err)
+	}
+	if ue.Media != "audio" || ue.Kind != "url" {
+		t.Errorf("err fields: %+v", ue)
+	}
+}
+
 // Compile-time interface check
 var _ Client = (*OpenAIClient)(nil)
