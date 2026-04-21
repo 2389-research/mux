@@ -81,6 +81,12 @@ func NewAssistantMessage(text string) Message {
 	return Message{Role: RoleAssistant, Content: text}
 }
 
+// NewUserMessageWithBlocks constructs a user message from one or more content
+// blocks. Use this when assembling multimodal messages (text + image, PDF, etc.).
+func NewUserMessageWithBlocks(blocks ...ContentBlock) Message {
+	return Message{Role: RoleUser, Blocks: blocks}
+}
+
 // ContentBlock represents a piece of content in a message.
 type ContentBlock struct {
 	Type ContentType `json:"type"`
