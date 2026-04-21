@@ -1154,5 +1154,74 @@ func TestConvertOpenAIResponse_ReasoningTokens(t *testing.T) {
 	}
 }
 
+func TestOpenAIConvertUserMessage_ImageBytes(t *testing.T) {
+	img, err := NewImageFromBytes("image/png", []byte{0x89, 'P', 'N', 'G'})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := convertUserMessage(NewUserMessageWithBlocks(img))
+	if msg.OfUser == nil {
+		t.Fatalf("expected user message, got %+v", msg)
+	}
+	parts := msg.OfUser.Content.OfArrayOfContentParts
+	if len(parts) != 1 {
+		t.Fatalf("expected 1 part, got %d", len(parts))
+	}
+	if parts[0].OfImageURL == nil {
+		t.Fatalf("expected image part, got %+v", parts[0])
+	}
+	if !strings.HasPrefix(parts[0].OfImageURL.ImageURL.URL, "data:image/png;base64,") {
+		t.Errorf("expected data URL, got %q", parts[0].OfImageURL.ImageURL.URL)
+	}
+}
+
+func TestOpenAIConvertUserMessage_ImageURL(t *testing.T) {
+	img := NewImageFromURL("https://example.com/x.png")
+	msg := convertUserMessage(NewUserMessageWithBlocks(img))
+	parts := msg.OfUser.Content.OfArrayOfContentParts
+	if parts[0].OfImageURL.ImageURL.URL != "https://example.com/x.png" {
+		t.Errorf("URL: %q", parts[0].OfImageURL.ImageURL.URL)
+	}
+}
+
+func TestOpenAIConvertUserMessage_TextPlusImage(t *testing.T) {
+	img := NewImageFromURL("https://example.com/x.png")
+	msg := convertUserMessage(NewUserMessageWithBlocks(
+		ContentBlock{Type: ContentTypeText, Text: "describe this"},
+		img,
+	))
+	parts := msg.OfUser.Content.OfArrayOfContentParts
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 parts, got %d", len(parts))
+	}
+	if parts[0].OfText == nil || parts[0].OfText.Text != "describe this" {
+		t.Errorf("text part: %+v", parts[0])
+	}
+	if parts[1].OfImageURL == nil {
+		t.Errorf("image part: %+v", parts[1])
+	}
+}
+
+func TestOpenAIConvertUserMessage_PlainTextStillWorks(t *testing.T) {
+	msg := convertUserMessage(NewUserMessage("hello"))
+	if msg.OfUser == nil {
+		t.Fatalf("expected user message, got %+v", msg)
+	}
+	if s := msg.OfUser.Content.OfString; !s.Valid() || s.Value != "hello" {
+		t.Errorf("plain text should stay string form, got %+v", msg.OfUser.Content)
+	}
+}
+
+func TestOpenAIConvertUserMessage_ToolResultStillWorks(t *testing.T) {
+	msg := Message{
+		Role:   RoleUser,
+		Blocks: []ContentBlock{{Type: ContentTypeToolResult, ToolUseID: "t1", Text: "done"}},
+	}
+	converted := convertUserMessage(msg)
+	if converted.OfTool == nil {
+		t.Errorf("expected tool message, got %+v", converted)
+	}
+}
+
 // Compile-time interface check
 var _ Client = (*OpenAIClient)(nil)

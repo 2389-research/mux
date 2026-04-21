@@ -4,6 +4,7 @@ package llm
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -114,26 +115,67 @@ func convertOpenAIRequest(req *Request) openai.ChatCompletionNewParams {
 
 // convertUserMessage converts a mux user message to OpenAI format.
 func convertUserMessage(msg Message) openai.ChatCompletionMessageParamUnion {
-	// Check for tool results in blocks
+	// Tool result routes to a tool message (OpenAI's required shape).
 	for _, block := range msg.Blocks {
 		if block.Type == ContentTypeToolResult {
 			return openai.ToolMessage(block.Text, block.ToolUseID)
 		}
 	}
 
-	// Regular text message
+	// Collect text + media parts.
+	var parts []openai.ChatCompletionContentPartUnionParam
 	if msg.Content != "" {
-		return openai.UserMessage(msg.Content)
+		parts = append(parts, openai.TextContentPart(msg.Content))
 	}
-
-	// Text from blocks
 	for _, block := range msg.Blocks {
-		if block.Type == ContentTypeText {
-			return openai.UserMessage(block.Text)
+		part, ok := convertOpenAIUserBlock(block)
+		if ok {
+			parts = append(parts, part)
 		}
 	}
 
-	return openai.UserMessage("")
+	// If the message is plain text with no blocks, keep string form so we don't
+	// force array form unnecessarily.
+	if len(parts) == 1 && len(msg.Blocks) == 0 {
+		return openai.UserMessage(msg.Content)
+	}
+
+	if len(parts) == 0 {
+		return openai.UserMessage("")
+	}
+
+	return openai.UserMessage(parts)
+}
+
+// convertOpenAIUserBlock converts a single user-message block to an OpenAI
+// content part. Returns ok=false for blocks that don't translate (e.g.
+// tool_use on user side, already-handled tool_result). PDF + audio are added
+// in a follow-up.
+func convertOpenAIUserBlock(block ContentBlock) (openai.ChatCompletionContentPartUnionParam, bool) {
+	switch block.Type {
+	case ContentTypeText:
+		return openai.TextContentPart(block.Text), true
+	case ContentTypeImage:
+		return convertOpenAIImage(block), true
+	}
+	return openai.ChatCompletionContentPartUnionParam{}, false
+}
+
+// convertOpenAIImage builds an OpenAI image content part from a mux image
+// block, encoding inline bytes as a data URL.
+func convertOpenAIImage(block ContentBlock) openai.ChatCompletionContentPartUnionParam {
+	if block.Source == nil {
+		return openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{})
+	}
+	var url string
+	switch block.Source.Kind {
+	case SourceKindURL:
+		url = block.Source.URL
+	default:
+		encoded := base64.StdEncoding.EncodeToString(block.Source.Bytes)
+		url = "data:" + block.MediaType + ";base64," + encoded
+	}
+	return openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{URL: url})
 }
 
 // convertUserMessages converts a mux user message to one or more OpenAI messages.
