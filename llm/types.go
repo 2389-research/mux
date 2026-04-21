@@ -2,7 +2,13 @@
 // ABOUTME: blocks, tool definitions, and tool use/results.
 package llm
 
-import "fmt"
+import (
+	"fmt"
+	"mime"
+	"os"
+	"path/filepath"
+	"strings"
+)
 
 // Role represents the role of a message sender.
 type Role string
@@ -204,4 +210,79 @@ type ErrUnsupportedSource struct {
 
 func (e *ErrUnsupportedSource) Error() string {
 	return fmt.Sprintf("%s does not support source kind %q for media type %q", e.Provider, e.Kind, e.Media)
+}
+
+// NewImageFromURL constructs an image content block backed by a remote URL.
+func NewImageFromURL(url string) ContentBlock {
+	return ContentBlock{
+		Type:   ContentTypeImage,
+		Source: &MediaSource{Kind: SourceKindURL, URL: url},
+	}
+}
+
+// NewImageFromBytes constructs an image content block from inline bytes.
+// mediaType must be an image/* MIME type; data must be non-empty.
+func NewImageFromBytes(mediaType string, data []byte) (ContentBlock, error) {
+	if err := validateMediaFamily("image", mediaType); err != nil {
+		return ContentBlock{}, err
+	}
+	if len(data) == 0 {
+		return ContentBlock{}, fmt.Errorf("NewImageFromBytes: data is empty")
+	}
+	return ContentBlock{
+		Type:      ContentTypeImage,
+		MediaType: mediaType,
+		Source:    &MediaSource{Kind: SourceKindBytes, Bytes: data},
+	}, nil
+}
+
+// NewImageFromFile reads an image file, infers its media type from the
+// extension, and returns a ready-to-send content block.
+func NewImageFromFile(path string) (ContentBlock, error) {
+	data, mediaType, err := readMediaFile(path, "image")
+	if err != nil {
+		return ContentBlock{}, err
+	}
+	return ContentBlock{
+		Type:      ContentTypeImage,
+		MediaType: mediaType,
+		Source:    &MediaSource{Kind: SourceKindFile, Bytes: data, Path: path},
+	}, nil
+}
+
+// validateMediaFamily confirms mediaType starts with the expected family prefix
+// (e.g. "image/", "audio/") or matches exactly for fixed types.
+func validateMediaFamily(family, mediaType string) error {
+	if family == "pdf" {
+		if mediaType != "application/pdf" {
+			return fmt.Errorf("media type %q is not application/pdf", mediaType)
+		}
+		return nil
+	}
+	prefix := family + "/"
+	if !strings.HasPrefix(mediaType, prefix) {
+		return fmt.Errorf("media type %q is not in family %s*", mediaType, prefix)
+	}
+	return nil
+}
+
+// readMediaFile reads a file, infers its media type from the extension, and
+// validates the media type against the expected family.
+func readMediaFile(path, family string) (data []byte, mediaType string, err error) {
+	data, err = os.ReadFile(path)
+	if err != nil {
+		return nil, "", err
+	}
+	ext := filepath.Ext(path)
+	mediaType = mime.TypeByExtension(ext)
+	if i := strings.Index(mediaType, ";"); i != -1 {
+		mediaType = mediaType[:i]
+	}
+	if mediaType == "" {
+		return nil, "", fmt.Errorf("could not infer media type from extension %q", ext)
+	}
+	if err := validateMediaFamily(family, mediaType); err != nil {
+		return nil, "", err
+	}
+	return data, mediaType, nil
 }
