@@ -1223,5 +1223,95 @@ func TestOpenAIConvertUserMessage_ToolResultStillWorks(t *testing.T) {
 	}
 }
 
+func TestOpenAIConvertUserMessage_PDFBytes(t *testing.T) {
+	pdf, err := NewPDFFromBytes([]byte("%PDF"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := convertUserMessage(NewUserMessageWithBlocks(pdf))
+	parts := msg.OfUser.Content.OfArrayOfContentParts
+	if parts[0].OfFile == nil {
+		t.Fatalf("expected file part, got %+v", parts[0])
+	}
+	if !parts[0].OfFile.File.FileData.Valid() {
+		t.Error("expected FileData set")
+	}
+	if !parts[0].OfFile.File.Filename.Valid() || parts[0].OfFile.File.Filename.Value != "file.pdf" {
+		t.Errorf("default filename: %+v", parts[0].OfFile.File.Filename)
+	}
+}
+
+func TestOpenAIConvertUserMessage_PDFFileKeepsFilename(t *testing.T) {
+	pdf, err := NewPDFFromFile("testdata/tiny.pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := convertUserMessage(NewUserMessageWithBlocks(pdf))
+	parts := msg.OfUser.Content.OfArrayOfContentParts
+	if parts[0].OfFile.File.Filename.Value != "tiny.pdf" {
+		t.Errorf("filename: %q", parts[0].OfFile.File.Filename.Value)
+	}
+}
+
+func TestOpenAIConvertUserMessage_AudioMP3(t *testing.T) {
+	audio, err := NewAudioFromBytes("audio/mpeg", []byte{0xff, 0xfb})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := convertUserMessage(NewUserMessageWithBlocks(audio))
+	parts := msg.OfUser.Content.OfArrayOfContentParts
+	if parts[0].OfInputAudio == nil {
+		t.Fatalf("expected audio part, got %+v", parts[0])
+	}
+	if parts[0].OfInputAudio.InputAudio.Format != "mp3" {
+		t.Errorf("format: %q (audio/mpeg should map to mp3)", parts[0].OfInputAudio.InputAudio.Format)
+	}
+	if parts[0].OfInputAudio.InputAudio.Data == "" {
+		t.Error("expected base64 data set")
+	}
+}
+
+func TestOpenAIConvertUserMessage_AudioWAV(t *testing.T) {
+	audio, err := NewAudioFromBytes("audio/wav", []byte{0x52, 0x49, 0x46, 0x46})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := convertUserMessage(NewUserMessageWithBlocks(audio))
+	parts := msg.OfUser.Content.OfArrayOfContentParts
+	if parts[0].OfInputAudio.InputAudio.Format != "wav" {
+		t.Errorf("format: %q", parts[0].OfInputAudio.InputAudio.Format)
+	}
+}
+
+func TestOpenAICreateMessage_PDFFromURL_ErrUnsupportedSource(t *testing.T) {
+	pdf := NewPDFFromURL("https://example.com/x.pdf")
+	c := NewOpenAIClient("fake-key", "")
+	_, err := c.CreateMessage(context.Background(), &Request{
+		Messages: []Message{NewUserMessageWithBlocks(pdf)},
+	})
+	var ue *ErrUnsupportedSource
+	if !errors.As(err, &ue) {
+		t.Fatalf("expected *ErrUnsupportedSource, got %T: %v", err, err)
+	}
+	if ue.Provider != "openai" || ue.Media != "pdf" || ue.Kind != "url" {
+		t.Errorf("err fields: %+v", ue)
+	}
+}
+
+func TestOpenAICreateMessage_AudioFromURL_ErrUnsupportedSource(t *testing.T) {
+	audio := NewAudioFromURL("https://example.com/a.mp3")
+	c := NewOpenAIClient("fake-key", "")
+	_, err := c.CreateMessage(context.Background(), &Request{
+		Messages: []Message{NewUserMessageWithBlocks(audio)},
+	})
+	var ue *ErrUnsupportedSource
+	if !errors.As(err, &ue) {
+		t.Fatalf("expected *ErrUnsupportedSource, got %T: %v", err, err)
+	}
+	if ue.Media != "audio" || ue.Kind != "url" {
+		t.Errorf("err fields: %+v", ue)
+	}
+}
+
 // Compile-time interface check
 var _ Client = (*OpenAIClient)(nil)
