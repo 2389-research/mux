@@ -284,6 +284,12 @@ func TestNewAudioFromBytes_RejectsNonAudio(t *testing.T) {
 	}
 }
 
+func TestNewAudioFromBytes_RejectsEmpty(t *testing.T) {
+	if _, err := NewAudioFromBytes("audio/mpeg", nil); err == nil {
+		t.Fatal("expected error for empty bytes")
+	}
+}
+
 func TestNewAudioFromFile_OK(t *testing.T) {
 	b, err := NewAudioFromFile(filepath.Join("testdata", "tiny.mp3"))
 	if err != nil {
