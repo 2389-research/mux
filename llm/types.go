@@ -290,6 +290,46 @@ func NewPDFFromFile(path string) (ContentBlock, error) {
 	}, nil
 }
 
+// NewAudioFromURL constructs an audio content block backed by a remote URL.
+// MediaType is left empty; the remote server's Content-Type is authoritative.
+func NewAudioFromURL(url string) ContentBlock {
+	return ContentBlock{
+		Type:   ContentTypeAudio,
+		Source: &MediaSource{Kind: SourceKindURL, URL: url},
+	}
+}
+
+// NewAudioFromBytes constructs an audio content block from inline bytes.
+// mediaType must be an audio/* MIME type; data must be non-empty.
+func NewAudioFromBytes(mediaType string, data []byte) (ContentBlock, error) {
+	if err := validateMediaFamily("audio", mediaType); err != nil {
+		return ContentBlock{}, err
+	}
+	if len(data) == 0 {
+		return ContentBlock{}, fmt.Errorf("NewAudioFromBytes: data is empty")
+	}
+	return ContentBlock{
+		Type:      ContentTypeAudio,
+		MediaType: mediaType,
+		Source:    &MediaSource{Kind: SourceKindBytes, Bytes: data},
+	}, nil
+}
+
+// NewAudioFromFile reads an audio file (extension must map to an audio/* MIME
+// type), infers its media type from the extension, and returns a
+// ready-to-send content block.
+func NewAudioFromFile(path string) (ContentBlock, error) {
+	data, mediaType, err := readMediaFile(path, "audio")
+	if err != nil {
+		return ContentBlock{}, err
+	}
+	return ContentBlock{
+		Type:      ContentTypeAudio,
+		MediaType: mediaType,
+		Source:    &MediaSource{Kind: SourceKindFile, Bytes: data, Path: path},
+	}, nil
+}
+
 // validateMediaFamily confirms mediaType starts with the expected family prefix
 // (e.g. "image/", "audio/") or matches exactly for fixed types.
 func validateMediaFamily(family, mediaType string) error {
