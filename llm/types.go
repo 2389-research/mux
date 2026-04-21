@@ -168,6 +168,20 @@ func (r *Response) TextContent() string {
 	return text
 }
 
+// Capabilities describes which media types a provider supports as input.
+type Capabilities struct {
+	Image bool `json:"image"`
+	PDF   bool `json:"pdf"`
+	Audio bool `json:"audio"`
+	Video bool `json:"video"`
+}
+
+// FullCapabilities returns a Capabilities with every media type enabled.
+// Useful for test mocks that don't care about capability-gated behavior.
+func FullCapabilities() Capabilities {
+	return Capabilities{Image: true, PDF: true, Audio: true, Video: true}
+}
+
 // ErrUnsupportedMedia indicates a provider cannot handle the requested media type at all.
 type ErrUnsupportedMedia struct {
 	Provider string

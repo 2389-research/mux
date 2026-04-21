@@ -110,3 +110,10 @@ func TestErrUnsupportedSource_ErrorsAs(t *testing.T) {
 		t.Fatal("errors.As should match")
 	}
 }
+
+func TestFullCapabilities(t *testing.T) {
+	caps := FullCapabilities()
+	if !caps.Image || !caps.PDF || !caps.Audio || !caps.Video {
+		t.Errorf("FullCapabilities should enable everything: %+v", caps)
+	}
+}
