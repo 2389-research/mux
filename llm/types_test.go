@@ -260,3 +260,36 @@ func TestNewPDFFromFile_WrongExtension(t *testing.T) {
 		t.Errorf("expected error to mention application/pdf, got %v", err)
 	}
 }
+
+func TestNewAudioFromURL(t *testing.T) {
+	b := NewAudioFromURL("https://example.com/a.mp3")
+	if b.Type != ContentTypeAudio || b.Source.Kind != SourceKindURL {
+		t.Errorf("block: %+v", b)
+	}
+}
+
+func TestNewAudioFromBytes_OK(t *testing.T) {
+	b, err := NewAudioFromBytes("audio/mpeg", []byte{0xff, 0xfb})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.MediaType != "audio/mpeg" {
+		t.Errorf("MediaType: %q", b.MediaType)
+	}
+}
+
+func TestNewAudioFromBytes_RejectsNonAudio(t *testing.T) {
+	if _, err := NewAudioFromBytes("image/png", []byte{0x01}); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestNewAudioFromFile_OK(t *testing.T) {
+	b, err := NewAudioFromFile(filepath.Join("testdata", "tiny.mp3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(b.MediaType, "audio/") {
+		t.Errorf("MediaType: %q", b.MediaType)
+	}
+}
