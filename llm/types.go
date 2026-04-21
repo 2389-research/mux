@@ -213,6 +213,7 @@ func (e *ErrUnsupportedSource) Error() string {
 }
 
 // NewImageFromURL constructs an image content block backed by a remote URL.
+// MediaType is left empty; the remote server's Content-Type is authoritative.
 func NewImageFromURL(url string) ContentBlock {
 	return ContentBlock{
 		Type:   ContentTypeImage,
@@ -279,10 +280,10 @@ func readMediaFile(path, family string) (data []byte, mediaType string, err erro
 		mediaType = mediaType[:i]
 	}
 	if mediaType == "" {
-		return nil, "", fmt.Errorf("could not infer media type from extension %q", ext)
+		return nil, "", fmt.Errorf("readMediaFile %q: could not infer media type from extension %q", path, ext)
 	}
 	if err := validateMediaFamily(family, mediaType); err != nil {
-		return nil, "", err
+		return nil, "", fmt.Errorf("readMediaFile %q: %w", path, err)
 	}
 	return data, mediaType, nil
 }

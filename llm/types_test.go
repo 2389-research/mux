@@ -199,12 +199,15 @@ func TestNewImageFromFile_MissingFile(t *testing.T) {
 
 func TestNewImageFromFile_UnknownExtension(t *testing.T) {
 	dir := t.TempDir()
-	p := filepath.Join(dir, "weird.xyz")
+	p := filepath.Join(dir, "weird.zzzfakeext")
 	if err := os.WriteFile(p, []byte("blob"), 0o644); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
 	_, err := NewImageFromFile(p)
 	if err == nil {
 		t.Fatal("expected error for unknown extension")
+	}
+	if !strings.Contains(err.Error(), "could not infer") {
+		t.Errorf("expected 'could not infer' error, got %v", err)
 	}
 }
