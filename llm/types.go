@@ -34,6 +34,25 @@ const (
 // (Anthropic 64-128K, OpenAI 32K, Gemini 8-65K, Ollama varies).
 const DefaultMaxTokens = 16384
 
+// SourceKind identifies how media bytes are supplied.
+type SourceKind string
+
+const (
+	SourceKindURL   SourceKind = "url"
+	SourceKindBytes SourceKind = "bytes"
+	SourceKindFile  SourceKind = "file"
+)
+
+// MediaSource describes where media bytes come from.
+// For SourceKindFile, Bytes is populated eagerly at construction time;
+// Path remains set for informational use (filenames on provider APIs, UI display).
+type MediaSource struct {
+	Kind  SourceKind `json:"kind"`
+	URL   string     `json:"url,omitempty"`
+	Bytes []byte     `json:"bytes,omitempty"`
+	Path  string     `json:"path,omitempty"`
+}
+
 // Message represents a conversation message.
 type Message struct {
 	Role    Role           `json:"role"`
@@ -69,6 +88,10 @@ type ContentBlock struct {
 
 	// For thinking content
 	Thinking string `json:"thinking,omitempty"`
+
+	// For media content (image, pdf, audio)
+	Source    *MediaSource `json:"source,omitempty"`
+	MediaType string       `json:"media_type,omitempty"`
 }
 
 // ToolDefinition describes a tool for the LLM.
