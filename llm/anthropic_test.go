@@ -14,6 +14,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/tidwall/gjson"
 )
 
 func TestNewAnthropicClient(t *testing.T) {
@@ -1326,5 +1327,108 @@ func TestAnthropicCreateMessageStream_RejectsAudio(t *testing.T) {
 	var unsup *ErrUnsupportedMedia
 	if !errors.As(err, &unsup) {
 		t.Fatalf("expected *ErrUnsupportedMedia, got %T: %v", err, err)
+	}
+}
+
+// Wire-format snapshot tests: marshal the SDK params produced by convertRequest
+// and assert the resulting JSON matches Anthropic's documented Messages API
+// shape. These guard against silent SDK regressions where a struct field
+// appears correctly populated in Go but doesn't appear in the marshaled body.
+
+func TestAnthropicWireFormat_ImageBytes(t *testing.T) {
+	img, err := NewImageFromBytes("image/png", []byte{0x89, 'P', 'N', 'G'})
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := convertRequest(&Request{
+		Model:    "claude-sonnet-4-20250514",
+		Messages: []Message{NewUserMessageWithBlocks(img)},
+	})
+	body, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	got := gjson.GetBytes(body, "messages.0.content.0.type").String()
+	if got != "image" {
+		t.Errorf("type: got %q want image; body=%s", got, body)
+	}
+	if v := gjson.GetBytes(body, "messages.0.content.0.source.type").String(); v != "base64" {
+		t.Errorf("source.type: got %q want base64; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "messages.0.content.0.source.media_type").String(); v != "image/png" {
+		t.Errorf("source.media_type: got %q want image/png; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "messages.0.content.0.source.data").String(); v == "" {
+		t.Errorf("source.data should be non-empty base64; body=%s", body)
+	}
+}
+
+func TestAnthropicWireFormat_ImageURL(t *testing.T) {
+	img := NewImageFromURL("https://example.com/cat.png")
+	params := convertRequest(&Request{
+		Messages: []Message{NewUserMessageWithBlocks(img)},
+	})
+	body, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	if v := gjson.GetBytes(body, "messages.0.content.0.type").String(); v != "image" {
+		t.Errorf("type: got %q want image; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "messages.0.content.0.source.type").String(); v != "url" {
+		t.Errorf("source.type: got %q want url; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "messages.0.content.0.source.url").String(); v != "https://example.com/cat.png" {
+		t.Errorf("source.url: got %q; body=%s", v, body)
+	}
+}
+
+func TestAnthropicWireFormat_PDFBytes(t *testing.T) {
+	pdf, err := NewPDFFromBytes([]byte("%PDF-1.4"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := convertRequest(&Request{
+		Messages: []Message{NewUserMessageWithBlocks(pdf)},
+	})
+	body, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	if v := gjson.GetBytes(body, "messages.0.content.0.type").String(); v != "document" {
+		t.Errorf("type: got %q want document; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "messages.0.content.0.source.type").String(); v != "base64" {
+		t.Errorf("source.type: got %q want base64; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "messages.0.content.0.source.media_type").String(); v != "application/pdf" {
+		t.Errorf("source.media_type: got %q want application/pdf; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "messages.0.content.0.source.data").String(); v == "" {
+		t.Errorf("source.data should be non-empty; body=%s", body)
+	}
+}
+
+func TestAnthropicWireFormat_PDFURL(t *testing.T) {
+	pdf := NewPDFFromURL("https://example.com/x.pdf")
+	params := convertRequest(&Request{
+		Messages: []Message{NewUserMessageWithBlocks(pdf)},
+	})
+	body, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	if v := gjson.GetBytes(body, "messages.0.content.0.type").String(); v != "document" {
+		t.Errorf("type: got %q want document; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "messages.0.content.0.source.type").String(); v != "url" {
+		t.Errorf("source.type: got %q want url; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "messages.0.content.0.source.url").String(); v != "https://example.com/x.pdf" {
+		t.Errorf("source.url: got %q; body=%s", v, body)
 	}
 }

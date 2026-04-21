@@ -14,6 +14,7 @@ import (
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
+	"github.com/tidwall/gjson"
 )
 
 func TestNewOpenAIClient(t *testing.T) {
@@ -1340,6 +1341,126 @@ func TestOpenAICreateMessageStream_AudioFromURL_ErrUnsupportedSource(t *testing.
 	}
 	if ue.Media != "audio" || ue.Kind != "url" {
 		t.Errorf("err fields: %+v", ue)
+	}
+}
+
+// Wire-format snapshot tests: marshal the SDK params produced by
+// convertOpenAIRequest and assert the resulting JSON matches OpenAI's
+// documented Chat Completions shape. Guards against silent SDK regressions.
+
+func TestOpenAIWireFormat_ImageBytes(t *testing.T) {
+	img, err := NewImageFromBytes("image/png", []byte{0x89, 'P', 'N', 'G'})
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := convertOpenAIRequest(&Request{
+		Model:    "gpt-5.2",
+		Messages: []Message{NewUserMessageWithBlocks(img)},
+	})
+	body, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	if v := gjson.GetBytes(body, "messages.0.role").String(); v != "user" {
+		t.Errorf("role: got %q want user; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "messages.0.content.0.type").String(); v != "image_url" {
+		t.Errorf("type: got %q want image_url; body=%s", v, body)
+	}
+	url := gjson.GetBytes(body, "messages.0.content.0.image_url.url").String()
+	if !strings.HasPrefix(url, "data:image/png;base64,") {
+		t.Errorf("image_url.url should be data URL; got %q; body=%s", url, body)
+	}
+}
+
+func TestOpenAIWireFormat_ImageURL(t *testing.T) {
+	img := NewImageFromURL("https://example.com/cat.png")
+	params := convertOpenAIRequest(&Request{
+		Messages: []Message{NewUserMessageWithBlocks(img)},
+	})
+	body, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	if v := gjson.GetBytes(body, "messages.0.content.0.type").String(); v != "image_url" {
+		t.Errorf("type: got %q; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "messages.0.content.0.image_url.url").String(); v != "https://example.com/cat.png" {
+		t.Errorf("image_url.url: got %q; body=%s", v, body)
+	}
+}
+
+func TestOpenAIWireFormat_PDFBytes(t *testing.T) {
+	pdf, err := NewPDFFromBytes([]byte("%PDF-1.4"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := convertOpenAIRequest(&Request{
+		Messages: []Message{NewUserMessageWithBlocks(pdf)},
+	})
+	body, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	if v := gjson.GetBytes(body, "messages.0.content.0.type").String(); v != "file" {
+		t.Errorf("type: got %q want file; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "messages.0.content.0.file.filename").String(); v != "file.pdf" {
+		t.Errorf("file.filename: got %q want file.pdf; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "messages.0.content.0.file.file_data").String(); v == "" {
+		t.Errorf("file.file_data should be non-empty base64; body=%s", body)
+	}
+}
+
+func TestOpenAIWireFormat_AudioMP3(t *testing.T) {
+	audio, err := NewAudioFromBytes("audio/mpeg", []byte{0xff, 0xfb, 0x90, 0x00})
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := convertOpenAIRequest(&Request{
+		Messages: []Message{NewUserMessageWithBlocks(audio)},
+	})
+	body, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	if v := gjson.GetBytes(body, "messages.0.content.0.type").String(); v != "input_audio" {
+		t.Errorf("type: got %q want input_audio; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "messages.0.content.0.input_audio.format").String(); v != "mp3" {
+		t.Errorf("input_audio.format: got %q want mp3; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "messages.0.content.0.input_audio.data").String(); v == "" {
+		t.Errorf("input_audio.data should be non-empty; body=%s", body)
+	}
+}
+
+func TestOpenAIWireFormat_TextPlusImage(t *testing.T) {
+	img := NewImageFromURL("https://example.com/cat.png")
+	params := convertOpenAIRequest(&Request{
+		Messages: []Message{NewUserMessageWithBlocks(
+			ContentBlock{Type: ContentTypeText, Text: "describe this"},
+			img,
+		)},
+	})
+	body, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	if v := gjson.GetBytes(body, "messages.0.content.0.type").String(); v != "text" {
+		t.Errorf("first part type: got %q want text; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "messages.0.content.0.text").String(); v != "describe this" {
+		t.Errorf("first part text: got %q; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "messages.0.content.1.type").String(); v != "image_url" {
+		t.Errorf("second part type: got %q want image_url; body=%s", v, body)
 	}
 }
 
