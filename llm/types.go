@@ -251,6 +251,42 @@ func NewImageFromFile(path string) (ContentBlock, error) {
 	}, nil
 }
 
+// NewPDFFromURL constructs a PDF content block backed by a remote URL.
+// MediaType is set to "application/pdf" for consistency with the bytes/file
+// forms; provider translators may still rely on the remote server's Content-Type.
+func NewPDFFromURL(url string) ContentBlock {
+	return ContentBlock{
+		Type:      ContentTypePDF,
+		MediaType: "application/pdf",
+		Source:    &MediaSource{Kind: SourceKindURL, URL: url},
+	}
+}
+
+// NewPDFFromBytes constructs a PDF content block from inline bytes.
+func NewPDFFromBytes(data []byte) (ContentBlock, error) {
+	if len(data) == 0 {
+		return ContentBlock{}, fmt.Errorf("NewPDFFromBytes: data is empty")
+	}
+	return ContentBlock{
+		Type:      ContentTypePDF,
+		MediaType: "application/pdf",
+		Source:    &MediaSource{Kind: SourceKindBytes, Bytes: data},
+	}, nil
+}
+
+// NewPDFFromFile reads a PDF file and returns a ready-to-send content block.
+func NewPDFFromFile(path string) (ContentBlock, error) {
+	data, mediaType, err := readMediaFile(path, "pdf")
+	if err != nil {
+		return ContentBlock{}, err
+	}
+	return ContentBlock{
+		Type:      ContentTypePDF,
+		MediaType: mediaType,
+		Source:    &MediaSource{Kind: SourceKindFile, Bytes: data, Path: path},
+	}, nil
+}
+
 // validateMediaFamily confirms mediaType starts with the expected family prefix
 // (e.g. "image/", "audio/") or matches exactly for fixed types.
 func validateMediaFamily(family, mediaType string) error {
