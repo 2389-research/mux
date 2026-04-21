@@ -92,6 +92,8 @@ func (c *compactionTestClient) CreateMessageStream(ctx context.Context, req *llm
 	return ch, nil
 }
 
+func (c *compactionTestClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
+
 func (c *compactionTestClient) Requests() []*llm.Request {
 	c.mu.Lock()
 	defer c.mu.Unlock()

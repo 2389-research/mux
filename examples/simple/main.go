@@ -43,6 +43,8 @@ func (c *DemoClient) CreateMessageStream(ctx context.Context, req *llm.Request) 
 	return ch, nil
 }
 
+func (c *DemoClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
+
 func main() {
 	registry := tool.NewRegistry()
 	registry.Register(&EchoTool{})

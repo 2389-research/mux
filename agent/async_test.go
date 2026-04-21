@@ -355,6 +355,8 @@ func (m *mockLLMClient) CreateMessageStream(ctx context.Context, req *llm.Reques
 	return ch, nil
 }
 
+func (m *mockLLMClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
+
 // TestRunAsync_CancelStopsRun verifies that handle.Cancel() actually stops a
 // running agent (not merely flips a status flag). The run blocks in the LLM
 // call until its context is cancelled; only Cancel() can unblock it here, since
