@@ -385,5 +385,12 @@ func (o *OpenAIClient) CreateMessageStream(ctx context.Context, req *Request) (<
 	return eventChan, nil
 }
 
+// Capabilities reports which media types OpenAI's Chat Completions supports.
+// Audio is provider-level enabled; specific models (gpt-4o-audio-preview class)
+// are required at send time — the API rejects on mismatch.
+func (o *OpenAIClient) Capabilities() Capabilities {
+	return Capabilities{Image: true, PDF: true, Audio: true, Video: false}
+}
+
 // Compile-time interface assertion.
 var _ Client = (*OpenAIClient)(nil)

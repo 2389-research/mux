@@ -190,5 +190,14 @@ func (o *OpenRouterClient) CreateMessageStream(ctx context.Context, req *Request
 	return eventChan, nil
 }
 
+// Capabilities reports which media types OpenRouter supports as input.
+// OpenRouter routes to many upstream providers with varying multimodal
+// support, and this client does not yet translate media blocks into the
+// wire format. Until that lands, all media types are reported as
+// unsupported so callers fail fast.
+func (o *OpenRouterClient) Capabilities() Capabilities {
+	return Capabilities{}
+}
+
 // Compile-time interface assertion.
 var _ Client = (*OpenRouterClient)(nil)

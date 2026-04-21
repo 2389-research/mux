@@ -144,5 +144,14 @@ func (o *OllamaClient) CreateMessageStream(ctx context.Context, req *Request) (<
 	return eventChan, nil
 }
 
+// Capabilities reports which media types Ollama supports as input.
+// Ollama's OpenAI-compatible endpoint accepts image_url for vision-capable
+// models (LLaVA, Llama 3.2 Vision, etc.), but this client does not yet
+// translate media blocks into the wire format. Until that lands, all media
+// types are reported as unsupported so callers fail fast.
+func (o *OllamaClient) Capabilities() Capabilities {
+	return Capabilities{}
+}
+
 // Compile-time interface assertion.
 var _ Client = (*OllamaClient)(nil)

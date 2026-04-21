@@ -33,6 +33,17 @@ func TestNewOpenAIClientDefaultModel(t *testing.T) {
 	}
 }
 
+func TestOpenAIClient_Capabilities(t *testing.T) {
+	c := NewOpenAIClient("key", "")
+	caps := c.Capabilities()
+	if !caps.Image || !caps.PDF || !caps.Audio {
+		t.Errorf("expected Image+PDF+Audio true, got %+v", caps)
+	}
+	if caps.Video {
+		t.Errorf("expected Video false, got %+v", caps)
+	}
+}
+
 func TestOpenAIClient_ConvertRequest(t *testing.T) {
 	req := &Request{
 		Model:     "gpt-5.2",

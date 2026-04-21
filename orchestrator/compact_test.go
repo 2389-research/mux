@@ -37,6 +37,8 @@ func (m *compactMockClient) CreateMessageStream(ctx context.Context, req *llm.Re
 	return ch, nil
 }
 
+func (m *compactMockClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
+
 // newTestExecutor creates a test executor with an empty registry.
 func newTestExecutor() *tool.Executor {
 	registry := tool.NewRegistry()

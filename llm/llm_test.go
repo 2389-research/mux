@@ -26,6 +26,8 @@ func (m *mockClient) CreateMessageStream(ctx context.Context, req *llm.Request) 
 	return ch, nil
 }
 
+func (m *mockClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
+
 func TestClientInterface(t *testing.T) {
 	var client llm.Client = &mockClient{}
 

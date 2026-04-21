@@ -151,5 +151,11 @@ func cryptoFloat64() float64 {
 	return float64(binary.BigEndian.Uint64(b[:])>>(64-53)) / (1 << 53)
 }
 
+// Capabilities delegates to the wrapped client. RetryClient adds no media
+// support of its own; it forwards whatever the inner provider declares.
+func (r *RetryClient) Capabilities() Capabilities {
+	return r.inner.Capabilities()
+}
+
 // Compile-time interface assertion.
 var _ Client = (*RetryClient)(nil)

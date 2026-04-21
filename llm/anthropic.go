@@ -302,5 +302,10 @@ func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request)
 	return eventChan, nil
 }
 
+// Capabilities reports which media types Anthropic supports in our Messages API.
+func (a *AnthropicClient) Capabilities() Capabilities {
+	return Capabilities{Image: true, PDF: true, Audio: false, Video: false}
+}
+
 // Compile-time interface assertion.
 var _ Client = (*AnthropicClient)(nil)

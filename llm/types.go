@@ -20,6 +20,9 @@ const (
 	ContentTypeToolUse    ContentType = "tool_use"
 	ContentTypeToolResult ContentType = "tool_result"
 	ContentTypeThinking   ContentType = "thinking"
+	ContentTypeImage      ContentType = "image"
+	ContentTypePDF        ContentType = "pdf"
+	ContentTypeAudio      ContentType = "audio"
 )
 
 // StopReason indicates why the model stopped generating.

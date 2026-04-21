@@ -33,6 +33,17 @@ func TestNewAnthropicClientDefaultModel(t *testing.T) {
 	}
 }
 
+func TestAnthropicClient_Capabilities(t *testing.T) {
+	c := NewAnthropicClient("key", "")
+	caps := c.Capabilities()
+	if !caps.Image || !caps.PDF {
+		t.Errorf("expected Image+PDF true, got %+v", caps)
+	}
+	if caps.Audio || caps.Video {
+		t.Errorf("expected Audio+Video false, got %+v", caps)
+	}
+}
+
 func TestAnthropicClientCreateMessage_ConvertsRequest(t *testing.T) {
 	// This test verifies request conversion logic
 	// We can't call real API without key, so test the conversion helpers

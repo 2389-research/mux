@@ -248,3 +248,5 @@ func (m *mockPresetLLMClient) CreateMessageStream(ctx context.Context, req *llm.
 	close(ch)
 	return ch, nil
 }
+
+func (m *mockPresetLLMClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
