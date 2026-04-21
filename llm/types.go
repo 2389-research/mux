@@ -352,13 +352,11 @@ func validateMediaFamily(family, mediaType string) error {
 	return nil
 }
 
-// readMediaFile reads a file, infers its media type from the extension, and
-// validates the media type against the expected family.
+// readMediaFile infers the media type from the extension, validates it against
+// the expected family, then reads the file. Extension validation happens before
+// I/O so a caller passing a large file with the wrong extension fails fast
+// without loading its bytes into memory.
 func readMediaFile(path, family string) (data []byte, mediaType string, err error) {
-	data, err = os.ReadFile(path)
-	if err != nil {
-		return nil, "", err
-	}
 	ext := filepath.Ext(path)
 	mediaType = mime.TypeByExtension(ext)
 	if i := strings.Index(mediaType, ";"); i != -1 {
@@ -369,6 +367,10 @@ func readMediaFile(path, family string) (data []byte, mediaType string, err erro
 	}
 	if err := validateMediaFamily(family, mediaType); err != nil {
 		return nil, "", fmt.Errorf("readMediaFile %q: %w", path, err)
+	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		return nil, "", err
 	}
 	return data, mediaType, nil
 }
