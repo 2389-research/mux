@@ -56,7 +56,8 @@ const (
 
 // MediaSource describes where media bytes come from.
 // For SourceKindFile, Bytes is populated eagerly at construction time;
-// Path remains set for informational use (filenames on provider APIs, UI display).
+// Path is set to the basename only (no directory components) so the
+// serialized block doesn't leak host filesystem paths.
 type MediaSource struct {
 	Kind  SourceKind `json:"kind"`
 	URL   string     `json:"url,omitempty"`
@@ -264,7 +265,7 @@ func NewImageFromFile(path string) (ContentBlock, error) {
 	return ContentBlock{
 		Type:      ContentTypeImage,
 		MediaType: mediaType,
-		Source:    &MediaSource{Kind: SourceKindFile, Bytes: data, Path: path},
+		Source:    &MediaSource{Kind: SourceKindFile, Bytes: data, Path: filepath.Base(path)},
 	}, nil
 }
 
@@ -303,7 +304,7 @@ func NewPDFFromFile(path string) (ContentBlock, error) {
 	return ContentBlock{
 		Type:      ContentTypePDF,
 		MediaType: mediaType,
-		Source:    &MediaSource{Kind: SourceKindFile, Bytes: data, Path: path},
+		Source:    &MediaSource{Kind: SourceKindFile, Bytes: data, Path: filepath.Base(path)},
 	}, nil
 }
 
@@ -343,7 +344,7 @@ func NewAudioFromFile(path string) (ContentBlock, error) {
 	return ContentBlock{
 		Type:      ContentTypeAudio,
 		MediaType: mediaType,
-		Source:    &MediaSource{Kind: SourceKindFile, Bytes: data, Path: path},
+		Source:    &MediaSource{Kind: SourceKindFile, Bytes: data, Path: filepath.Base(path)},
 	}, nil
 }
 
