@@ -384,6 +384,53 @@ func TestValidateRequest_RejectsMissingSourceOnMediaBlock(t *testing.T) {
 	}
 }
 
+func TestValidateRequest_RejectsMalformedSourceVariants(t *testing.T) {
+	caps := FullCapabilities()
+	cases := []struct {
+		name   string
+		block  ContentBlock
+		reason string
+	}{
+		{
+			name:   "empty URL",
+			block:  ContentBlock{Type: ContentTypeImage, Source: &MediaSource{Kind: SourceKindURL, URL: ""}},
+			reason: "empty URL",
+		},
+		{
+			name:   "empty bytes",
+			block:  ContentBlock{Type: ContentTypePDF, Source: &MediaSource{Kind: SourceKindBytes, Bytes: nil}},
+			reason: "empty data",
+		},
+		{
+			name:   "empty file bytes",
+			block:  ContentBlock{Type: ContentTypeAudio, Source: &MediaSource{Kind: SourceKindFile, Path: "x.mp3"}},
+			reason: "empty data",
+		},
+		{
+			name:   "unknown kind",
+			block:  ContentBlock{Type: ContentTypeAudio, Source: &MediaSource{Kind: SourceKind("weird")}},
+			reason: "unknown Source.Kind",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &Request{
+				Messages: []Message{
+					{Role: RoleUser, Blocks: []ContentBlock{tc.block}},
+				},
+			}
+			err := validateRequest("test", caps, req)
+			var malformed *ErrMalformedMedia
+			if !errors.As(err, &malformed) {
+				t.Fatalf("expected *ErrMalformedMedia, got %T: %v", err, err)
+			}
+			if malformed.Reason != tc.reason {
+				t.Errorf("Reason: got %q want %q", malformed.Reason, tc.reason)
+			}
+		})
+	}
+}
+
 func TestNewImageFromFile_RejectsZeroByteFile(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "empty.png")
