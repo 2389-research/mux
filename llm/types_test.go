@@ -41,8 +41,8 @@ func TestContentBlock_MediaJSONRoundTrip_Bytes(t *testing.T) {
 	if restored.Source == nil || restored.Source.Kind != SourceKindBytes {
 		t.Fatalf("Source/Kind mismatch: %+v", restored.Source)
 	}
-	if len(restored.Source.Bytes) != 4 || restored.Source.Bytes[0] != 0x89 {
-		t.Errorf("Bytes mismatch: %v", restored.Source.Bytes)
+	if !bytes.Equal(restored.Source.Bytes, original.Source.Bytes) {
+		t.Errorf("Bytes mismatch: got %v want %v", restored.Source.Bytes, original.Source.Bytes)
 	}
 }
 
@@ -75,7 +75,9 @@ func TestContentBlock_TextHasNoSource(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	var restored ContentBlock
-	_ = json.Unmarshal(data, &restored)
+	if err := json.Unmarshal(data, &restored); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
 	if restored.Source != nil {
 		t.Errorf("Source should be nil for text block, got %+v", restored.Source)
 	}
@@ -180,7 +182,7 @@ func TestNewImageFromFile_OK(t *testing.T) {
 		t.Errorf("Kind: %q", b.Source.Kind)
 	}
 	if !bytes.HasPrefix(b.Source.Bytes, []byte{0x89, 'P', 'N', 'G'}) {
-		t.Errorf("bytes should have PNG magic, got %v", b.Source.Bytes[:8])
+		t.Errorf("bytes should have PNG magic, got %v", b.Source.Bytes)
 	}
 	if !strings.HasSuffix(b.Source.Path, "tiny.png") {
 		t.Errorf("Path retained: %q", b.Source.Path)
@@ -251,7 +253,9 @@ func TestNewPDFFromFile_OK(t *testing.T) {
 func TestNewPDFFromFile_WrongExtension(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "foo.png")
-	_ = os.WriteFile(p, []byte("x"), 0o644)
+	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
 	_, err := NewPDFFromFile(p)
 	if err == nil {
 		t.Fatal("expected error for non-pdf extension")

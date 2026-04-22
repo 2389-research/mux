@@ -37,5 +37,17 @@ func checkBlock(provider string, caps Capabilities, block ContentBlock) error {
 	if block.Source == nil {
 		return &ErrMalformedMedia{Provider: provider, Media: media, Reason: "missing Source"}
 	}
+	switch block.Source.Kind {
+	case SourceKindURL:
+		if block.Source.URL == "" {
+			return &ErrMalformedMedia{Provider: provider, Media: media, Reason: "empty URL"}
+		}
+	case SourceKindBytes, SourceKindFile:
+		if len(block.Source.Bytes) == 0 {
+			return &ErrMalformedMedia{Provider: provider, Media: media, Reason: "empty data"}
+		}
+	default:
+		return &ErrMalformedMedia{Provider: provider, Media: media, Reason: "unknown Source.Kind"}
+	}
 	return nil
 }
