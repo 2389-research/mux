@@ -3,9 +3,10 @@
 package llm
 
 // validateRequest returns *ErrUnsupportedMedia if any message block uses a
-// media type the provider can't handle. Non-media blocks (text, tool_use,
-// tool_result) are ignored. Source-form constraints are checked separately
-// inside each provider's convert path (see Tasks 9/11).
+// media type the provider can't handle, or *ErrMalformedMedia if a media
+// block has no Source attached. Non-media blocks (text, tool_use,
+// tool_result) are ignored. Source-form constraints (e.g. OpenAI rejecting
+// URL-form PDFs) are checked separately inside each provider's convert path.
 func validateRequest(provider string, caps Capabilities, req *Request) error {
 	for _, msg := range req.Messages {
 		for _, block := range msg.Blocks {
@@ -18,19 +19,23 @@ func validateRequest(provider string, caps Capabilities, req *Request) error {
 }
 
 func checkBlock(provider string, caps Capabilities, block ContentBlock) error {
+	var media string
+	var supported bool
 	switch block.Type {
 	case ContentTypeImage:
-		if !caps.Image {
-			return &ErrUnsupportedMedia{Provider: provider, Media: "image"}
-		}
+		media, supported = "image", caps.Image
 	case ContentTypePDF:
-		if !caps.PDF {
-			return &ErrUnsupportedMedia{Provider: provider, Media: "pdf"}
-		}
+		media, supported = "pdf", caps.PDF
 	case ContentTypeAudio:
-		if !caps.Audio {
-			return &ErrUnsupportedMedia{Provider: provider, Media: "audio"}
-		}
+		media, supported = "audio", caps.Audio
+	default:
+		return nil
+	}
+	if !supported {
+		return &ErrUnsupportedMedia{Provider: provider, Media: media}
+	}
+	if block.Source == nil {
+		return &ErrMalformedMedia{Provider: provider, Media: media, Reason: "missing Source"}
 	}
 	return nil
 }

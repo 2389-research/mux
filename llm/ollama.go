@@ -51,6 +51,9 @@ func (o *OllamaClient) CreateMessage(ctx context.Context, req *Request) (*Respon
 	if req.MaxTokens == 0 {
 		req.MaxTokens = DefaultMaxTokens
 	}
+	if err := validateRequest("ollama", o.Capabilities(), req); err != nil {
+		return nil, err
+	}
 
 	params := convertOpenAIRequest(req)
 	resp, err := o.client.Chat.Completions.New(ctx, params)
@@ -68,6 +71,9 @@ func (o *OllamaClient) CreateMessageStream(ctx context.Context, req *Request) (<
 	}
 	if req.MaxTokens == 0 {
 		req.MaxTokens = DefaultMaxTokens
+	}
+	if err := validateRequest("ollama", o.Capabilities(), req); err != nil {
+		return nil, err
 	}
 
 	params := convertOpenAIRequest(req)

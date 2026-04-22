@@ -151,9 +151,12 @@ func convertUserMessage(msg Message) openai.ChatCompletionMessageParamUnion {
 }
 
 // convertOpenAIPDF translates a PDF block to an OpenAI file content part.
-// URL form is rejected pre-flight by validateOpenAISources — we only see
-// Bytes/File here.
+// URL form and nil Source are rejected pre-flight by validateOpenAISources /
+// validateRequest, but we guard here defensively.
 func convertOpenAIPDF(block ContentBlock) openai.ChatCompletionContentPartUnionParam {
+	if block.Source == nil {
+		return openai.FileContentPart(openai.ChatCompletionContentPartFileFileParam{})
+	}
 	encoded := base64.StdEncoding.EncodeToString(block.Source.Bytes)
 	filename := "file.pdf"
 	if block.Source.Path != "" {
@@ -166,9 +169,13 @@ func convertOpenAIPDF(block ContentBlock) openai.ChatCompletionContentPartUnionP
 }
 
 // convertOpenAIAudio translates an audio block to an OpenAI input_audio part.
-// URL form is rejected pre-flight by validateOpenAISources.
+// URL form and nil Source are rejected pre-flight by validateOpenAISources /
+// validateRequest, but we guard here defensively.
 func convertOpenAIAudio(block ContentBlock) openai.ChatCompletionContentPartUnionParam {
-	format := openaiAudioFormat(block.MediaType)
+	if block.Source == nil {
+		return openai.InputAudioContentPart(openai.ChatCompletionContentPartInputAudioInputAudioParam{})
+	}
+	format, _ := openaiAudioFormat(block.MediaType) // validateOpenAISources already checked.
 	encoded := base64.StdEncoding.EncodeToString(block.Source.Bytes)
 	return openai.InputAudioContentPart(openai.ChatCompletionContentPartInputAudioInputAudioParam{
 		Data:   encoded,
@@ -177,20 +184,23 @@ func convertOpenAIAudio(block ContentBlock) openai.ChatCompletionContentPartUnio
 }
 
 // openaiAudioFormat maps a MIME type to OpenAI's input_audio format.
-// audio/mpeg → "mp3"; audio/wav and audio/x-wav → "wav".
-// Unknown MIME types fall back to "mp3" because OpenAI validates this field;
-// callers are expected to use a mapped MIME type in practice.
-func openaiAudioFormat(mediaType string) string {
+// audio/mpeg → "mp3"; audio/wav and audio/x-wav → "wav". Unknown MIME types
+// return ok=false so callers can reject the request with a clear local error
+// rather than relying on an upstream 400.
+func openaiAudioFormat(mediaType string) (format string, ok bool) {
 	switch mediaType {
+	case "audio/mpeg", "audio/mp3":
+		return "mp3", true
 	case "audio/wav", "audio/x-wav":
-		return "wav"
+		return "wav", true
 	default:
-		return "mp3"
+		return "", false
 	}
 }
 
 // validateOpenAISources checks every user-message block for source-form
-// compatibility. Returns *ErrUnsupportedSource for PDF/audio via URL.
+// compatibility. Returns *ErrUnsupportedSource for PDF/audio via URL and for
+// audio MIME types OpenAI's input_audio doesn't accept.
 func validateOpenAISources(req *Request) error {
 	for _, msg := range req.Messages {
 		if msg.Role != RoleUser {
@@ -200,14 +210,18 @@ func validateOpenAISources(req *Request) error {
 			if block.Source == nil {
 				continue
 			}
-			if block.Source.Kind != SourceKindURL {
-				continue
+			if block.Source.Kind == SourceKindURL {
+				switch block.Type {
+				case ContentTypePDF:
+					return &ErrUnsupportedSource{Provider: "openai", Media: "pdf", Kind: "url"}
+				case ContentTypeAudio:
+					return &ErrUnsupportedSource{Provider: "openai", Media: "audio", Kind: "url"}
+				}
 			}
-			switch block.Type {
-			case ContentTypePDF:
-				return &ErrUnsupportedSource{Provider: "openai", Media: "pdf", Kind: "url"}
-			case ContentTypeAudio:
-				return &ErrUnsupportedSource{Provider: "openai", Media: "audio", Kind: "url"}
+			if block.Type == ContentTypeAudio {
+				if _, ok := openaiAudioFormat(block.MediaType); !ok {
+					return &ErrUnsupportedSource{Provider: "openai", Media: "audio", Kind: block.MediaType}
+				}
 			}
 		}
 	}

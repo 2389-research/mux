@@ -1464,5 +1464,23 @@ func TestOpenAIWireFormat_TextPlusImage(t *testing.T) {
 	}
 }
 
+func TestOpenAICreateMessage_RejectsUnsupportedAudioMIME(t *testing.T) {
+	audio, err := NewAudioFromBytes("audio/ogg", []byte{0x4f, 0x67, 0x67, 0x53})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := NewOpenAIClient("fake-key", "")
+	_, err = c.CreateMessage(context.Background(), &Request{
+		Messages: []Message{NewUserMessageWithBlocks(audio)},
+	})
+	var ue *ErrUnsupportedSource
+	if !errors.As(err, &ue) {
+		t.Fatalf("expected *ErrUnsupportedSource, got %T: %v", err, err)
+	}
+	if ue.Media != "audio" || ue.Kind != "audio/ogg" {
+		t.Errorf("err fields: %+v", ue)
+	}
+}
+
 // Compile-time interface check
 var _ Client = (*OpenAIClient)(nil)

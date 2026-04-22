@@ -4,6 +4,7 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"google.golang.org/genai"
@@ -508,6 +509,25 @@ func TestConvertGeminiResponse_ThinkingTokens(t *testing.T) {
 	result := convertGeminiResponse(resp, "gemini-2.5-pro")
 	if result.Usage.ThinkingTokens != 200 {
 		t.Errorf("expected ThinkingTokens 200, got %d", result.Usage.ThinkingTokens)
+	}
+}
+
+func TestGeminiCreateMessage_RejectsImageMedia(t *testing.T) {
+	ctx := context.Background()
+	c, err := NewGeminiClient(ctx, "fake-key", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	img := NewImageFromURL("https://example.com/x.png")
+	_, err = c.CreateMessage(ctx, &Request{
+		Messages: []Message{NewUserMessageWithBlocks(img)},
+	})
+	var unsup *ErrUnsupportedMedia
+	if !errors.As(err, &unsup) {
+		t.Fatalf("expected *ErrUnsupportedMedia, got %T: %v", err, err)
+	}
+	if unsup.Provider != "gemini" || unsup.Media != "image" {
+		t.Errorf("err fields: %+v", unsup)
 	}
 }
 

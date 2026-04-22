@@ -218,6 +218,17 @@ func (e *ErrUnsupportedSource) Error() string {
 	return fmt.Sprintf("%s does not support source kind %q for media type %q", e.Provider, e.Kind, e.Media)
 }
 
+// ErrMalformedMedia indicates a media block is structurally invalid (e.g. missing Source).
+type ErrMalformedMedia struct {
+	Provider string
+	Media    string
+	Reason   string
+}
+
+func (e *ErrMalformedMedia) Error() string {
+	return fmt.Sprintf("%s received malformed %s block: %s", e.Provider, e.Media, e.Reason)
+}
+
 // NewImageFromURL constructs an image content block backed by a remote URL.
 // MediaType is left empty; the remote server's Content-Type is authoritative.
 func NewImageFromURL(url string) ContentBlock {
@@ -371,6 +382,9 @@ func readMediaFile(path, family string) (data []byte, mediaType string, err erro
 	data, err = os.ReadFile(path)
 	if err != nil {
 		return nil, "", err
+	}
+	if len(data) == 0 {
+		return nil, "", fmt.Errorf("readMediaFile %q: file is empty", path)
 	}
 	return data, mediaType, nil
 }

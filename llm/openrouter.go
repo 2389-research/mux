@@ -97,6 +97,9 @@ func (o *OpenRouterClient) CreateMessage(ctx context.Context, req *Request) (*Re
 	if req.MaxTokens == 0 {
 		req.MaxTokens = DefaultMaxTokens
 	}
+	if err := validateRequest("openrouter", o.Capabilities(), req); err != nil {
+		return nil, err
+	}
 
 	params := convertOpenAIRequest(req)
 	resp, err := o.client.Chat.Completions.New(ctx, params)
@@ -114,6 +117,9 @@ func (o *OpenRouterClient) CreateMessageStream(ctx context.Context, req *Request
 	}
 	if req.MaxTokens == 0 {
 		req.MaxTokens = DefaultMaxTokens
+	}
+	if err := validateRequest("openrouter", o.Capabilities(), req); err != nil {
+		return nil, err
 	}
 
 	params := convertOpenAIRequest(req)

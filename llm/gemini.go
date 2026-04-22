@@ -242,6 +242,9 @@ func (g *GeminiClient) CreateMessage(ctx context.Context, req *Request) (*Respon
 	if req.MaxTokens == 0 {
 		req.MaxTokens = DefaultMaxTokens
 	}
+	if err := validateRequest("gemini", g.Capabilities(), req); err != nil {
+		return nil, err
+	}
 
 	contents, config := convertGeminiRequest(req)
 	resp, err := g.client.Models.GenerateContent(ctx, model, contents, config)
@@ -260,6 +263,9 @@ func (g *GeminiClient) CreateMessageStream(ctx context.Context, req *Request) (<
 	}
 	if req.MaxTokens == 0 {
 		req.MaxTokens = DefaultMaxTokens
+	}
+	if err := validateRequest("gemini", g.Capabilities(), req); err != nil {
+		return nil, err
 	}
 
 	contents, config := convertGeminiRequest(req)
