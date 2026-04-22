@@ -362,3 +362,35 @@ func mustPDFBytes(t *testing.T) ContentBlock {
 	}
 	return b
 }
+
+func TestValidateRequest_RejectsMissingSourceOnMediaBlock(t *testing.T) {
+	caps := FullCapabilities()
+	req := &Request{
+		Messages: []Message{
+			{Role: RoleUser, Blocks: []ContentBlock{{Type: ContentTypeImage}}},
+		},
+	}
+	err := validateRequest("test", caps, req)
+	var malformed *ErrMalformedMedia
+	if !errors.As(err, &malformed) {
+		t.Fatalf("expected *ErrMalformedMedia, got %T: %v", err, err)
+	}
+	if malformed.Provider != "test" || malformed.Media != "image" {
+		t.Errorf("err fields: %+v", malformed)
+	}
+}
+
+func TestNewImageFromFile_RejectsZeroByteFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "empty.png")
+	if err := os.WriteFile(p, nil, 0o644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	_, err := NewImageFromFile(p)
+	if err == nil {
+		t.Fatal("expected error for zero-byte file")
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Errorf("expected 'empty' error, got %v", err)
+	}
+}
