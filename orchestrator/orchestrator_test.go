@@ -181,6 +181,8 @@ func (m *mockLLMClient) CreateMessageStream(ctx context.Context, req *llm.Reques
 	return ch, nil
 }
 
+func (m *mockLLMClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
+
 // mockTool for orchestrator tests
 type mockTool struct {
 	name     string
@@ -798,6 +800,8 @@ func (m *mockLLMClientWithError) CreateMessageStream(ctx context.Context, req *l
 	return nil, m.err
 }
 
+func (m *mockLLMClientWithError) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
+
 // mockLoopingLLMClient always returns tool use to test max iterations.
 type mockLoopingLLMClient struct{}
 
@@ -823,6 +827,8 @@ func (m *mockLoopingLLMClient) CreateMessageStream(ctx context.Context, req *llm
 	return ch, nil
 }
 
+func (m *mockLoopingLLMClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
+
 // mockDynamicLLMClient returns responses from a function for dynamic testing.
 type mockDynamicLLMClient struct {
 	responseFn func() *llm.Response
@@ -841,6 +847,8 @@ func (m *mockDynamicLLMClient) CreateMessageStream(ctx context.Context, req *llm
 	}()
 	return ch, nil
 }
+
+func (m *mockDynamicLLMClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
 
 // TestEventBusSlowSubscriberBufferOverflow tests that slow subscribers don't block
 // publishing and that events are dropped when the buffer overflows.

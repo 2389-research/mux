@@ -8,6 +8,7 @@ import "context"
 type Client interface {
 	CreateMessage(ctx context.Context, req *Request) (*Response, error)
 	CreateMessageStream(ctx context.Context, req *Request) (<-chan StreamEvent, error)
+	Capabilities() Capabilities
 }
 
 // EventType identifies stream event types.

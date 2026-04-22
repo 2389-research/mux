@@ -4,9 +4,11 @@ package llm
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
@@ -114,26 +116,133 @@ func convertOpenAIRequest(req *Request) openai.ChatCompletionNewParams {
 
 // convertUserMessage converts a mux user message to OpenAI format.
 func convertUserMessage(msg Message) openai.ChatCompletionMessageParamUnion {
-	// Check for tool results in blocks
+	// Tool result routes to a tool message (OpenAI's required shape).
 	for _, block := range msg.Blocks {
 		if block.Type == ContentTypeToolResult {
 			return openai.ToolMessage(block.Text, block.ToolUseID)
 		}
 	}
 
-	// Regular text message
+	var parts []openai.ChatCompletionContentPartUnionParam
 	if msg.Content != "" {
-		return openai.UserMessage(msg.Content)
+		parts = append(parts, openai.TextContentPart(msg.Content))
 	}
-
-	// Text from blocks
 	for _, block := range msg.Blocks {
-		if block.Type == ContentTypeText {
-			return openai.UserMessage(block.Text)
+		switch block.Type {
+		case ContentTypeText:
+			parts = append(parts, openai.TextContentPart(block.Text))
+		case ContentTypeImage:
+			parts = append(parts, convertOpenAIImage(block))
+		case ContentTypePDF:
+			parts = append(parts, convertOpenAIPDF(block))
+		case ContentTypeAudio:
+			parts = append(parts, convertOpenAIAudio(block))
 		}
 	}
 
-	return openai.UserMessage("")
+	if len(parts) == 0 {
+		return openai.UserMessage("")
+	}
+	// Keep plain text in string form so we don't force array form unnecessarily.
+	if len(parts) == 1 && len(msg.Blocks) == 0 {
+		return openai.UserMessage(msg.Content)
+	}
+	return openai.UserMessage(parts)
+}
+
+// convertOpenAIPDF translates a PDF block to an OpenAI file content part.
+// URL form and nil Source are rejected pre-flight by validateOpenAISources /
+// validateRequest, but we guard here defensively.
+func convertOpenAIPDF(block ContentBlock) openai.ChatCompletionContentPartUnionParam {
+	if block.Source == nil {
+		return openai.FileContentPart(openai.ChatCompletionContentPartFileFileParam{})
+	}
+	encoded := base64.StdEncoding.EncodeToString(block.Source.Bytes)
+	filename := "file.pdf"
+	if block.Source.Path != "" {
+		filename = filepath.Base(block.Source.Path)
+	}
+	return openai.FileContentPart(openai.ChatCompletionContentPartFileFileParam{
+		FileData: openai.String(encoded),
+		Filename: openai.String(filename),
+	})
+}
+
+// convertOpenAIAudio translates an audio block to an OpenAI input_audio part.
+// URL form and nil Source are rejected pre-flight by validateOpenAISources /
+// validateRequest, but we guard here defensively.
+func convertOpenAIAudio(block ContentBlock) openai.ChatCompletionContentPartUnionParam {
+	if block.Source == nil {
+		return openai.InputAudioContentPart(openai.ChatCompletionContentPartInputAudioInputAudioParam{})
+	}
+	format, _ := openaiAudioFormat(block.MediaType) // validateOpenAISources already checked.
+	encoded := base64.StdEncoding.EncodeToString(block.Source.Bytes)
+	return openai.InputAudioContentPart(openai.ChatCompletionContentPartInputAudioInputAudioParam{
+		Data:   encoded,
+		Format: format,
+	})
+}
+
+// openaiAudioFormat maps a MIME type to OpenAI's input_audio format.
+// audio/mpeg → "mp3"; audio/wav and audio/x-wav → "wav". Unknown MIME types
+// return ok=false so callers can reject the request with a clear local error
+// rather than relying on an upstream 400.
+func openaiAudioFormat(mediaType string) (format string, ok bool) {
+	switch mediaType {
+	case "audio/mpeg", "audio/mp3":
+		return "mp3", true
+	case "audio/wav", "audio/x-wav":
+		return "wav", true
+	default:
+		return "", false
+	}
+}
+
+// validateOpenAISources checks every user-message block for source-form
+// compatibility. Returns *ErrUnsupportedSource for PDF/audio via URL and for
+// audio MIME types OpenAI's input_audio doesn't accept.
+func validateOpenAISources(req *Request) error {
+	for _, msg := range req.Messages {
+		if msg.Role != RoleUser {
+			continue
+		}
+		for _, block := range msg.Blocks {
+			if block.Source == nil {
+				continue
+			}
+			if block.Source.Kind == SourceKindURL {
+				switch block.Type {
+				case ContentTypePDF:
+					return &ErrUnsupportedSource{Provider: "openai", Media: "pdf", Kind: "url"}
+				case ContentTypeAudio:
+					return &ErrUnsupportedSource{Provider: "openai", Media: "audio", Kind: "url"}
+				}
+			}
+			if block.Type == ContentTypeAudio {
+				if _, ok := openaiAudioFormat(block.MediaType); !ok {
+					return &ErrUnsupportedSource{Provider: "openai", Media: "audio", Kind: block.MediaType}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// convertOpenAIImage builds an OpenAI image content part from a mux image
+// block, encoding inline bytes as a data URL.
+func convertOpenAIImage(block ContentBlock) openai.ChatCompletionContentPartUnionParam {
+	if block.Source == nil {
+		return openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{})
+	}
+	var url string
+	switch block.Source.Kind {
+	case SourceKindURL:
+		url = block.Source.URL
+	default:
+		encoded := base64.StdEncoding.EncodeToString(block.Source.Bytes)
+		url = "data:" + block.MediaType + ";base64," + encoded
+	}
+	return openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{URL: url})
 }
 
 // convertUserMessages converts a mux user message to one or more OpenAI messages.
@@ -293,6 +402,13 @@ func (o *OpenAIClient) CreateMessage(ctx context.Context, req *Request) (*Respon
 		req.MaxTokens = DefaultMaxTokens
 	}
 
+	if err := validateRequest("openai", o.Capabilities(), req); err != nil {
+		return nil, err
+	}
+	if err := validateOpenAISources(req); err != nil {
+		return nil, err
+	}
+
 	params := convertOpenAIRequest(req)
 	resp, err := o.client.Chat.Completions.New(ctx, params)
 	if err != nil {
@@ -309,6 +425,13 @@ func (o *OpenAIClient) CreateMessageStream(ctx context.Context, req *Request) (<
 	}
 	if req.MaxTokens == 0 {
 		req.MaxTokens = DefaultMaxTokens
+	}
+
+	if err := validateRequest("openai", o.Capabilities(), req); err != nil {
+		return nil, err
+	}
+	if err := validateOpenAISources(req); err != nil {
+		return nil, err
 	}
 
 	params := convertOpenAIRequest(req)
@@ -383,6 +506,13 @@ func (o *OpenAIClient) CreateMessageStream(ctx context.Context, req *Request) (<
 	}()
 
 	return eventChan, nil
+}
+
+// Capabilities reports which media types OpenAI's Chat Completions supports.
+// Audio is provider-level enabled; specific models (gpt-4o-audio-preview class)
+// are required at send time — the API rejects on mismatch.
+func (o *OpenAIClient) Capabilities() Capabilities {
+	return Capabilities{Image: true, PDF: true, Audio: true, Video: false}
 }
 
 // Compile-time interface assertion.

@@ -354,3 +354,5 @@ func (m *mockLLMClient) CreateMessageStream(ctx context.Context, req *llm.Reques
 	close(ch)
 	return ch, nil
 }
+
+func (m *mockLLMClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }

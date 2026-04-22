@@ -4,6 +4,7 @@ package llm
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -81,6 +82,10 @@ func convertRequest(req *Request) anthropic.MessageNewParams {
 				content = append(content, anthropic.NewToolUseBlock(block.ID, block.Input, block.Name))
 			case ContentTypeToolResult:
 				content = append(content, anthropic.NewToolResultBlock(block.ToolUseID, block.Text, block.IsError))
+			case ContentTypeImage:
+				content = append(content, convertAnthropicImage(block))
+			case ContentTypePDF:
+				content = append(content, convertAnthropicPDF(block))
 			}
 		}
 		messages = append(messages, anthropic.MessageParam{
@@ -192,6 +197,9 @@ func (a *AnthropicClient) CreateMessage(ctx context.Context, req *Request) (*Res
 	if req.MaxTokens == 0 {
 		req.MaxTokens = DefaultMaxTokens
 	}
+	if err := validateRequest("anthropic", a.Capabilities(), req); err != nil {
+		return nil, err
+	}
 
 	params := convertRequest(req)
 	msg, err := a.client.Messages.New(ctx, params)
@@ -209,6 +217,9 @@ func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request)
 	}
 	if req.MaxTokens == 0 {
 		req.MaxTokens = DefaultMaxTokens
+	}
+	if err := validateRequest("anthropic", a.Capabilities(), req); err != nil {
+		return nil, err
 	}
 
 	params := convertRequest(req)
@@ -300,6 +311,41 @@ func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request)
 	}()
 
 	return eventChan, nil
+}
+
+// Capabilities reports which media types Anthropic supports in our Messages API.
+func (a *AnthropicClient) Capabilities() Capabilities {
+	return Capabilities{Image: true, PDF: true, Audio: false, Video: false}
+}
+
+// convertAnthropicImage translates an image ContentBlock into the SDK's image block param,
+// selecting base64-inline or URL source based on the block's MediaSource kind.
+func convertAnthropicImage(block ContentBlock) anthropic.ContentBlockParamUnion {
+	if block.Source == nil {
+		return anthropic.NewTextBlock("")
+	}
+	switch block.Source.Kind {
+	case SourceKindURL:
+		return anthropic.NewImageBlock(anthropic.URLImageSourceParam{URL: block.Source.URL})
+	default: // Bytes or File (File's Bytes populated eagerly)
+		encoded := base64.StdEncoding.EncodeToString(block.Source.Bytes)
+		return anthropic.NewImageBlockBase64(block.MediaType, encoded)
+	}
+}
+
+// convertAnthropicPDF translates a PDF ContentBlock into the SDK's document block param,
+// selecting base64-inline or URL source based on the block's MediaSource kind.
+func convertAnthropicPDF(block ContentBlock) anthropic.ContentBlockParamUnion {
+	if block.Source == nil {
+		return anthropic.NewTextBlock("")
+	}
+	switch block.Source.Kind {
+	case SourceKindURL:
+		return anthropic.NewDocumentBlock(anthropic.URLPDFSourceParam{URL: block.Source.URL})
+	default:
+		encoded := base64.StdEncoding.EncodeToString(block.Source.Bytes)
+		return anthropic.NewDocumentBlock(anthropic.Base64PDFSourceParam{Data: encoded})
+	}
 }
 
 // Compile-time interface assertion.

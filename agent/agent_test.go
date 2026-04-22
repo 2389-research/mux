@@ -26,6 +26,8 @@ func (m *mockClient) CreateMessageStream(ctx context.Context, req *llm.Request) 
 	return nil, nil
 }
 
+func (m *mockClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
+
 // mockTool implements tool.Tool for testing
 type mockTool struct {
 	name             string

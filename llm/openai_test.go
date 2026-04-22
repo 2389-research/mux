@@ -14,6 +14,7 @@ import (
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
+	"github.com/tidwall/gjson"
 )
 
 func TestNewOpenAIClient(t *testing.T) {
@@ -30,6 +31,17 @@ func TestNewOpenAIClientDefaultModel(t *testing.T) {
 	client := NewOpenAIClient("test-api-key", "")
 	if client.model != "gpt-5.2" {
 		t.Errorf("expected default model gpt-5.2, got %s", client.model)
+	}
+}
+
+func TestOpenAIClient_Capabilities(t *testing.T) {
+	c := NewOpenAIClient("key", "")
+	caps := c.Capabilities()
+	if !caps.Image || !caps.PDF || !caps.Audio {
+		t.Errorf("expected Image+PDF+Audio true, got %+v", caps)
+	}
+	if caps.Video {
+		t.Errorf("expected Video false, got %+v", caps)
 	}
 }
 
@@ -1140,6 +1152,333 @@ func TestConvertOpenAIResponse_ReasoningTokens(t *testing.T) {
 	result := convertOpenAIResponse(resp)
 	if result.Usage.ThinkingTokens != 30 {
 		t.Errorf("expected 30 thinking tokens, got %d", result.Usage.ThinkingTokens)
+	}
+}
+
+func TestOpenAIConvertUserMessage_ImageBytes(t *testing.T) {
+	img, err := NewImageFromBytes("image/png", []byte{0x89, 'P', 'N', 'G'})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := convertUserMessage(NewUserMessageWithBlocks(img))
+	if msg.OfUser == nil {
+		t.Fatalf("expected user message, got %+v", msg)
+	}
+	parts := msg.OfUser.Content.OfArrayOfContentParts
+	if len(parts) != 1 {
+		t.Fatalf("expected 1 part, got %d", len(parts))
+	}
+	if parts[0].OfImageURL == nil {
+		t.Fatalf("expected image part, got %+v", parts[0])
+	}
+	if !strings.HasPrefix(parts[0].OfImageURL.ImageURL.URL, "data:image/png;base64,") {
+		t.Errorf("expected data URL, got %q", parts[0].OfImageURL.ImageURL.URL)
+	}
+}
+
+func TestOpenAIConvertUserMessage_ImageURL(t *testing.T) {
+	img := NewImageFromURL("https://example.com/x.png")
+	msg := convertUserMessage(NewUserMessageWithBlocks(img))
+	parts := msg.OfUser.Content.OfArrayOfContentParts
+	if parts[0].OfImageURL.ImageURL.URL != "https://example.com/x.png" {
+		t.Errorf("URL: %q", parts[0].OfImageURL.ImageURL.URL)
+	}
+}
+
+func TestOpenAIConvertUserMessage_TextPlusImage(t *testing.T) {
+	img := NewImageFromURL("https://example.com/x.png")
+	msg := convertUserMessage(NewUserMessageWithBlocks(
+		ContentBlock{Type: ContentTypeText, Text: "describe this"},
+		img,
+	))
+	parts := msg.OfUser.Content.OfArrayOfContentParts
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 parts, got %d", len(parts))
+	}
+	if parts[0].OfText == nil || parts[0].OfText.Text != "describe this" {
+		t.Errorf("text part: %+v", parts[0])
+	}
+	if parts[1].OfImageURL == nil {
+		t.Errorf("image part: %+v", parts[1])
+	}
+}
+
+func TestOpenAIConvertUserMessage_PlainTextStillWorks(t *testing.T) {
+	msg := convertUserMessage(NewUserMessage("hello"))
+	if msg.OfUser == nil {
+		t.Fatalf("expected user message, got %+v", msg)
+	}
+	if s := msg.OfUser.Content.OfString; !s.Valid() || s.Value != "hello" {
+		t.Errorf("plain text should stay string form, got %+v", msg.OfUser.Content)
+	}
+}
+
+func TestOpenAIConvertUserMessage_ToolResultStillWorks(t *testing.T) {
+	msg := Message{
+		Role:   RoleUser,
+		Blocks: []ContentBlock{{Type: ContentTypeToolResult, ToolUseID: "t1", Text: "done"}},
+	}
+	converted := convertUserMessage(msg)
+	if converted.OfTool == nil {
+		t.Errorf("expected tool message, got %+v", converted)
+	}
+}
+
+func TestOpenAIConvertUserMessage_PDFBytes(t *testing.T) {
+	pdf, err := NewPDFFromBytes([]byte("%PDF"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := convertUserMessage(NewUserMessageWithBlocks(pdf))
+	parts := msg.OfUser.Content.OfArrayOfContentParts
+	if parts[0].OfFile == nil {
+		t.Fatalf("expected file part, got %+v", parts[0])
+	}
+	if !parts[0].OfFile.File.FileData.Valid() {
+		t.Error("expected FileData set")
+	}
+	if !parts[0].OfFile.File.Filename.Valid() || parts[0].OfFile.File.Filename.Value != "file.pdf" {
+		t.Errorf("default filename: %+v", parts[0].OfFile.File.Filename)
+	}
+}
+
+func TestOpenAIConvertUserMessage_PDFFileKeepsFilename(t *testing.T) {
+	pdf, err := NewPDFFromFile("testdata/tiny.pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := convertUserMessage(NewUserMessageWithBlocks(pdf))
+	parts := msg.OfUser.Content.OfArrayOfContentParts
+	if parts[0].OfFile.File.Filename.Value != "tiny.pdf" {
+		t.Errorf("filename: %q", parts[0].OfFile.File.Filename.Value)
+	}
+}
+
+func TestOpenAIConvertUserMessage_AudioMP3(t *testing.T) {
+	audio, err := NewAudioFromBytes("audio/mpeg", []byte{0xff, 0xfb})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := convertUserMessage(NewUserMessageWithBlocks(audio))
+	parts := msg.OfUser.Content.OfArrayOfContentParts
+	if parts[0].OfInputAudio == nil {
+		t.Fatalf("expected audio part, got %+v", parts[0])
+	}
+	if parts[0].OfInputAudio.InputAudio.Format != "mp3" {
+		t.Errorf("format: %q (audio/mpeg should map to mp3)", parts[0].OfInputAudio.InputAudio.Format)
+	}
+	if parts[0].OfInputAudio.InputAudio.Data == "" {
+		t.Error("expected base64 data set")
+	}
+}
+
+func TestOpenAIConvertUserMessage_AudioWAV(t *testing.T) {
+	audio, err := NewAudioFromBytes("audio/wav", []byte{0x52, 0x49, 0x46, 0x46})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := convertUserMessage(NewUserMessageWithBlocks(audio))
+	parts := msg.OfUser.Content.OfArrayOfContentParts
+	if parts[0].OfInputAudio.InputAudio.Format != "wav" {
+		t.Errorf("format: %q", parts[0].OfInputAudio.InputAudio.Format)
+	}
+}
+
+func TestOpenAICreateMessage_PDFFromURL_ErrUnsupportedSource(t *testing.T) {
+	pdf := NewPDFFromURL("https://example.com/x.pdf")
+	c := NewOpenAIClient("fake-key", "")
+	_, err := c.CreateMessage(context.Background(), &Request{
+		Messages: []Message{NewUserMessageWithBlocks(pdf)},
+	})
+	var ue *ErrUnsupportedSource
+	if !errors.As(err, &ue) {
+		t.Fatalf("expected *ErrUnsupportedSource, got %T: %v", err, err)
+	}
+	if ue.Provider != "openai" || ue.Media != "pdf" || ue.Kind != "url" {
+		t.Errorf("err fields: %+v", ue)
+	}
+}
+
+func TestOpenAICreateMessage_AudioFromURL_ErrUnsupportedSource(t *testing.T) {
+	audio := NewAudioFromURL("https://example.com/a.mp3")
+	c := NewOpenAIClient("fake-key", "")
+	_, err := c.CreateMessage(context.Background(), &Request{
+		Messages: []Message{NewUserMessageWithBlocks(audio)},
+	})
+	var ue *ErrUnsupportedSource
+	if !errors.As(err, &ue) {
+		t.Fatalf("expected *ErrUnsupportedSource, got %T: %v", err, err)
+	}
+	if ue.Media != "audio" || ue.Kind != "url" {
+		t.Errorf("err fields: %+v", ue)
+	}
+}
+
+func TestOpenAICreateMessageStream_PDFFromURL_ErrUnsupportedSource(t *testing.T) {
+	pdf := NewPDFFromURL("https://example.com/x.pdf")
+	c := NewOpenAIClient("fake-key", "")
+	_, err := c.CreateMessageStream(context.Background(), &Request{
+		Messages: []Message{NewUserMessageWithBlocks(pdf)},
+	})
+	var ue *ErrUnsupportedSource
+	if !errors.As(err, &ue) {
+		t.Fatalf("expected *ErrUnsupportedSource, got %T: %v", err, err)
+	}
+	if ue.Provider != "openai" || ue.Media != "pdf" || ue.Kind != "url" {
+		t.Errorf("err fields: %+v", ue)
+	}
+}
+
+func TestOpenAICreateMessageStream_AudioFromURL_ErrUnsupportedSource(t *testing.T) {
+	audio := NewAudioFromURL("https://example.com/a.mp3")
+	c := NewOpenAIClient("fake-key", "")
+	_, err := c.CreateMessageStream(context.Background(), &Request{
+		Messages: []Message{NewUserMessageWithBlocks(audio)},
+	})
+	var ue *ErrUnsupportedSource
+	if !errors.As(err, &ue) {
+		t.Fatalf("expected *ErrUnsupportedSource, got %T: %v", err, err)
+	}
+	if ue.Media != "audio" || ue.Kind != "url" {
+		t.Errorf("err fields: %+v", ue)
+	}
+}
+
+// Wire-format snapshot tests: marshal the SDK params produced by
+// convertOpenAIRequest and assert the resulting JSON matches OpenAI's
+// documented Chat Completions shape. Guards against silent SDK regressions.
+
+func TestOpenAIWireFormat_ImageBytes(t *testing.T) {
+	img, err := NewImageFromBytes("image/png", []byte{0x89, 'P', 'N', 'G'})
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := convertOpenAIRequest(&Request{
+		Model:    "gpt-5.2",
+		Messages: []Message{NewUserMessageWithBlocks(img)},
+	})
+	body, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	if v := gjson.GetBytes(body, "messages.0.role").String(); v != "user" {
+		t.Errorf("role: got %q want user; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "messages.0.content.0.type").String(); v != "image_url" {
+		t.Errorf("type: got %q want image_url; body=%s", v, body)
+	}
+	url := gjson.GetBytes(body, "messages.0.content.0.image_url.url").String()
+	if !strings.HasPrefix(url, "data:image/png;base64,") {
+		t.Errorf("image_url.url should be data URL; got %q; body=%s", url, body)
+	}
+}
+
+func TestOpenAIWireFormat_ImageURL(t *testing.T) {
+	img := NewImageFromURL("https://example.com/cat.png")
+	params := convertOpenAIRequest(&Request{
+		Messages: []Message{NewUserMessageWithBlocks(img)},
+	})
+	body, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	if v := gjson.GetBytes(body, "messages.0.content.0.type").String(); v != "image_url" {
+		t.Errorf("type: got %q; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "messages.0.content.0.image_url.url").String(); v != "https://example.com/cat.png" {
+		t.Errorf("image_url.url: got %q; body=%s", v, body)
+	}
+}
+
+func TestOpenAIWireFormat_PDFBytes(t *testing.T) {
+	pdf, err := NewPDFFromBytes([]byte("%PDF-1.4"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := convertOpenAIRequest(&Request{
+		Messages: []Message{NewUserMessageWithBlocks(pdf)},
+	})
+	body, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	if v := gjson.GetBytes(body, "messages.0.content.0.type").String(); v != "file" {
+		t.Errorf("type: got %q want file; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "messages.0.content.0.file.filename").String(); v != "file.pdf" {
+		t.Errorf("file.filename: got %q want file.pdf; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "messages.0.content.0.file.file_data").String(); v == "" {
+		t.Errorf("file.file_data should be non-empty base64; body=%s", body)
+	}
+}
+
+func TestOpenAIWireFormat_AudioMP3(t *testing.T) {
+	audio, err := NewAudioFromBytes("audio/mpeg", []byte{0xff, 0xfb, 0x90, 0x00})
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := convertOpenAIRequest(&Request{
+		Messages: []Message{NewUserMessageWithBlocks(audio)},
+	})
+	body, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	if v := gjson.GetBytes(body, "messages.0.content.0.type").String(); v != "input_audio" {
+		t.Errorf("type: got %q want input_audio; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "messages.0.content.0.input_audio.format").String(); v != "mp3" {
+		t.Errorf("input_audio.format: got %q want mp3; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "messages.0.content.0.input_audio.data").String(); v == "" {
+		t.Errorf("input_audio.data should be non-empty; body=%s", body)
+	}
+}
+
+func TestOpenAIWireFormat_TextPlusImage(t *testing.T) {
+	img := NewImageFromURL("https://example.com/cat.png")
+	params := convertOpenAIRequest(&Request{
+		Messages: []Message{NewUserMessageWithBlocks(
+			ContentBlock{Type: ContentTypeText, Text: "describe this"},
+			img,
+		)},
+	})
+	body, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	if v := gjson.GetBytes(body, "messages.0.content.0.type").String(); v != "text" {
+		t.Errorf("first part type: got %q want text; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "messages.0.content.0.text").String(); v != "describe this" {
+		t.Errorf("first part text: got %q; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "messages.0.content.1.type").String(); v != "image_url" {
+		t.Errorf("second part type: got %q want image_url; body=%s", v, body)
+	}
+}
+
+func TestOpenAICreateMessage_RejectsUnsupportedAudioMIME(t *testing.T) {
+	audio, err := NewAudioFromBytes("audio/ogg", []byte{0x4f, 0x67, 0x67, 0x53})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := NewOpenAIClient("fake-key", "")
+	_, err = c.CreateMessage(context.Background(), &Request{
+		Messages: []Message{NewUserMessageWithBlocks(audio)},
+	})
+	var ue *ErrUnsupportedSource
+	if !errors.As(err, &ue) {
+		t.Fatalf("expected *ErrUnsupportedSource, got %T: %v", err, err)
+	}
+	if ue.Media != "audio" || ue.Kind != "audio/ogg" {
+		t.Errorf("err fields: %+v", ue)
 	}
 }
 

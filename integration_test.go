@@ -71,6 +71,8 @@ func (m *mockLLM) CreateMessageStream(ctx context.Context, req *llm.Request) (<-
 	return ch, nil
 }
 
+func (m *mockLLM) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
+
 func TestFullStackIntegration(t *testing.T) {
 	registry := tool.NewRegistry()
 	testT := &testTool{name: "calculator"}

@@ -242,6 +242,9 @@ func (g *GeminiClient) CreateMessage(ctx context.Context, req *Request) (*Respon
 	if req.MaxTokens == 0 {
 		req.MaxTokens = DefaultMaxTokens
 	}
+	if err := validateRequest("gemini", g.Capabilities(), req); err != nil {
+		return nil, err
+	}
 
 	contents, config := convertGeminiRequest(req)
 	resp, err := g.client.Models.GenerateContent(ctx, model, contents, config)
@@ -260,6 +263,9 @@ func (g *GeminiClient) CreateMessageStream(ctx context.Context, req *Request) (<
 	}
 	if req.MaxTokens == 0 {
 		req.MaxTokens = DefaultMaxTokens
+	}
+	if err := validateRequest("gemini", g.Capabilities(), req); err != nil {
+		return nil, err
 	}
 
 	contents, config := convertGeminiRequest(req)
@@ -335,6 +341,16 @@ func (g *GeminiClient) CreateMessageStream(ctx context.Context, req *Request) (<
 	}()
 
 	return eventChan, nil
+}
+
+// Capabilities reports which media types Gemini supports as input.
+// Note: Gemini natively supports image, PDF, audio, and video, but the
+// translation layer in this client does not yet emit Gemini media parts.
+// Until that lands, all media types are reported as unsupported so callers
+// fail fast at the validation boundary instead of having media silently
+// dropped from the request.
+func (g *GeminiClient) Capabilities() Capabilities {
+	return Capabilities{}
 }
 
 // Compile-time interface assertion.

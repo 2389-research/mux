@@ -6,6 +6,8 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -162,12 +164,22 @@ func (t *SearchTool) Execute(_ context.Context, p map[string]any) (*tool.Result,
 		}
 	}
 
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return tool.NewResult("search", false, "", fmt.Sprintf("open root: %v", err)), nil
+	}
+	defer root.Close()
+
 	var matches []string
-	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil // Skip files we can't access
+	err = fs.WalkDir(root.FS(), ".", func(rel string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil // Skip entries we can't access
 		}
-		if info.IsDir() {
+		if d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
 			return nil
 		}
 		// Only search text files (skip binaries)
@@ -175,13 +187,18 @@ func (t *SearchTool) Execute(_ context.Context, p map[string]any) (*tool.Result,
 			return nil
 		}
 
-		content, err := os.ReadFile(path)
+		f, err := root.Open(rel)
+		if err != nil {
+			return nil
+		}
+		content, err := io.ReadAll(f)
+		f.Close()
 		if err != nil {
 			return nil
 		}
 
 		if strings.Contains(string(content), pattern) {
-			matches = append(matches, path)
+			matches = append(matches, filepath.Join(dir, rel))
 		}
 		return nil
 	})
