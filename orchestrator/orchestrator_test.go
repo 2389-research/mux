@@ -850,7 +850,6 @@ func (m *mockDynamicLLMClient) CreateMessageStream(ctx context.Context, req *llm
 
 func (m *mockDynamicLLMClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
 
-
 // TestEventBusSlowSubscriberBufferOverflow tests that slow subscribers don't block
 // publishing and that events are dropped when the buffer overflows.
 func TestEventBusSlowSubscriberBufferOverflow(t *testing.T) {

@@ -212,14 +212,29 @@ unchanged.
 Translation layer is tested directly (input → SDK params), matching the
 existing `TestConvertRequest_ComplexMessageBlocks` pattern.
 
+## Provider landscape note
+
+The Gemini, Ollama, and OpenRouter providers landed on `main` independently
+of this branch. After rebase this PR adds `Capabilities()` to all of them, but
+intentionally declares each as `Capabilities{}` (all media types unsupported)
+because their translation layers do not yet emit multimodal parts. Capability
+queries are therefore honest about current state rather than aspirational.
+
 ## Phase 2 (deferred)
 
 Not built in this work; documented so the type surface evolves cleanly:
 
-- Add Gemini provider via `google.golang.org/genai` with
-  `Capabilities{Image: true, PDF: true, Audio: true, Video: true}`.
-- Introduce `ContentTypeVideo` and `NewVideoFromURL/Bytes/File` constructors at
-  that time (not before — avoids a dead enum value).
+- Extend Gemini's `convertRequest` to translate image/PDF/audio (and video)
+  blocks into `genai.Part` shapes, then flip its `Capabilities()` to
+  `{Image: true, PDF: true, Audio: true, Video: true}`.
+- Extend Ollama's `convertOpenAIRequest` to translate image blocks via
+  `image_url` for vision-capable models (LLaVA, Llama 3.2 Vision).
+  Capabilities flips to `{Image: true}`.
+- Extend OpenRouter the same way; OpenRouter routes to many upstreams so the
+  per-provider capability matrix is genuinely model-dependent. Likely keep
+  `{Image: true}` and let upstream 400 unsupported combinations.
+- Introduce `ContentTypeVideo` and `NewVideoFromURL/Bytes/File` constructors
+  alongside Gemini's video translation (not before — avoids a dead enum value).
 - Anthropic and OpenAI capability declarations stay `Video: false`; their
   `validateRequest` rejects automatically.
 - Source-form constraints for video on Gemini surface via `ErrUnsupportedSource`
