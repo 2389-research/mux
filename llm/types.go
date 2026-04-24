@@ -108,7 +108,7 @@ type ContentBlock struct {
 	// For thinking content
 	Thinking string `json:"thinking,omitempty"`
 
-	// For media content (image, pdf, audio)
+	// For media content (image, pdf, audio, video)
 	Source    *MediaSource `json:"source,omitempty"`
 	MediaType string       `json:"media_type,omitempty"`
 }
@@ -344,6 +344,48 @@ func NewAudioFromFile(path string) (ContentBlock, error) {
 	}
 	return ContentBlock{
 		Type:      ContentTypeAudio,
+		MediaType: mediaType,
+		Source:    &MediaSource{Kind: SourceKindFile, Bytes: data, Path: filepath.Base(path)},
+	}, nil
+}
+
+// NewVideoFromURL constructs a video content block backed by a remote URL.
+// MediaType is left empty; provider translators will reject URL form unless
+// they support remote video URLs (Gemini, for instance, requires inline bytes
+// today and will return *ErrUnsupportedSource).
+func NewVideoFromURL(url string) ContentBlock {
+	return ContentBlock{
+		Type:   ContentTypeVideo,
+		Source: &MediaSource{Kind: SourceKindURL, URL: url},
+	}
+}
+
+// NewVideoFromBytes constructs a video content block from inline bytes.
+// mediaType must be a video/* MIME type; data must be non-empty.
+func NewVideoFromBytes(mediaType string, data []byte) (ContentBlock, error) {
+	if err := validateMediaFamily("video", mediaType); err != nil {
+		return ContentBlock{}, err
+	}
+	if len(data) == 0 {
+		return ContentBlock{}, fmt.Errorf("NewVideoFromBytes: data is empty")
+	}
+	return ContentBlock{
+		Type:      ContentTypeVideo,
+		MediaType: mediaType,
+		Source:    &MediaSource{Kind: SourceKindBytes, Bytes: data},
+	}, nil
+}
+
+// NewVideoFromFile reads a video file (extension must map to a video/* MIME
+// type), infers its media type from the extension, and returns a
+// ready-to-send content block.
+func NewVideoFromFile(path string) (ContentBlock, error) {
+	data, mediaType, err := readMediaFile(path, "video")
+	if err != nil {
+		return ContentBlock{}, err
+	}
+	return ContentBlock{
+		Type:      ContentTypeVideo,
 		MediaType: mediaType,
 		Source:    &MediaSource{Kind: SourceKindFile, Bytes: data, Path: filepath.Base(path)},
 	}, nil
