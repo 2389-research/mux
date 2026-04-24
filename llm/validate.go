@@ -28,6 +28,8 @@ func checkBlock(provider string, caps Capabilities, block ContentBlock) error {
 		media, supported = "pdf", caps.PDF
 	case ContentTypeAudio:
 		media, supported = "audio", caps.Audio
+	case ContentTypeVideo:
+		media, supported = "video", caps.Video
 	default:
 		return nil
 	}

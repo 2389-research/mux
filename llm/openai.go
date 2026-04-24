@@ -200,8 +200,10 @@ func openaiAudioFormat(mediaType string) (format string, ok bool) {
 
 // validateOpenAISources checks every user-message block for source-form
 // compatibility. Returns *ErrUnsupportedSource for PDF/audio via URL and for
-// audio MIME types OpenAI's input_audio doesn't accept.
-func validateOpenAISources(req *Request) error {
+// audio MIME types OpenAI's input_audio doesn't accept. Used by
+// OpenAI-compatible providers (OpenAI, OpenRouter); the provider parameter
+// is attributed in returned errors.
+func validateOpenAISources(provider string, req *Request) error {
 	for _, msg := range req.Messages {
 		if msg.Role != RoleUser {
 			continue
@@ -213,14 +215,14 @@ func validateOpenAISources(req *Request) error {
 			if block.Source.Kind == SourceKindURL {
 				switch block.Type {
 				case ContentTypePDF:
-					return &ErrUnsupportedSource{Provider: "openai", Media: "pdf", Kind: "url"}
+					return &ErrUnsupportedSource{Provider: provider, Media: "pdf", Kind: "url"}
 				case ContentTypeAudio:
-					return &ErrUnsupportedSource{Provider: "openai", Media: "audio", Kind: "url"}
+					return &ErrUnsupportedSource{Provider: provider, Media: "audio", Kind: "url"}
 				}
 			}
 			if block.Type == ContentTypeAudio {
 				if _, ok := openaiAudioFormat(block.MediaType); !ok {
-					return &ErrUnsupportedSource{Provider: "openai", Media: "audio", Kind: block.MediaType}
+					return &ErrUnsupportedSource{Provider: provider, Media: "audio", Kind: block.MediaType}
 				}
 			}
 		}
@@ -405,7 +407,7 @@ func (o *OpenAIClient) CreateMessage(ctx context.Context, req *Request) (*Respon
 	if err := validateRequest("openai", o.Capabilities(), req); err != nil {
 		return nil, err
 	}
-	if err := validateOpenAISources(req); err != nil {
+	if err := validateOpenAISources("openai", req); err != nil {
 		return nil, err
 	}
 
@@ -430,7 +432,7 @@ func (o *OpenAIClient) CreateMessageStream(ctx context.Context, req *Request) (<
 	if err := validateRequest("openai", o.Capabilities(), req); err != nil {
 		return nil, err
 	}
-	if err := validateOpenAISources(req); err != nil {
+	if err := validateOpenAISources("openai", req); err != nil {
 		return nil, err
 	}
 
