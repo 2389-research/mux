@@ -4,9 +4,11 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
+	"github.com/tidwall/gjson"
 	"google.golang.org/genai"
 )
 
@@ -626,3 +628,68 @@ func TestGeminiCreateMessage_VideoURL_ErrUnsupportedSource(t *testing.T) {
 
 // Compile-time interface check
 var _ Client = (*GeminiClient)(nil)
+
+func TestGeminiWireFormat_ImageBytes(t *testing.T) {
+	img, err := NewImageFromBytes("image/png", []byte{0x89, 'P', 'N', 'G'})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents, _ := convertGeminiRequest(&Request{
+		Messages: []Message{NewUserMessageWithBlocks(img)},
+	})
+	body, err := json.Marshal(contents[0])
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if v := gjson.GetBytes(body, "parts.0.inlineData.mimeType").String(); v != "image/png" {
+		t.Errorf("mimeType: got %q want image/png; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "parts.0.inlineData.data").String(); v == "" {
+		t.Errorf("data should be non-empty base64; body=%s", body)
+	}
+}
+
+func TestGeminiWireFormat_VideoBytes(t *testing.T) {
+	video, err := NewVideoFromBytes("video/mp4", []byte{0x00, 0x00, 0x00, 0x18})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents, _ := convertGeminiRequest(&Request{
+		Messages: []Message{NewUserMessageWithBlocks(video)},
+	})
+	body, err := json.Marshal(contents[0])
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if v := gjson.GetBytes(body, "parts.0.inlineData.mimeType").String(); v != "video/mp4" {
+		t.Errorf("mimeType: got %q; body=%s", v, body)
+	}
+}
+
+func TestGeminiWireFormat_PDFBytes(t *testing.T) {
+	pdf, err := NewPDFFromBytes([]byte("%PDF-1.4"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents, _ := convertGeminiRequest(&Request{
+		Messages: []Message{NewUserMessageWithBlocks(pdf)},
+	})
+	body, _ := json.Marshal(contents[0])
+	if v := gjson.GetBytes(body, "parts.0.inlineData.mimeType").String(); v != "application/pdf" {
+		t.Errorf("mimeType: %q; body=%s", v, body)
+	}
+}
+
+func TestGeminiWireFormat_AudioBytes(t *testing.T) {
+	audio, err := NewAudioFromBytes("audio/mpeg", []byte{0xff, 0xfb})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents, _ := convertGeminiRequest(&Request{
+		Messages: []Message{NewUserMessageWithBlocks(audio)},
+	})
+	body, _ := json.Marshal(contents[0])
+	if v := gjson.GetBytes(body, "parts.0.inlineData.mimeType").String(); v != "audio/mpeg" {
+		t.Errorf("mimeType: %q; body=%s", v, body)
+	}
+}
