@@ -759,17 +759,51 @@ func TestOllamaClient_SystemPrompt(t *testing.T) {
 	}
 }
 
-func TestOllamaCreateMessage_RejectsImageMedia(t *testing.T) {
+func TestOllamaCapabilities(t *testing.T) {
 	c := NewOllamaClient("", "")
-	img := NewImageFromURL("https://example.com/x.png")
-	_, err := c.CreateMessage(context.Background(), &Request{
+	caps := c.Capabilities()
+	if !caps.Image {
+		t.Errorf("expected Image true, got %+v", caps)
+	}
+	if caps.PDF || caps.Audio || caps.Video {
+		t.Errorf("expected PDF/Audio/Video false, got %+v", caps)
+	}
+}
+
+func TestOllamaConvertRequest_ImageBytes(t *testing.T) {
+	img, err := NewImageFromBytes("image/png", []byte{0x89, 'P', 'N', 'G'})
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := convertOpenAIRequest(&Request{
 		Messages: []Message{NewUserMessageWithBlocks(img)},
+	})
+	if len(params.Messages) != 1 || params.Messages[0].OfUser == nil {
+		t.Fatalf("expected 1 user message, got %+v", params.Messages)
+	}
+	parts := params.Messages[0].OfUser.Content.OfArrayOfContentParts
+	if len(parts) != 1 || parts[0].OfImageURL == nil {
+		t.Fatalf("expected image_url part, got %+v", parts)
+	}
+	if !strings.HasPrefix(parts[0].OfImageURL.ImageURL.URL, "data:image/png;base64,") {
+		t.Errorf("expected data URL prefix, got %q", parts[0].OfImageURL.ImageURL.URL)
+	}
+}
+
+func TestOllamaCreateMessage_RejectsPDFMedia(t *testing.T) {
+	c := NewOllamaClient("", "")
+	pdf, err := NewPDFFromBytes([]byte("%PDF"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.CreateMessage(context.Background(), &Request{
+		Messages: []Message{NewUserMessageWithBlocks(pdf)},
 	})
 	var unsup *ErrUnsupportedMedia
 	if !errors.As(err, &unsup) {
 		t.Fatalf("expected *ErrUnsupportedMedia, got %T: %v", err, err)
 	}
-	if unsup.Provider != "ollama" || unsup.Media != "image" {
+	if unsup.Provider != "ollama" || unsup.Media != "pdf" {
 		t.Errorf("err fields: %+v", unsup)
 	}
 }
