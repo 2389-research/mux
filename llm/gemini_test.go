@@ -621,7 +621,7 @@ func TestGeminiCreateMessage_VideoURL_ErrUnsupportedSource(t *testing.T) {
 	if !errors.As(err, &ue) {
 		t.Fatalf("expected *ErrUnsupportedSource, got %T: %v", err, err)
 	}
-	if ue.Media != "video" || ue.Kind != "url" {
+	if ue.Provider != "gemini" || ue.Media != "video" || ue.Kind != "url" {
 		t.Errorf("err fields: %+v", ue)
 	}
 }
@@ -664,6 +664,9 @@ func TestGeminiWireFormat_VideoBytes(t *testing.T) {
 	if v := gjson.GetBytes(body, "parts.0.inlineData.mimeType").String(); v != "video/mp4" {
 		t.Errorf("mimeType: got %q; body=%s", v, body)
 	}
+	if v := gjson.GetBytes(body, "parts.0.inlineData.data").String(); v == "" {
+		t.Errorf("data should be non-empty base64; body=%s", body)
+	}
 }
 
 func TestGeminiWireFormat_PDFBytes(t *testing.T) {
@@ -674,9 +677,15 @@ func TestGeminiWireFormat_PDFBytes(t *testing.T) {
 	contents, _ := convertGeminiRequest(&Request{
 		Messages: []Message{NewUserMessageWithBlocks(pdf)},
 	})
-	body, _ := json.Marshal(contents[0])
+	body, err := json.Marshal(contents[0])
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
 	if v := gjson.GetBytes(body, "parts.0.inlineData.mimeType").String(); v != "application/pdf" {
 		t.Errorf("mimeType: %q; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "parts.0.inlineData.data").String(); v == "" {
+		t.Errorf("data should be non-empty base64; body=%s", body)
 	}
 }
 
@@ -688,8 +697,14 @@ func TestGeminiWireFormat_AudioBytes(t *testing.T) {
 	contents, _ := convertGeminiRequest(&Request{
 		Messages: []Message{NewUserMessageWithBlocks(audio)},
 	})
-	body, _ := json.Marshal(contents[0])
+	body, err := json.Marshal(contents[0])
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
 	if v := gjson.GetBytes(body, "parts.0.inlineData.mimeType").String(); v != "audio/mpeg" {
 		t.Errorf("mimeType: %q; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "parts.0.inlineData.data").String(); v == "" {
+		t.Errorf("data should be non-empty base64; body=%s", body)
 	}
 }
