@@ -796,18 +796,61 @@ func TestOpenRouterConstants(t *testing.T) {
 	}
 }
 
-func TestOpenRouterCreateMessage_RejectsImageMedia(t *testing.T) {
+func TestOpenRouterCapabilities(t *testing.T) {
 	c := NewOpenRouterClient("fake-key", "")
-	img := NewImageFromURL("https://example.com/x.png")
-	_, err := c.CreateMessage(context.Background(), &Request{
+	caps := c.Capabilities()
+	if !caps.Image || !caps.PDF || !caps.Audio {
+		t.Errorf("expected Image+PDF+Audio true, got %+v", caps)
+	}
+	if caps.Video {
+		t.Errorf("expected Video false, got %+v", caps)
+	}
+}
+
+func TestOpenRouterConvertRequest_ImageBytes(t *testing.T) {
+	img, err := NewImageFromBytes("image/png", []byte{0x89, 'P', 'N', 'G'})
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := convertOpenAIRequest(&Request{
 		Messages: []Message{NewUserMessageWithBlocks(img)},
+	})
+	parts := params.Messages[0].OfUser.Content.OfArrayOfContentParts
+	if parts[0].OfImageURL == nil {
+		t.Fatalf("expected image part, got %+v", parts[0])
+	}
+}
+
+func TestOpenRouterCreateMessage_RejectsVideoMedia(t *testing.T) {
+	c := NewOpenRouterClient("fake-key", "")
+	video, err := NewVideoFromBytes("video/mp4", []byte{0x00, 0x00, 0x00, 0x18})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.CreateMessage(context.Background(), &Request{
+		Messages: []Message{NewUserMessageWithBlocks(video)},
 	})
 	var unsup *ErrUnsupportedMedia
 	if !errors.As(err, &unsup) {
 		t.Fatalf("expected *ErrUnsupportedMedia, got %T: %v", err, err)
 	}
-	if unsup.Provider != "openrouter" || unsup.Media != "image" {
+	if unsup.Provider != "openrouter" || unsup.Media != "video" {
 		t.Errorf("err fields: %+v", unsup)
+	}
+}
+
+func TestOpenRouterCreateMessage_PDFFromURL_ErrUnsupportedSource(t *testing.T) {
+	c := NewOpenRouterClient("fake-key", "")
+	pdf := NewPDFFromURL("https://example.com/x.pdf")
+	_, err := c.CreateMessage(context.Background(), &Request{
+		Messages: []Message{NewUserMessageWithBlocks(pdf)},
+	})
+	var ue *ErrUnsupportedSource
+	if !errors.As(err, &ue) {
+		t.Fatalf("expected *ErrUnsupportedSource, got %T: %v", err, err)
+	}
+	if ue.Provider != "openrouter" || ue.Media != "pdf" || ue.Kind != "url" {
+		t.Errorf("err fields: %+v", ue)
 	}
 }
 
