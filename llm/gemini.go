@@ -152,6 +152,10 @@ func convertMessage(msg Message) *genai.Content {
 				response = map[string]any{"error": block.Text}
 			}
 			parts = append(parts, genai.NewPartFromFunctionResponse(block.Name, response))
+		case ContentTypeImage, ContentTypePDF, ContentTypeAudio, ContentTypeVideo:
+			if part := convertGeminiMedia(block); part != nil {
+				parts = append(parts, part)
+			}
 		}
 	}
 
@@ -245,6 +249,9 @@ func (g *GeminiClient) CreateMessage(ctx context.Context, req *Request) (*Respon
 	if err := validateRequest("gemini", g.Capabilities(), req); err != nil {
 		return nil, err
 	}
+	if err := validateGeminiSources(req); err != nil {
+		return nil, err
+	}
 
 	contents, config := convertGeminiRequest(req)
 	resp, err := g.client.Models.GenerateContent(ctx, model, contents, config)
@@ -265,6 +272,9 @@ func (g *GeminiClient) CreateMessageStream(ctx context.Context, req *Request) (<
 		req.MaxTokens = DefaultMaxTokens
 	}
 	if err := validateRequest("gemini", g.Capabilities(), req); err != nil {
+		return nil, err
+	}
+	if err := validateGeminiSources(req); err != nil {
 		return nil, err
 	}
 
@@ -344,13 +354,39 @@ func (g *GeminiClient) CreateMessageStream(ctx context.Context, req *Request) (<
 }
 
 // Capabilities reports which media types Gemini supports as input.
-// Note: Gemini natively supports image, PDF, audio, and video, but the
-// translation layer in this client does not yet emit Gemini media parts.
-// Until that lands, all media types are reported as unsupported so callers
-// fail fast at the validation boundary instead of having media silently
-// dropped from the request.
+// All four media kinds are translated to inline_data parts with the block's
+// MediaType. URL-form sources are rejected pre-flight by validateGeminiSources
+// because Gemini's inline_data takes raw bytes and we don't auto-fetch URLs.
 func (g *GeminiClient) Capabilities() Capabilities {
-	return Capabilities{}
+	return Capabilities{Image: true, PDF: true, Audio: true, Video: true}
+}
+
+// convertGeminiMedia translates a media block into a Gemini inline_data part.
+// URL-form sources are rejected pre-flight by validateGeminiSources, so we
+// only see Bytes/File here. Returns nil for malformed blocks (also rejected
+// pre-flight) as a defensive fallback.
+func convertGeminiMedia(block ContentBlock) *genai.Part {
+	if block.Source == nil {
+		return nil
+	}
+	return genai.NewPartFromBytes(block.Source.Bytes, block.MediaType)
+}
+
+// validateGeminiSources rejects URL-form media because Gemini's inline_data
+// takes raw bytes and we don't auto-fetch URLs.
+func validateGeminiSources(req *Request) error {
+	for _, msg := range req.Messages {
+		for _, block := range msg.Blocks {
+			if block.Source == nil || block.Source.Kind != SourceKindURL {
+				continue
+			}
+			switch block.Type {
+			case ContentTypeImage, ContentTypePDF, ContentTypeAudio, ContentTypeVideo:
+				return &ErrUnsupportedSource{Provider: "gemini", Media: string(block.Type), Kind: "url"}
+			}
+		}
+	}
+	return nil
 }
 
 // Compile-time interface assertion.

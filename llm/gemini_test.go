@@ -512,22 +512,115 @@ func TestConvertGeminiResponse_ThinkingTokens(t *testing.T) {
 	}
 }
 
-func TestGeminiCreateMessage_RejectsImageMedia(t *testing.T) {
+func TestGeminiCapabilities(t *testing.T) {
+	c, err := NewGeminiClient(context.Background(), "fake-key", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	caps := c.Capabilities()
+	if !caps.Image || !caps.PDF || !caps.Audio || !caps.Video {
+		t.Errorf("expected all true, got %+v", caps)
+	}
+}
+
+func TestGeminiConvertRequest_ImageBytes(t *testing.T) {
+	img, err := NewImageFromBytes("image/png", []byte{0x89, 'P', 'N', 'G'})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents, _ := convertGeminiRequest(&Request{
+		Messages: []Message{NewUserMessageWithBlocks(img)},
+	})
+	if len(contents) != 1 || len(contents[0].Parts) != 1 {
+		t.Fatalf("expected 1 content with 1 part, got %+v", contents)
+	}
+	part := contents[0].Parts[0]
+	if part.InlineData == nil {
+		t.Fatalf("expected InlineData, got %+v", part)
+	}
+	if part.InlineData.MIMEType != "image/png" {
+		t.Errorf("MIMEType: %q", part.InlineData.MIMEType)
+	}
+	if len(part.InlineData.Data) == 0 {
+		t.Error("Data should be non-empty")
+	}
+}
+
+func TestGeminiConvertRequest_PDFBytes(t *testing.T) {
+	pdf, err := NewPDFFromBytes([]byte("%PDF-1.4"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents, _ := convertGeminiRequest(&Request{
+		Messages: []Message{NewUserMessageWithBlocks(pdf)},
+	})
+	part := contents[0].Parts[0]
+	if part.InlineData == nil || part.InlineData.MIMEType != "application/pdf" {
+		t.Errorf("expected application/pdf inline data, got %+v", part)
+	}
+}
+
+func TestGeminiConvertRequest_AudioBytes(t *testing.T) {
+	audio, err := NewAudioFromBytes("audio/mpeg", []byte{0xff, 0xfb})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents, _ := convertGeminiRequest(&Request{
+		Messages: []Message{NewUserMessageWithBlocks(audio)},
+	})
+	part := contents[0].Parts[0]
+	if part.InlineData == nil || part.InlineData.MIMEType != "audio/mpeg" {
+		t.Errorf("expected audio/mpeg inline data, got %+v", part)
+	}
+}
+
+func TestGeminiConvertRequest_VideoBytes(t *testing.T) {
+	video, err := NewVideoFromBytes("video/mp4", []byte{0x00, 0x00, 0x00, 0x18})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents, _ := convertGeminiRequest(&Request{
+		Messages: []Message{NewUserMessageWithBlocks(video)},
+	})
+	part := contents[0].Parts[0]
+	if part.InlineData == nil || part.InlineData.MIMEType != "video/mp4" {
+		t.Errorf("expected video/mp4 inline data, got %+v", part)
+	}
+}
+
+func TestGeminiCreateMessage_ImageURL_ErrUnsupportedSource(t *testing.T) {
 	ctx := context.Background()
 	c, err := NewGeminiClient(ctx, "fake-key", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	img := NewImageFromURL("https://example.com/x.png")
 	_, err = c.CreateMessage(ctx, &Request{
-		Messages: []Message{NewUserMessageWithBlocks(img)},
+		Messages: []Message{NewUserMessageWithBlocks(NewImageFromURL("https://example.com/x.png"))},
 	})
-	var unsup *ErrUnsupportedMedia
-	if !errors.As(err, &unsup) {
-		t.Fatalf("expected *ErrUnsupportedMedia, got %T: %v", err, err)
+	var ue *ErrUnsupportedSource
+	if !errors.As(err, &ue) {
+		t.Fatalf("expected *ErrUnsupportedSource, got %T: %v", err, err)
 	}
-	if unsup.Provider != "gemini" || unsup.Media != "image" {
-		t.Errorf("err fields: %+v", unsup)
+	if ue.Provider != "gemini" || ue.Media != "image" || ue.Kind != "url" {
+		t.Errorf("err fields: %+v", ue)
+	}
+}
+
+func TestGeminiCreateMessage_VideoURL_ErrUnsupportedSource(t *testing.T) {
+	ctx := context.Background()
+	c, err := NewGeminiClient(ctx, "fake-key", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.CreateMessage(ctx, &Request{
+		Messages: []Message{NewUserMessageWithBlocks(NewVideoFromURL("https://example.com/v.mp4"))},
+	})
+	var ue *ErrUnsupportedSource
+	if !errors.As(err, &ue) {
+		t.Fatalf("expected *ErrUnsupportedSource, got %T: %v", err, err)
+	}
+	if ue.Media != "video" || ue.Kind != "url" {
+		t.Errorf("err fields: %+v", ue)
 	}
 }
 
