@@ -100,6 +100,9 @@ func (o *OpenRouterClient) CreateMessage(ctx context.Context, req *Request) (*Re
 	if err := validateRequest("openrouter", o.Capabilities(), req); err != nil {
 		return nil, err
 	}
+	if err := validateOpenAISources("openrouter", req); err != nil {
+		return nil, err
+	}
 
 	params := convertOpenAIRequest(req)
 	resp, err := o.client.Chat.Completions.New(ctx, params)
@@ -119,6 +122,9 @@ func (o *OpenRouterClient) CreateMessageStream(ctx context.Context, req *Request
 		req.MaxTokens = DefaultMaxTokens
 	}
 	if err := validateRequest("openrouter", o.Capabilities(), req); err != nil {
+		return nil, err
+	}
+	if err := validateOpenAISources("openrouter", req); err != nil {
 		return nil, err
 	}
 
@@ -197,12 +203,13 @@ func (o *OpenRouterClient) CreateMessageStream(ctx context.Context, req *Request
 }
 
 // Capabilities reports which media types OpenRouter supports as input.
-// OpenRouter routes to many upstream providers with varying multimodal
-// support, and this client does not yet translate media blocks into the
-// wire format. Until that lands, all media types are reported as
-// unsupported so callers fail fast.
+// OpenRouter routes to many upstream providers; we mirror OpenAI's matrix
+// at the provider level (image + PDF + audio) and let upstream models 400
+// on model-level mismatches per the design doc's "provider-level static +
+// provider 400 fall-through" decision. Video is rejected because no major
+// OpenRouter route currently accepts video on the chat endpoint.
 func (o *OpenRouterClient) Capabilities() Capabilities {
-	return Capabilities{}
+	return Capabilities{Image: true, PDF: true, Audio: true}
 }
 
 // Compile-time interface assertion.
