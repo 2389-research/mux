@@ -29,6 +29,7 @@ const (
 	ContentTypeImage      ContentType = "image"
 	ContentTypePDF        ContentType = "pdf"
 	ContentTypeAudio      ContentType = "audio"
+	ContentTypeVideo      ContentType = "video"
 )
 
 // StopReason indicates why the model stopped generating.

@@ -445,3 +445,33 @@ func TestNewImageFromFile_RejectsZeroByteFile(t *testing.T) {
 		t.Errorf("expected 'empty' error, got %v", err)
 	}
 }
+
+func TestValidateMediaFamily_VideoPrefixMatches(t *testing.T) {
+	if err := validateMediaFamily("video", "video/mp4"); err != nil {
+		t.Errorf("video/mp4 should pass: %v", err)
+	}
+	if err := validateMediaFamily("video", "image/png"); err == nil {
+		t.Error("image/png should fail video family")
+	}
+}
+
+func TestValidateRequest_RejectsVideoWhenCapabilityFalse(t *testing.T) {
+	caps := Capabilities{Image: true, PDF: true, Audio: true, Video: false}
+	req := &Request{
+		Messages: []Message{
+			{Role: RoleUser, Blocks: []ContentBlock{{
+				Type:      ContentTypeVideo,
+				MediaType: "video/mp4",
+				Source:    &MediaSource{Kind: SourceKindBytes, Bytes: []byte{0, 1, 2}},
+			}}},
+		},
+	}
+	err := validateRequest("test", caps, req)
+	var unsup *ErrUnsupportedMedia
+	if !errors.As(err, &unsup) {
+		t.Fatalf("expected *ErrUnsupportedMedia, got %T: %v", err, err)
+	}
+	if unsup.Media != "video" {
+		t.Errorf("Media: %q want video", unsup.Media)
+	}
+}
