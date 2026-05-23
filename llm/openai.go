@@ -10,6 +10,7 @@ import (
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
+	"github.com/openai/openai-go/responses"
 )
 
 // OpenAIClient implements Client for the OpenAI API.
@@ -110,6 +111,97 @@ func convertOpenAIRequest(req *Request) openai.ChatCompletionNewParams {
 	}
 
 	return params
+}
+
+// convertOpenAIResponsesRequest converts our Request to the Responses API shape.
+func convertOpenAIResponsesRequest(req *Request) responses.ResponseNewParams {
+	params := responses.ResponseNewParams{
+		Model: req.Model,
+		Input: responses.ResponseNewParamsInputUnion{
+			OfInputItemList: convertResponsesInput(req.Messages),
+		},
+	}
+
+	if req.System != "" {
+		params.Instructions = openai.String(req.System)
+	}
+
+	if req.MaxTokens > 0 {
+		params.MaxOutputTokens = openai.Int(int64(req.MaxTokens))
+	}
+
+	if req.Temperature != nil {
+		params.Temperature = openai.Float(*req.Temperature)
+	}
+
+	if req.Thinking != nil && req.Thinking.Enabled {
+		params.Reasoning.Effort = reasoningEffort(req.Thinking.Budget)
+	}
+
+	if len(req.Tools) > 0 {
+		params.Tools = make([]responses.ToolUnionParam, 0, len(req.Tools))
+		for _, tool := range req.Tools {
+			params.Tools = append(params.Tools, responses.ToolUnionParam{
+				OfFunction: &responses.FunctionToolParam{
+					Name:        tool.Name,
+					Description: openai.String(tool.Description),
+					Parameters:  tool.InputSchema,
+					Strict:      openai.Bool(false),
+				},
+			})
+		}
+	}
+
+	return params
+}
+
+func reasoningEffort(budget int) openai.ReasoningEffort {
+	switch {
+	case budget <= 4096:
+		return openai.ReasoningEffortLow
+	case budget <= 16384:
+		return openai.ReasoningEffortMedium
+	default:
+		return openai.ReasoningEffortHigh
+	}
+}
+
+func convertResponsesInput(messages []Message) responses.ResponseInputParam {
+	items := make(responses.ResponseInputParam, 0, len(messages))
+	for _, msg := range messages {
+		role := responses.EasyInputMessageRoleUser
+		if msg.Role == RoleAssistant {
+			role = responses.EasyInputMessageRoleAssistant
+		}
+		if msg.Content != "" {
+			items = append(items, responseMessage(role, msg.Content))
+		}
+		for _, block := range msg.Blocks {
+			switch block.Type {
+			case ContentTypeText:
+				if block.Text != "" {
+					items = append(items, responseMessage(role, block.Text))
+				}
+			case ContentTypeToolUse:
+				argsJSON, _ := json.Marshal(block.Input)
+				items = append(items, responses.ResponseInputItemParamOfFunctionCall(string(argsJSON), block.ID, block.Name))
+			case ContentTypeToolResult:
+				items = append(items, responses.ResponseInputItemParamOfFunctionCallOutput(block.ToolUseID, block.Text))
+			}
+		}
+	}
+	return items
+}
+
+func responseMessage(role responses.EasyInputMessageRole, text string) responses.ResponseInputItemUnionParam {
+	return responses.ResponseInputItemUnionParam{
+		OfMessage: &responses.EasyInputMessageParam{
+			Role: role,
+			Content: responses.EasyInputMessageContentUnionParam{
+				OfString: openai.String(text),
+			},
+		},
+	}
 }
 
 // convertUserMessage converts a mux user message to OpenAI format.
@@ -284,6 +376,48 @@ func convertOpenAIResponse(resp *openai.ChatCompletion) *Response {
 	return result
 }
 
+func convertOpenAIResponsesResponse(resp *responses.Response) *Response {
+	result := &Response{
+		ID:    resp.ID,
+		Model: resp.Model,
+		Usage: Usage{
+			InputTokens:    int(resp.Usage.InputTokens),
+			OutputTokens:   int(resp.Usage.OutputTokens),
+			ThinkingTokens: int(resp.Usage.OutputTokensDetails.ReasoningTokens),
+		},
+		StopReason: StopReasonEndTurn,
+	}
+
+	for _, item := range resp.Output {
+		switch item.Type {
+		case "message":
+			for _, content := range item.Content {
+				if content.Type == "output_text" && content.Text != "" {
+					result.Content = append(result.Content, ContentBlock{
+						Type: ContentTypeText,
+						Text: content.Text,
+					})
+				}
+			}
+		case "function_call":
+			var input map[string]any
+			if err := json.Unmarshal([]byte(item.Arguments), &input); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to parse tool call arguments for %s: %v\n", item.Name, err)
+				input = make(map[string]any)
+			}
+			result.Content = append(result.Content, ContentBlock{
+				Type:  ContentTypeToolUse,
+				ID:    item.CallID,
+				Name:  item.Name,
+				Input: input,
+			})
+			result.StopReason = StopReasonToolUse
+		}
+	}
+
+	return result
+}
+
 // CreateMessage sends a message and returns the complete response.
 func (o *OpenAIClient) CreateMessage(ctx context.Context, req *Request) (*Response, error) {
 	if req.Model == "" {
@@ -293,13 +427,13 @@ func (o *OpenAIClient) CreateMessage(ctx context.Context, req *Request) (*Respon
 		req.MaxTokens = DefaultMaxTokens
 	}
 
-	params := convertOpenAIRequest(req)
-	resp, err := o.client.Chat.Completions.New(ctx, params)
+	params := convertOpenAIResponsesRequest(req)
+	resp, err := o.client.Responses.New(ctx, params)
 	if err != nil {
 		return nil, err
 	}
 
-	return convertOpenAIResponse(resp), nil
+	return convertOpenAIResponsesResponse(resp), nil
 }
 
 // CreateMessageStream sends a message and returns a channel of streaming events.

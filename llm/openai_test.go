@@ -215,6 +215,153 @@ func TestOpenAIClient_ServerError(t *testing.T) {
 	}
 }
 
+func TestOpenAIClient_CreateMessageUsesResponsesAPIWithToolsAndReasoning(t *testing.T) {
+	var requestPath string
+	var body map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestPath = r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"id":         "resp_123",
+			"object":     "response",
+			"created_at": 0,
+			"model":      "gpt-5.5",
+			"output": []map[string]any{
+				{
+					"type":   "message",
+					"id":     "msg_123",
+					"role":   "assistant",
+					"status": "completed",
+					"content": []map[string]any{
+						{"type": "output_text", "text": "ok", "annotations": []any{}},
+					},
+				},
+			},
+			"usage": map[string]any{
+				"input_tokens": 3,
+				"input_tokens_details": map[string]any{
+					"cached_tokens": 0,
+				},
+				"output_tokens": 5,
+				"output_tokens_details": map[string]any{
+					"reasoning_tokens": 2,
+				},
+				"total_tokens": 8,
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := &OpenAIClient{
+		client: openai.NewClient(
+			option.WithAPIKey("test-key"),
+			option.WithBaseURL(server.URL),
+		),
+		model: "gpt-5.5",
+	}
+	resp, err := client.CreateMessage(context.Background(), &Request{
+		Messages: []Message{NewUserMessage("Hello")},
+		Tools: []ToolDefinition{
+			{Name: "read_file", Description: "Read a file", InputSchema: map[string]any{"type": "object"}},
+		},
+		Thinking: &ThinkingConfig{Enabled: true, Budget: 32768},
+	})
+
+	if err != nil {
+		t.Fatalf("CreateMessage returned error: %v", err)
+	}
+	if requestPath != "/responses" {
+		t.Fatalf("expected /responses endpoint, got %s", requestPath)
+	}
+	if body["reasoning"].(map[string]any)["effort"] != "high" {
+		t.Fatalf("expected reasoning effort high, got %#v", body["reasoning"])
+	}
+	if len(body["tools"].([]any)) != 1 {
+		t.Fatalf("expected one response tool, got %#v", body["tools"])
+	}
+	if resp.Content[0].Text != "ok" {
+		t.Fatalf("expected response text ok, got %#v", resp.Content)
+	}
+	if resp.Usage.ThinkingTokens != 2 {
+		t.Fatalf("expected reasoning usage 2, got %d", resp.Usage.ThinkingTokens)
+	}
+}
+
+func TestOpenAIClient_CreateMessageSendsFunctionCallOutputsToResponsesAPI(t *testing.T) {
+	var body map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"id":         "resp_456",
+			"object":     "response",
+			"created_at": 0,
+			"model":      "gpt-5.5",
+			"output": []map[string]any{
+				{
+					"type":   "message",
+					"id":     "msg_456",
+					"role":   "assistant",
+					"status": "completed",
+					"content": []map[string]any{
+						{"type": "output_text", "text": "done", "annotations": []any{}},
+					},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := &OpenAIClient{
+		client: openai.NewClient(
+			option.WithAPIKey("test-key"),
+			option.WithBaseURL(server.URL),
+		),
+		model: "gpt-5.5",
+	}
+	_, err := client.CreateMessage(context.Background(), &Request{
+		Messages: []Message{
+			NewUserMessage("Read go.mod"),
+			{
+				Role: RoleAssistant,
+				Blocks: []ContentBlock{{
+					Type:  ContentTypeToolUse,
+					ID:    "call_123",
+					Name:  "read_file",
+					Input: map[string]any{"path": "go.mod"},
+				}},
+			},
+			{
+				Role: RoleUser,
+				Blocks: []ContentBlock{{
+					Type:      ContentTypeToolResult,
+					ToolUseID: "call_123",
+					Text:      "module github.com/2389-research/mux",
+				}},
+			},
+		},
+	})
+
+	if err != nil {
+		t.Fatalf("CreateMessage returned error: %v", err)
+	}
+	input := body["input"].([]any)
+	if input[1].(map[string]any)["type"] != "function_call" {
+		t.Fatalf("expected second input item to be function_call, got %#v", input[1])
+	}
+	if input[2].(map[string]any)["type"] != "function_call_output" {
+		t.Fatalf("expected third input item to be function_call_output, got %#v", input[2])
+	}
+	if input[2].(map[string]any)["call_id"] != "call_123" {
+		t.Fatalf("expected function output call_id call_123, got %#v", input[2])
+	}
+}
+
 func TestOpenAIClient_ConnectionRefused(t *testing.T) {
 	client := &OpenAIClient{
 		client: openai.NewClient(
