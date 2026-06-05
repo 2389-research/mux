@@ -78,6 +78,10 @@ func (c *stdioClient) Start(ctx context.Context) error {
 	}
 
 	c.scanner = bufio.NewScanner(c.stdout)
+	// MCP tool results routinely exceed bufio.Scanner's 64KB default; raise the
+	// per-line ceiling so large responses are not silently truncated.
+	const maxResponseBytes = 16 * 1024 * 1024
+	c.scanner.Buffer(make([]byte, 0, 64*1024), maxResponseBytes)
 	c.running = true
 	c.mu.Unlock()
 
@@ -179,7 +183,10 @@ func (c *stdioClient) readResponses() {
 	defer close(c.done)
 	for {
 		if !c.scanner.Scan() {
-			// Scanner stopped - either EOF, error, or closed
+			// Scanner stopped - distinguish real error from EOF/close.
+			if err := c.scanner.Err(); err != nil {
+				fmt.Fprintf(os.Stderr, "mcp: stdio read error: %v\n", err)
+			}
 			return
 		}
 		line := c.scanner.Bytes()
@@ -188,7 +195,7 @@ func (c *stdioClient) readResponses() {
 		}
 		var resp Response
 		if err := json.Unmarshal(line, &resp); err != nil {
-			fmt.Printf("mcp: failed to unmarshal response: %v (line: %s)\n", err, string(line))
+			fmt.Fprintf(os.Stderr, "mcp: failed to unmarshal response: %v (line: %s)\n", err, string(line))
 			continue
 		}
 		c.mu.Lock()

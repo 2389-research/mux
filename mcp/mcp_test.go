@@ -1876,6 +1876,33 @@ func TestClientConcurrentMixedCalls(t *testing.T) {
 	}
 }
 
+func TestStdioLargeToolResult(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:      "big",
+		Transport: "stdio",
+		Command:   "node",
+		Args:      []string{"testdata/mock_server.js"},
+	}
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := client.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer client.Close()
+
+	result, err := client.CallTool(ctx, "big_tool", map[string]any{})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if len(result.Content) == 0 || len(result.Content[0].Text) < 100000 {
+		t.Fatalf("expected large payload, got %d content blocks", len(result.Content))
+	}
+}
+
 func TestNotificationType(t *testing.T) {
 	jsonData := `{"method":"tools/changed","params":{"reason":"update"}}`
 	var notif mcp.Notification

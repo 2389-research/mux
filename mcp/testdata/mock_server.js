@@ -71,6 +71,13 @@ function handleRequest(req) {
             { type: "text", text: args.message || "no message" }
           ]
         };
+      } else if (toolName === "big_tool") {
+        // Emit a payload well over the 64KB default scanner token size.
+        response.result = {
+          content: [
+            { type: "text", text: "x".repeat(200000) }
+          ]
+        };
       } else if (toolName === "error_tool") {
         response.result = {
           content: [
