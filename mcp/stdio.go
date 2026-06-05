@@ -6,12 +6,18 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"sync"
 	"time"
+)
+
+var (
+	errClientRunning = errors.New("client already running")
+	errClientClosed  = errors.New("client closed")
 )
 
 // stdioClient communicates with an MCP server over stdin/stdout.
@@ -48,7 +54,7 @@ func (c *stdioClient) Start(ctx context.Context) error {
 	c.mu.Lock()
 	if c.running {
 		c.mu.Unlock()
-		return fmt.Errorf("client already running")
+		return errClientRunning
 	}
 
 	// MCP servers are configured by the user, command execution is intentional
@@ -162,7 +168,7 @@ func (c *stdioClient) call(ctx context.Context, method string, params any) (*Res
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-c.closeChan:
-		return nil, fmt.Errorf("client closed")
+		return nil, errClientClosed
 	}
 }
 
@@ -179,7 +185,7 @@ func (c *stdioClient) send(req *Request) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.running {
-		return fmt.Errorf("client closed")
+		return errClientClosed
 	}
 	_, err = c.stdin.Write(append(data, '\n'))
 	return err
