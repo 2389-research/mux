@@ -1876,6 +1876,35 @@ func TestClientConcurrentMixedCalls(t *testing.T) {
 	}
 }
 
+func TestStdioInitializeFailureCleansUp(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:      "noinit",
+		Transport: "stdio",
+		Command:   "sh",
+		Args:      []string{"-c", "cat >/dev/null"},
+	}
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	err = client.Start(ctx)
+	if err == nil {
+		client.Close()
+		t.Fatal("expected initialize to fail (server never responds)")
+	}
+	// A second Close must be safe and prompt even though Start failed.
+	done := make(chan error, 1)
+	go func() { done <- client.Close() }()
+	select {
+	case <-done:
+	case <-time.After(7 * time.Second):
+		t.Fatal("Close after failed Start hung; cleanup did not run")
+	}
+}
+
 func TestStdioCloseReapsProcess(t *testing.T) {
 	config := mcp.ServerConfig{
 		Name:      "reap",

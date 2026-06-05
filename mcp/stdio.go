@@ -86,7 +86,13 @@ func (c *stdioClient) Start(ctx context.Context) error {
 	c.mu.Unlock()
 
 	go c.readResponses()
-	return c.initialize(ctx)
+	if err := c.initialize(ctx); err != nil {
+		// initialize failed - tear down the goroutine and child process so we
+		// do not leak them; the caller only sees the error.
+		_ = c.Close()
+		return err
+	}
+	return nil
 }
 
 func (c *stdioClient) initialize(ctx context.Context) error {
