@@ -442,14 +442,12 @@ In `mcp/testdata/mock_server.js`, inside the `tools/call` switch (after the `ech
           ]
         };
 ```
-And add its descriptor to the `TOOLS` array:
-```js
-  {
-    name: "big_tool",
-    description: "Returns a large payload",
-    inputSchema: { type: "object", properties: {} }
-  }
-```
+Do **not** add `big_tool` to the `TOOLS` array. Five existing node-server tests
+assert `tools/list` returns exactly 2 tools (`TestClientListTools`,
+`TestClientMultipleListToolsCalls`, `TestClientListToolsInvalidJSON`, the
+concurrent-mix test, and one manager test); adding a third descriptor breaks
+them. The tool only needs to be *callable*, so it lives in the `tools/call`
+switch only — exactly how the existing hidden `error_tool` is handled.
 
 - [ ] **Step 2: Write the failing test (real node subprocess)**
 
