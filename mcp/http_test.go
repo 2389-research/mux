@@ -5,6 +5,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -409,5 +410,69 @@ func TestHTTPClientNotConnected(t *testing.T) {
 	_, err = client.CallTool(ctx, "test", nil)
 	if err != ErrNotConnected {
 		t.Errorf("CallTool: expected ErrNotConnected, got %v", err)
+	}
+}
+
+func TestHTTPCloseDuringNotificationStress(t *testing.T) {
+	for iter := 0; iter < 50; iter++ {
+		// ready signals that the tools/list SSE handler has started streaming,
+		// so Close fires while notifications are actively being sent.
+		ready := make(chan struct{})
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req Request
+			json.NewDecoder(r.Body).Decode(&req)
+
+			switch req.Method {
+			case "initialize":
+				w.Header().Set("Mcp-Session-Id", "test-session")
+				w.Header().Set("Content-Type", "application/json")
+				resp := Response{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(`{}`)}
+				json.NewEncoder(w).Encode(resp)
+			case "notifications/initialized":
+				w.WriteHeader(http.StatusOK)
+			case "tools/list":
+				// Stream many notifications then the final result.
+				// The panic window is: Close closes c.notifications while this
+				// handler is still flushing notification events to the SSE reader,
+				// which then attempts to send on the now-closed channel.
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				fl, _ := w.(http.Flusher)
+				// Signal that streaming has begun so Close fires mid-stream.
+				close(ready)
+				for i := 0; i < 30; i++ {
+					fmt.Fprint(w, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"note\",\"params\":{}}\n\n")
+					if fl != nil {
+						fl.Flush()
+					}
+				}
+				fmt.Fprintf(w, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"tools\":[]}}\n\n", idToString(req.ID))
+				if fl != nil {
+					fl.Flush()
+				}
+			}
+		}))
+
+		config := ServerConfig{Transport: "http", URL: srv.URL}
+		client := newHTTPClient(config)
+		ctx := context.Background()
+
+		// Start is mandatory: sets running=true and primes sessionID so that
+		// ListTools enters post() and opens the SSE reader — reaching the
+		// notification-send path that races with Close.
+		if err := client.Start(ctx); err != nil {
+			srv.Close()
+			t.Fatalf("iter %d: Start failed: %v", iter, err)
+		}
+
+		// ListTools drives the SSE stream (30 notification sends to c.notifications).
+		go func() { _, _ = client.ListTools(ctx) }()
+
+		// Wait until the SSE stream has started, then Close races with active
+		// notification sends — this is the exact send-on-closed-channel window.
+		<-ready
+		client.Close()
+		srv.Close()
 	}
 }
