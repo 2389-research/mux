@@ -124,9 +124,17 @@ func (e *Executor) Execute(ctx context.Context, toolName string, params map[stri
 	// Execute tool
 	result, err := t.Execute(ctx, params)
 
-	// Run after hooks
+	// Run after hooks with panic recovery to prevent hook failures from crashing execution
 	for _, hook := range e.afterHooks {
-		hook(ctx, toolName, params, result, err)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					// Hook panicked - log and continue execution
+					fmt.Fprintf(os.Stderr, "Warning: after hook panicked for tool %s: %v\n", toolName, r)
+				}
+			}()
+			hook(ctx, toolName, params, result, err)
+		}()
 	}
 
 	return result, err

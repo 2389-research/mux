@@ -1051,6 +1051,29 @@ func TestConcurrentRegistrationAndExecution(t *testing.T) {
 	}
 }
 
+func TestExecutorAfterHookPanicDoesNotCrash(t *testing.T) {
+	reg := tool.NewRegistry()
+	mock := &mockTool{name: "hook_test"}
+	reg.Register(mock)
+
+	exec := tool.NewExecutor(reg)
+
+	// A panicking after hook must not crash tool execution. The executor
+	// recovers (mirroring before-hook behavior), so Execute returns the
+	// tool's result and the panic does not propagate to the caller.
+	exec.AddAfterHook(func(ctx context.Context, toolName string, params map[string]any, result *tool.Result, err error) {
+		panic("after hook boom")
+	})
+
+	result, err := exec.Execute(context.Background(), "hook_test", nil)
+	if err != nil {
+		t.Fatalf("Execute returned unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result despite panicking after hook")
+	}
+}
+
 // TestRegistryReplaceAndRetrieve tests replacing a tool and immediately retrieving it
 func TestRegistryReplaceAndRetrieve(t *testing.T) {
 	reg := tool.NewRegistry()
