@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -1902,6 +1903,48 @@ func TestStdioInitializeFailureCleansUp(t *testing.T) {
 	case <-done:
 	case <-time.After(7 * time.Second):
 		t.Fatal("Close after failed Start hung; cleanup did not run")
+	}
+}
+
+func TestStdioInitializeFailureReapsResources(t *testing.T) {
+	// A server that rejects initialize with a JSON-RPC error while staying alive
+	// exercises the leak path that ctx-cancellation masks: initialize fails
+	// promptly (no ctx timeout), so without teardown the reader goroutine stays
+	// blocked on Scan() forever and the child process is never reaped.
+	config := mcp.ServerConfig{
+		Name:      "initfail",
+		Transport: "stdio",
+		Command:   "node",
+		Args:      []string{"testdata/init_fail_server.js"},
+	}
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	before := runtime.NumGoroutine()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err = client.Start(ctx)
+	if err == nil {
+		client.Close()
+		t.Fatal("expected initialize to fail (server rejects it)")
+	}
+	// Clean up at test end regardless, so a leak never pollutes later tests.
+	defer client.Close()
+
+	// With the fix, Start tears down the reader goroutine and reaps the child
+	// before returning, so the goroutine count settles back to baseline. Without
+	// it, the reader goroutine is blocked on Scan() forever and never returns.
+	// Do NOT call Close before this poll — that would mask the leak.
+	deadline := time.Now().Add(5 * time.Second)
+	for runtime.NumGoroutine() > before && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := runtime.NumGoroutine(); n > before {
+		t.Fatalf("reader goroutine leaked after failed Start: baseline=%d now=%d", before, n)
 	}
 }
 
