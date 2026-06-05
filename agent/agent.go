@@ -2,7 +2,8 @@
 // ABOUTME: orchestrator with per-agent tool filtering and hierarchy support.
 
 // Package agent provides the Agent type, the top-level abstraction for running
-// LLM-powered agents with per-agent tool filtering and parent-child hierarchy support.
+// LLM-powered agents with per-agent tool filtering, parent-child hierarchy support,
+// and synchronous or asynchronous execution.
 package agent
 
 import (
