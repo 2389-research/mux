@@ -3,6 +3,7 @@
 package orchestrator
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/2389-research/mux/llm"
@@ -95,48 +96,6 @@ func (u *TokenUsage) String() string {
 }
 
 func formatTokenUsage(input, output, requests int64) string {
-	return sprintf("%d input + %d output = %d total (%d requests)",
+	return fmt.Sprintf("%d input + %d output = %d total (%d requests)",
 		input, output, input+output, requests)
-}
-
-// sprintf is a simple format helper to avoid importing fmt
-func sprintf(format string, args ...int64) string {
-	// Simple implementation for the specific format we need
-	result := format
-	for _, arg := range args {
-		result = replaceFirst(result, "%d", itoa(arg))
-	}
-	return result
-}
-
-func itoa(n int64) string {
-	if n == 0 {
-		return "0"
-	}
-	if n < 0 {
-		return "-" + itoa(-n)
-	}
-	var digits []byte
-	for n > 0 {
-		digits = append([]byte{byte('0' + n%10)}, digits...)
-		n /= 10
-	}
-	return string(digits)
-}
-
-func replaceFirst(s, old, new string) string {
-	i := indexOf(s, old)
-	if i < 0 {
-		return s
-	}
-	return s[:i] + new + s[i+len(old):]
-}
-
-func indexOf(s, substr string) int {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
 }
