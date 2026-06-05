@@ -4,6 +4,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -130,7 +131,7 @@ func (h *RunHandle) setComplete(err error) {
 	h.mu.Unlock()
 
 	if err != nil {
-		if err == context.Canceled {
+		if errors.Is(err, context.Canceled) {
 			atomic.StoreInt32(&h.status, int32(RunStatusCancelled))
 		} else {
 			atomic.StoreInt32(&h.status, int32(RunStatusFailed))
