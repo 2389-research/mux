@@ -1,5 +1,8 @@
 // ABOUTME: Implements the core Orchestrator - the agentic think-act loop that
 // ABOUTME: coordinates LLM responses, tool execution, and event streaming.
+
+// Package orchestrator implements the agentic think-act loop that drives LLM
+// inference, tool execution, context compaction, and event streaming.
 package orchestrator
 
 import (

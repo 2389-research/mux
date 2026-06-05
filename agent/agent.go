@@ -1,5 +1,8 @@
 // ABOUTME: Implements the Agent type - the top-level abstraction that wraps
 // ABOUTME: orchestrator with per-agent tool filtering and hierarchy support.
+
+// Package agent provides the Agent type, the top-level abstraction for running
+// LLM-powered agents with per-agent tool filtering and parent-child hierarchy support.
 package agent
 
 import (

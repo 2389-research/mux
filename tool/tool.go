@@ -1,5 +1,8 @@
 // ABOUTME: Defines the core Tool interface - the universal abstraction for all
 // ABOUTME: executable capabilities (built-in tools, MCP tools, skills, etc.)
+
+// Package tool defines the Tool interface and supporting registry, executor,
+// filter, and result types used throughout mux for tool dispatch.
 package tool
 
 import "context"

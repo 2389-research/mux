@@ -1,5 +1,8 @@
 // ABOUTME: Defines the hook system for lifecycle events in mux.
 // ABOUTME: Enables observability and control over session, agent, and tool lifecycle.
+
+// Package hooks provides a lifecycle event system for observing and reacting to
+// session, agent, iteration, tool, and compaction events within mux.
 package hooks
 
 import (

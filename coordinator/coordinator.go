@@ -1,5 +1,8 @@
 // ABOUTME: Resource coordinator for multi-agent systems providing resource locking.
 // ABOUTME: Ensures thread-safe coordination across agent hierarchy.
+
+// Package coordinator provides thread-safe resource locking for multi-agent
+// systems, ensuring exclusive access to shared resources across an agent hierarchy.
 package coordinator
 
 import (
