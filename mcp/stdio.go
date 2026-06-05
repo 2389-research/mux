@@ -236,9 +236,10 @@ func (c *stdioClient) Close() error {
 		fmt.Fprintf(os.Stderr, "mcp: warning: readResponses goroutine did not exit within timeout\n")
 	}
 
-	// Kill process
+	// Kill the process and reap it so it does not linger as a zombie.
 	if c.cmd != nil && c.cmd.Process != nil {
-		c.cmd.Process.Kill()
+		_ = c.cmd.Process.Kill()
+		_ = c.cmd.Wait()
 	}
 	return nil
 }

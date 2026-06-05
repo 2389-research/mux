@@ -1876,6 +1876,34 @@ func TestClientConcurrentMixedCalls(t *testing.T) {
 	}
 }
 
+func TestStdioCloseReapsProcess(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:      "reap",
+		Transport: "stdio",
+		Command:   "node",
+		Args:      []string{"testdata/mock_server.js"},
+	}
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := client.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- client.Close() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(7 * time.Second):
+		t.Fatal("Close did not return; Wait may be blocking")
+	}
+}
+
 func TestStdioLargeToolResult(t *testing.T) {
 	config := mcp.ServerConfig{
 		Name:      "big",
