@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -2017,4 +2018,31 @@ func TestClientNotificationsReturnsNilForStdio(t *testing.T) {
 	if client.Notifications() != nil {
 		t.Error("expected nil notifications channel for stdio transport")
 	}
+}
+
+func TestToolManagerConcurrentRefresh(t *testing.T) {
+	provider := &stubProvider{tools: []mcp.ToolInfo{
+		{Name: "a"}, {Name: "b"}, {Name: "c"},
+	}}
+	m := mcp.NewToolManager(provider)
+	if err := m.Refresh(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(2)
+		go func() { defer wg.Done(); _ = m.Refresh(context.Background()) }()
+		go func() { defer wg.Done(); _ = m.Tools(); _, _ = m.Get("a") }()
+	}
+	wg.Wait()
+}
+
+type stubProvider struct{ tools []mcp.ToolInfo }
+
+func (s *stubProvider) ListTools(ctx context.Context) ([]mcp.ToolInfo, error) {
+	return s.tools, nil
+}
+func (s *stubProvider) CallTool(ctx context.Context, name string, args map[string]any) (*mcp.ToolCallResult, error) {
+	return &mcp.ToolCallResult{}, nil
 }

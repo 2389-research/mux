@@ -5,6 +5,7 @@ package mcp
 import (
 	"context"
 	"strings"
+	"sync"
 
 	"github.com/2389-research/mux/tool"
 )
@@ -83,6 +84,7 @@ func (a *ToolAdapter) InputSchema() map[string]any { return a.info.InputSchema }
 // ToolManager manages multiple MCP tool adapters.
 type ToolManager struct {
 	provider ToolProvider
+	mu       sync.RWMutex
 	tools    map[string]*ToolAdapter
 }
 
@@ -97,15 +99,20 @@ func (m *ToolManager) Refresh(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	m.tools = make(map[string]*ToolAdapter)
+	next := make(map[string]*ToolAdapter, len(infos))
 	for _, info := range infos {
-		m.tools[info.Name] = NewToolAdapter(info, m.provider)
+		next[info.Name] = NewToolAdapter(info, m.provider)
 	}
+	m.mu.Lock()
+	m.tools = next
+	m.mu.Unlock()
 	return nil
 }
 
 // Tools returns all available tool adapters.
 func (m *ToolManager) Tools() []*ToolAdapter {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	tools := make([]*ToolAdapter, 0, len(m.tools))
 	for _, t := range m.tools {
 		tools = append(tools, t)
@@ -115,12 +122,16 @@ func (m *ToolManager) Tools() []*ToolAdapter {
 
 // Get retrieves a specific tool adapter.
 func (m *ToolManager) Get(name string) (*ToolAdapter, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	t, ok := m.tools[name]
 	return t, ok
 }
 
 // RegisterAll adds all MCP tools to a tool registry.
 func (m *ToolManager) RegisterAll(registry *tool.Registry) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	for _, t := range m.tools {
 		registry.Register(t)
 	}
