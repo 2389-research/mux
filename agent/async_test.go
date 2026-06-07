@@ -354,3 +354,44 @@ func (m *mockLLMClient) CreateMessageStream(ctx context.Context, req *llm.Reques
 	close(ch)
 	return ch, nil
 }
+
+// TestRunAsync_CancelStopsRun verifies that handle.Cancel() actually stops a
+// running agent (not merely flips a status flag). The run blocks in the LLM
+// call until its context is cancelled; only Cancel() can unblock it here, since
+// the caller's context is never cancelled.
+func TestRunAsync_CancelStopsRun(t *testing.T) {
+	registry := tool.NewRegistry()
+	client := &mockLLMClient{blockUntilCancel: true}
+
+	agent := New(Config{
+		Name:      "test-agent",
+		Registry:  registry,
+		LLMClient: client,
+	})
+
+	// Background context that we never cancel ourselves: only Cancel() can stop it.
+	handle := agent.RunAsync(context.Background(), "test prompt")
+
+	// Let the run start and block inside CreateMessage.
+	time.Sleep(10 * time.Millisecond)
+	if handle.Status() != RunStatusRunning {
+		t.Fatalf("expected running before cancel, got %v", handle.Status())
+	}
+
+	if !handle.Cancel() {
+		t.Fatal("Cancel() = false, want true (run was in progress)")
+	}
+
+	// The run must terminate promptly. Before the fix it stays blocked forever
+	// and this times out with DeadlineExceeded.
+	err := handle.WaitWithTimeout(1 * time.Second)
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("run did not stop after Cancel(): timed out (Cancel did not cancel the context)")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("run error = %v, want context.Canceled", err)
+	}
+	if handle.Status() != RunStatusCancelled {
+		t.Errorf("final status = %v, want cancelled", handle.Status())
+	}
+}
