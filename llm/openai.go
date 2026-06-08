@@ -10,9 +10,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/option"
-	"github.com/openai/openai-go/responses"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/responses"
 )
 
 // OpenAIClient implements Client for the OpenAI API.
@@ -95,19 +95,21 @@ func convertOpenAIRequest(req *Request) openai.ChatCompletionNewParams {
 	}
 	params.Messages = messages
 
-	// Convert tools
+	// Convert tools. v3 of the SDK switched tools from a single
+	// ChatCompletionToolParam to a tagged union (ChatCompletionToolUnionParam)
+	// with OfFunction / OfCustom variants. We only emit function tools.
 	if len(req.Tools) > 0 {
-		tools := make([]openai.ChatCompletionToolParam, 0, len(req.Tools))
+		tools := make([]openai.ChatCompletionToolUnionParam, 0, len(req.Tools))
 		for _, tool := range req.Tools {
-			toolParam := openai.ChatCompletionToolParam{
-				Type: "function",
-				Function: openai.FunctionDefinitionParam{
-					Name:        tool.Name,
-					Description: openai.String(tool.Description),
-					Parameters:  openai.FunctionParameters(tool.InputSchema),
+			tools = append(tools, openai.ChatCompletionToolUnionParam{
+				OfFunction: &openai.ChatCompletionFunctionToolParam{
+					Function: openai.FunctionDefinitionParam{
+						Name:        tool.Name,
+						Description: openai.String(tool.Description),
+						Parameters:  openai.FunctionParameters(tool.InputSchema),
+					},
 				},
-			}
-			tools = append(tools, toolParam)
+			})
 		}
 		params.Tools = tools
 	}
@@ -472,8 +474,11 @@ func convertUserMessages(msg Message) []openai.ChatCompletionMessageParamUnion {
 
 // convertAssistantMessage converts a mux assistant message to OpenAI format.
 func convertAssistantMessage(msg Message) openai.ChatCompletionMessageParamUnion {
-	// Check for tool use blocks
-	var toolCalls []openai.ChatCompletionMessageToolCallParam
+	// v3 switched tool calls on assistant messages from
+	// ChatCompletionMessageToolCallParam to a tagged union
+	// (ChatCompletionMessageToolCallUnionParam) with OfFunction / OfCustom
+	// variants. We only emit function tool calls.
+	var toolCalls []openai.ChatCompletionMessageToolCallUnionParam
 	var textContent string
 
 	if msg.Content != "" {
@@ -486,12 +491,13 @@ func convertAssistantMessage(msg Message) openai.ChatCompletionMessageParamUnion
 			textContent = block.Text
 		case ContentTypeToolUse:
 			argsJSON, _ := json.Marshal(block.Input)
-			toolCalls = append(toolCalls, openai.ChatCompletionMessageToolCallParam{
-				ID:   block.ID,
-				Type: "function",
-				Function: openai.ChatCompletionMessageToolCallFunctionParam{
-					Name:      block.Name,
-					Arguments: string(argsJSON),
+			toolCalls = append(toolCalls, openai.ChatCompletionMessageToolCallUnionParam{
+				OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
+					ID: block.ID,
+					Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{
+						Name:      block.Name,
+						Arguments: string(argsJSON),
+					},
 				},
 			})
 		}
@@ -594,8 +600,10 @@ func convertOpenAIResponsesResponse(resp *responses.Response) *Response {
 				}
 			}
 		case "function_call":
+			// v3 made item.Arguments a tagged union (OfString / OfResponseToolSearchCallArguments).
+			// For function_call items the arguments are a JSON-encoded string in OfString.
 			var input map[string]any
-			if err := json.Unmarshal([]byte(item.Arguments), &input); err != nil {
+			if err := json.Unmarshal([]byte(item.Arguments.OfString), &input); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to parse tool call arguments for %s: %v\n", item.Name, err)
 				input = make(map[string]any)
 			}
