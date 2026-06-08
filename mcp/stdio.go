@@ -249,9 +249,24 @@ func (c *stdioClient) Close() error {
 	}
 
 	// Kill the process and reap it so it does not linger as a zombie.
+	// Wait runs under its own timeout: SIGKILL is uncatchable on Unix so Wait
+	// normally returns promptly, but a process stuck in uninterruptible sleep
+	// (D state on Linux, or platform-specific edge cases) could otherwise hang
+	// Close indefinitely. After the timeout we give up reaping and move on —
+	// the OS will eventually clean up; better a transient zombie than a
+	// permanently blocked Close.
 	if c.cmd != nil && c.cmd.Process != nil {
 		_ = c.cmd.Process.Kill()
-		_ = c.cmd.Wait()
+		waitDone := make(chan struct{})
+		go func() {
+			_ = c.cmd.Wait()
+			close(waitDone)
+		}()
+		select {
+		case <-waitDone:
+		case <-time.After(5 * time.Second):
+			fmt.Fprintf(os.Stderr, "mcp: warning: cmd.Wait did not return within timeout; process may be unreapable\n")
+		}
 	}
 	return nil
 }
