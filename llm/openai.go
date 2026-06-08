@@ -175,13 +175,29 @@ func convertResponsesInput(messages []Message) responses.ResponseInputParam {
 		if msg.Role == RoleAssistant {
 			role = responses.EasyInputMessageRoleAssistant
 		}
-		if msg.Content != "" {
+
+		// When a message contains image or PDF blocks, collapse its text and
+		// media into a single multipart message item (the only shape the
+		// Responses API accepts for multimodal). Otherwise preserve the
+		// pre-multimodal behavior of emitting each text block as its own item.
+		hasMedia := false
+		for _, block := range msg.Blocks {
+			if block.Type == ContentTypeImage || block.Type == ContentTypePDF {
+				hasMedia = true
+				break
+			}
+		}
+
+		if hasMedia {
+			items = append(items, buildResponsesMultipartMessage(role, msg))
+		} else if msg.Content != "" {
 			items = append(items, responseMessage(role, msg.Content))
 		}
+
 		for _, block := range msg.Blocks {
 			switch block.Type {
 			case ContentTypeText:
-				if block.Text != "" {
+				if !hasMedia && block.Text != "" {
 					items = append(items, responseMessage(role, block.Text))
 				}
 			case ContentTypeToolUse:
@@ -193,6 +209,73 @@ func convertResponsesInput(messages []Message) responses.ResponseInputParam {
 		}
 	}
 	return items
+}
+
+// buildResponsesMultipartMessage emits one EasyInputMessage with list-form
+// content (text + image + file parts) for a message that has at least one
+// image or PDF block. validateRequest has already gated unsupported media.
+func buildResponsesMultipartMessage(role responses.EasyInputMessageRole, msg Message) responses.ResponseInputItemUnionParam {
+	var content responses.ResponseInputMessageContentListParam
+	if msg.Content != "" {
+		content = append(content, responses.ResponseInputContentUnionParam{
+			OfInputText: &responses.ResponseInputTextParam{Text: msg.Content},
+		})
+	}
+	for _, block := range msg.Blocks {
+		switch block.Type {
+		case ContentTypeText:
+			if block.Text != "" {
+				content = append(content, responses.ResponseInputContentUnionParam{
+					OfInputText: &responses.ResponseInputTextParam{Text: block.Text},
+				})
+			}
+		case ContentTypeImage:
+			content = append(content, convertResponsesImage(block))
+		case ContentTypePDF:
+			content = append(content, convertResponsesPDF(block))
+		}
+	}
+	return responses.ResponseInputItemUnionParam{
+		OfMessage: &responses.EasyInputMessageParam{
+			Role: role,
+			Content: responses.EasyInputMessageContentUnionParam{
+				OfInputItemContentList: content,
+			},
+		},
+	}
+}
+
+// convertResponsesImage builds an input_image part for the Responses API.
+// URL-form sources pass the URL through; inline bytes are encoded as a data URL.
+func convertResponsesImage(block ContentBlock) responses.ResponseInputContentUnionParam {
+	img := responses.ResponseInputImageParam{Detail: responses.ResponseInputImageDetailAuto}
+	if block.Source != nil {
+		switch block.Source.Kind {
+		case SourceKindURL:
+			img.ImageURL = openai.String(block.Source.URL)
+		case SourceKindBytes, SourceKindFile:
+			encoded := base64.StdEncoding.EncodeToString(block.Source.Bytes)
+			img.ImageURL = openai.String("data:" + block.MediaType + ";base64," + encoded)
+		}
+	}
+	return responses.ResponseInputContentUnionParam{OfInputImage: &img}
+}
+
+// convertResponsesPDF builds an input_file part for the Responses API.
+// URL form is rejected pre-flight by validateOpenAISources (matching the
+// Chat Completions path), so we only handle inline bytes here.
+func convertResponsesPDF(block ContentBlock) responses.ResponseInputContentUnionParam {
+	f := responses.ResponseInputFileParam{}
+	if block.Source != nil {
+		encoded := base64.StdEncoding.EncodeToString(block.Source.Bytes)
+		filename := "file.pdf"
+		if block.Source.Path != "" {
+			filename = filepath.Base(block.Source.Path)
+		}
+		f.FileData = openai.String(encoded)
+		f.Filename = openai.String(filename)
+	}
+	return responses.ResponseInputContentUnionParam{OfInputFile: &f}
 }
 
 func responseMessage(role responses.EasyInputMessageRole, text string) responses.ResponseInputItemUnionParam {
@@ -642,11 +725,15 @@ func (o *OpenAIClient) CreateMessageStream(ctx context.Context, req *Request) (<
 	return eventChan, nil
 }
 
-// Capabilities reports which media types OpenAI's Chat Completions supports.
-// Audio is provider-level enabled; specific models (gpt-4o-audio-preview class)
-// are required at send time — the API rejects on mismatch.
+// Capabilities reports which media types OpenAI supports across the two
+// transports this client uses: Responses API for CreateMessage, Chat
+// Completions for CreateMessageStream. Image and PDF are supported by both.
+// Audio is only representable in the Chat Completions SDK at the version we
+// pin; the Responses API SDK has no input_audio part yet, so we narrow audio
+// to false at the provider level rather than silently dropping it in the
+// non-streaming path.
 func (o *OpenAIClient) Capabilities() Capabilities {
-	return Capabilities{Image: true, PDF: true, Audio: true, Video: false}
+	return Capabilities{Image: true, PDF: true, Audio: false, Video: false}
 }
 
 // Compile-time interface assertion.

@@ -37,8 +37,14 @@ func TestNewOpenAIClientDefaultModel(t *testing.T) {
 func TestOpenAIClient_Capabilities(t *testing.T) {
 	c := NewOpenAIClient("key", "")
 	caps := c.Capabilities()
-	if !caps.Image || !caps.PDF || !caps.Audio {
-		t.Errorf("expected Image+PDF+Audio true, got %+v", caps)
+	if !caps.Image || !caps.PDF {
+		t.Errorf("expected Image+PDF true, got %+v", caps)
+	}
+	// Audio is narrowed because the Responses API SDK does not yet expose an
+	// input_audio part. validateRequest must reject audio at the boundary
+	// rather than letting the non-streaming path silently drop it.
+	if caps.Audio {
+		t.Errorf("expected Audio false (Responses SDK does not support audio yet), got %+v", caps)
 	}
 	if caps.Video {
 		t.Errorf("expected Video false, got %+v", caps)
@@ -1446,17 +1452,21 @@ func TestOpenAICreateMessage_PDFFromURL_ErrUnsupportedSource(t *testing.T) {
 	}
 }
 
-func TestOpenAICreateMessage_AudioFromURL_ErrUnsupportedSource(t *testing.T) {
+// Audio is narrowed at the capability layer because the Responses API SDK
+// has no input_audio part. The OpenAI client therefore rejects any audio
+// block with ErrUnsupportedMedia from validateRequest before the
+// source-form check (validateOpenAISources) is ever consulted.
+func TestOpenAICreateMessage_AudioRejectedByCapability(t *testing.T) {
 	audio := NewAudioFromURL("https://example.com/a.mp3")
 	c := NewOpenAIClient("fake-key", "")
 	_, err := c.CreateMessage(context.Background(), &Request{
 		Messages: []Message{NewUserMessageWithBlocks(audio)},
 	})
-	var ue *ErrUnsupportedSource
+	var ue *ErrUnsupportedMedia
 	if !errors.As(err, &ue) {
-		t.Fatalf("expected *ErrUnsupportedSource, got %T: %v", err, err)
+		t.Fatalf("expected *ErrUnsupportedMedia, got %T: %v", err, err)
 	}
-	if ue.Media != "audio" || ue.Kind != "url" {
+	if ue.Provider != "openai" || ue.Media != "audio" {
 		t.Errorf("err fields: %+v", ue)
 	}
 }
@@ -1476,17 +1486,19 @@ func TestOpenAICreateMessageStream_PDFFromURL_ErrUnsupportedSource(t *testing.T)
 	}
 }
 
-func TestOpenAICreateMessageStream_AudioFromURL_ErrUnsupportedSource(t *testing.T) {
+// Stream path must reject audio at the same capability layer as the
+// non-streaming path, so the two transports report identical errors.
+func TestOpenAICreateMessageStream_AudioRejectedByCapability(t *testing.T) {
 	audio := NewAudioFromURL("https://example.com/a.mp3")
 	c := NewOpenAIClient("fake-key", "")
 	_, err := c.CreateMessageStream(context.Background(), &Request{
 		Messages: []Message{NewUserMessageWithBlocks(audio)},
 	})
-	var ue *ErrUnsupportedSource
+	var ue *ErrUnsupportedMedia
 	if !errors.As(err, &ue) {
-		t.Fatalf("expected *ErrUnsupportedSource, got %T: %v", err, err)
+		t.Fatalf("expected *ErrUnsupportedMedia, got %T: %v", err, err)
 	}
-	if ue.Media != "audio" || ue.Kind != "url" {
+	if ue.Provider != "openai" || ue.Media != "audio" {
 		t.Errorf("err fields: %+v", ue)
 	}
 }
@@ -1611,7 +1623,12 @@ func TestOpenAIWireFormat_TextPlusImage(t *testing.T) {
 	}
 }
 
-func TestOpenAICreateMessage_RejectsUnsupportedAudioMIME(t *testing.T) {
+// Any audio MIME — supported (mp3, wav) or unsupported (ogg) — is rejected
+// by validateRequest because Capabilities reports Audio=false. The
+// source-form MIME check in validateOpenAISources is unreachable for audio
+// at this provider configuration, but is retained for clarity if Audio is
+// re-enabled when the Responses SDK supports input_audio.
+func TestOpenAICreateMessage_AudioMIMEAlwaysRejected(t *testing.T) {
 	audio, err := NewAudioFromBytes("audio/ogg", []byte{0x4f, 0x67, 0x67, 0x53})
 	if err != nil {
 		t.Fatal(err)
@@ -1620,12 +1637,111 @@ func TestOpenAICreateMessage_RejectsUnsupportedAudioMIME(t *testing.T) {
 	_, err = c.CreateMessage(context.Background(), &Request{
 		Messages: []Message{NewUserMessageWithBlocks(audio)},
 	})
-	var ue *ErrUnsupportedSource
+	var ue *ErrUnsupportedMedia
 	if !errors.As(err, &ue) {
-		t.Fatalf("expected *ErrUnsupportedSource, got %T: %v", err, err)
+		t.Fatalf("expected *ErrUnsupportedMedia, got %T: %v", err, err)
 	}
-	if ue.Media != "audio" || ue.Kind != "audio/ogg" {
+	if ue.Provider != "openai" || ue.Media != "audio" {
 		t.Errorf("err fields: %+v", ue)
+	}
+}
+
+// Wire-format snapshot tests for the Responses API path
+// (convertOpenAIResponsesRequest). These guard the multipart message shape
+// the non-streaming CreateMessage path produces for image and PDF blocks.
+
+func TestOpenAIResponsesWireFormat_ImageBytes(t *testing.T) {
+	img, err := NewImageFromBytes("image/png", []byte{0x89, 'P', 'N', 'G'})
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := convertOpenAIResponsesRequest(&Request{
+		Model:    "gpt-5.2",
+		Messages: []Message{NewUserMessageWithBlocks(img)},
+	})
+	body, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	if v := gjson.GetBytes(body, "input.0.role").String(); v != "user" {
+		t.Errorf("role: got %q want user; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "input.0.content.0.type").String(); v != "input_image" {
+		t.Errorf("type: got %q want input_image; body=%s", v, body)
+	}
+	url := gjson.GetBytes(body, "input.0.content.0.image_url").String()
+	if !strings.HasPrefix(url, "data:image/png;base64,") {
+		t.Errorf("image_url should be data URL; got %q; body=%s", url, body)
+	}
+}
+
+func TestOpenAIResponsesWireFormat_ImageURL(t *testing.T) {
+	img := NewImageFromURL("https://example.com/cat.png")
+	params := convertOpenAIResponsesRequest(&Request{
+		Messages: []Message{NewUserMessageWithBlocks(img)},
+	})
+	body, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	if v := gjson.GetBytes(body, "input.0.content.0.type").String(); v != "input_image" {
+		t.Errorf("type: got %q; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "input.0.content.0.image_url").String(); v != "https://example.com/cat.png" {
+		t.Errorf("image_url: got %q; body=%s", v, body)
+	}
+}
+
+func TestOpenAIResponsesWireFormat_PDFBytes(t *testing.T) {
+	pdf, err := NewPDFFromBytes([]byte("%PDF-1.4"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := convertOpenAIResponsesRequest(&Request{
+		Messages: []Message{NewUserMessageWithBlocks(pdf)},
+	})
+	body, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	if v := gjson.GetBytes(body, "input.0.content.0.type").String(); v != "input_file" {
+		t.Errorf("type: got %q want input_file; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "input.0.content.0.filename").String(); v != "file.pdf" {
+		t.Errorf("filename: got %q want file.pdf; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "input.0.content.0.file_data").String(); v == "" {
+		t.Errorf("file_data should be non-empty base64; body=%s", body)
+	}
+}
+
+func TestOpenAIResponsesWireFormat_TextPlusImageMultipart(t *testing.T) {
+	img, err := NewImageFromBytes("image/jpeg", []byte{0xff, 0xd8, 0xff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := convertOpenAIResponsesRequest(&Request{
+		Messages: []Message{NewUserMessageWithBlocks(
+			ContentBlock{Type: ContentTypeText, Text: "describe this"},
+			img,
+		)},
+	})
+	body, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	if v := gjson.GetBytes(body, "input.0.content.0.type").String(); v != "input_text" {
+		t.Errorf("first part type: got %q want input_text; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "input.0.content.0.text").String(); v != "describe this" {
+		t.Errorf("first part text: got %q; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "input.0.content.1.type").String(); v != "input_image" {
+		t.Errorf("second part type: got %q want input_image; body=%s", v, body)
 	}
 }
 
