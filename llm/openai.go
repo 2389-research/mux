@@ -728,10 +728,10 @@ func (o *OpenAIClient) CreateMessageStream(ctx context.Context, req *Request) (<
 // Capabilities reports which media types OpenAI supports across the two
 // transports this client uses: Responses API for CreateMessage, Chat
 // Completions for CreateMessageStream. Image and PDF are supported by both.
-// Audio is only representable in the Chat Completions SDK at the version we
-// pin; the Responses API SDK has no input_audio part yet, so we narrow audio
-// to false at the provider level rather than silently dropping it in the
-// non-streaming path.
+// Audio is reported as false because OpenAI's Responses API does not accept
+// audio input at the API level — only Chat Completions does. Narrowing here
+// keeps the non-streaming path from silently dropping audio. Restoration is
+// gated on OpenAI extending the Responses API itself, not on an SDK update.
 func (o *OpenAIClient) Capabilities() Capabilities {
 	return Capabilities{Image: true, PDF: true, Audio: false, Video: false}
 }
