@@ -411,6 +411,11 @@ func TestValidateRequest_RejectsMalformedSourceVariants(t *testing.T) {
 			block:  ContentBlock{Type: ContentTypeAudio, Source: &MediaSource{Kind: SourceKind("weird")}},
 			reason: "unknown Source.Kind",
 		},
+		{
+			name:   "video empty bytes",
+			block:  ContentBlock{Type: ContentTypeVideo, Source: &MediaSource{Kind: SourceKindBytes, Bytes: nil}},
+			reason: "empty data",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -443,5 +448,96 @@ func TestNewImageFromFile_RejectsZeroByteFile(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "empty") {
 		t.Errorf("expected 'empty' error, got %v", err)
+	}
+}
+
+func TestValidateMediaFamily_VideoPrefixMatches(t *testing.T) {
+	if err := validateMediaFamily("video", "video/mp4"); err != nil {
+		t.Errorf("video/mp4 should pass: %v", err)
+	}
+	if err := validateMediaFamily("video", "image/png"); err == nil {
+		t.Error("image/png should fail video family")
+	}
+}
+
+func TestValidateRequest_RejectsVideoWhenCapabilityFalse(t *testing.T) {
+	caps := Capabilities{Image: true, PDF: true, Audio: true, Video: false}
+	req := &Request{
+		Messages: []Message{
+			{Role: RoleUser, Blocks: []ContentBlock{{
+				Type:      ContentTypeVideo,
+				MediaType: "video/mp4",
+				Source:    &MediaSource{Kind: SourceKindBytes, Bytes: []byte{0, 1, 2}},
+			}}},
+		},
+	}
+	err := validateRequest("test", caps, req)
+	var unsup *ErrUnsupportedMedia
+	if !errors.As(err, &unsup) {
+		t.Fatalf("expected *ErrUnsupportedMedia, got %T: %v", err, err)
+	}
+	if unsup.Media != "video" {
+		t.Errorf("Media: %q want video", unsup.Media)
+	}
+}
+
+func TestNewVideoFromURL(t *testing.T) {
+	b := NewVideoFromURL("https://example.com/v.mp4")
+	if b.Type != ContentTypeVideo || b.Source.Kind != SourceKindURL {
+		t.Errorf("block: %+v", b)
+	}
+	if b.MediaType != "" {
+		t.Errorf("URL form should not set MediaType, got %q", b.MediaType)
+	}
+}
+
+func TestNewVideoFromBytes_OK(t *testing.T) {
+	b, err := NewVideoFromBytes("video/mp4", []byte{0x00, 0x00, 0x00, 0x18})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.MediaType != "video/mp4" {
+		t.Errorf("MediaType: %q", b.MediaType)
+	}
+}
+
+func TestNewVideoFromBytes_RejectsNonVideo(t *testing.T) {
+	_, err := NewVideoFromBytes("image/png", []byte{0x01})
+	if err == nil {
+		t.Fatal("expected error for non-video media type")
+	}
+	if !strings.Contains(err.Error(), "video/") {
+		t.Errorf("error should mention video/, got %q", err.Error())
+	}
+}
+
+func TestNewVideoFromBytes_RejectsEmpty(t *testing.T) {
+	if _, err := NewVideoFromBytes("video/mp4", nil); err == nil {
+		t.Fatal("expected error for empty bytes")
+	}
+}
+
+func TestNewVideoFromFile_OK(t *testing.T) {
+	b, err := NewVideoFromFile(filepath.Join("testdata", "tiny.mp4"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(b.MediaType, "video/") {
+		t.Errorf("MediaType: %q", b.MediaType)
+	}
+	if b.Source.Path != "tiny.mp4" {
+		t.Errorf("Path should be basename, got %q", b.Source.Path)
+	}
+}
+
+func TestNewVideoFromFile_WrongExtension(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "foo.png")
+	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	_, err := NewVideoFromFile(p)
+	if err == nil {
+		t.Fatal("expected error for non-video extension")
 	}
 }
