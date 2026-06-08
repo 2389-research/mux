@@ -8,7 +8,8 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.19.0
 	github.com/joho/godotenv v1.5.1
 	github.com/openai/openai-go v1.12.0
-	google.golang.org/genai v1.40.0
+	github.com/tidwall/gjson v1.18.0
+	google.golang.org/genai v1.54.0
 )
 
 require (
@@ -20,7 +21,6 @@ require (
 	github.com/google/s2a-go v0.1.8 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.4 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
-	github.com/tidwall/gjson v1.18.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect

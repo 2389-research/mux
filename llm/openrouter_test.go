@@ -796,5 +796,20 @@ func TestOpenRouterConstants(t *testing.T) {
 	}
 }
 
+func TestOpenRouterCreateMessage_RejectsImageMedia(t *testing.T) {
+	c := NewOpenRouterClient("fake-key", "")
+	img := NewImageFromURL("https://example.com/x.png")
+	_, err := c.CreateMessage(context.Background(), &Request{
+		Messages: []Message{NewUserMessageWithBlocks(img)},
+	})
+	var unsup *ErrUnsupportedMedia
+	if !errors.As(err, &unsup) {
+		t.Fatalf("expected *ErrUnsupportedMedia, got %T: %v", err, err)
+	}
+	if unsup.Provider != "openrouter" || unsup.Media != "image" {
+		t.Errorf("err fields: %+v", unsup)
+	}
+}
+
 // Compile-time interface check
 var _ Client = (*OpenRouterClient)(nil)

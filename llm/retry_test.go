@@ -41,6 +41,8 @@ func (f *failClient) CreateMessageStream(ctx context.Context, req *Request) (<-c
 	return ch, nil
 }
 
+func (f *failClient) Capabilities() Capabilities { return FullCapabilities() }
+
 func fastRetryConfig() *RetryConfig {
 	return &RetryConfig{
 		MaxRetries:   3,

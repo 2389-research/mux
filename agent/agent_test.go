@@ -27,6 +27,8 @@ func (m *mockClient) CreateMessageStream(ctx context.Context, req *llm.Request) 
 	return nil, nil
 }
 
+func (m *mockClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
+
 // mockTool implements tool.Tool for testing
 type mockTool struct {
 	name             string
@@ -1222,6 +1224,8 @@ func (c *capturingClient) CreateMessage(ctx context.Context, req *llm.Request) (
 func (c *capturingClient) CreateMessageStream(ctx context.Context, req *llm.Request) (<-chan llm.StreamEvent, error) {
 	return nil, nil
 }
+
+func (c *capturingClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
 
 func TestAgentThinkingSettingsPassthrough(t *testing.T) {
 	registry := tool.NewRegistry()
