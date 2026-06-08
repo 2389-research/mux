@@ -203,10 +203,11 @@ func (o *OpenRouterClient) CreateMessageStream(ctx context.Context, req *Request
 }
 
 // Capabilities reports which media types OpenRouter supports as input.
-// OpenRouter routes to many upstream providers; we mirror OpenAI's matrix
-// at the provider level (image + PDF + audio) and let upstream models 400
-// on model-level mismatches per the design doc's "provider-level static +
-// provider 400 fall-through" decision. Video is rejected because no major
+// OpenRouter uses the Chat Completions wire format, which carries image,
+// PDF, and audio parts natively, so all three are enabled at the provider
+// level. Per the design doc's "provider-level static + provider 400
+// fall-through" decision, model-level mismatches surface as upstream 400s
+// rather than being preflighted here. Video is rejected because no major
 // OpenRouter route currently accepts video on the chat endpoint.
 func (o *OpenRouterClient) Capabilities() Capabilities {
 	return Capabilities{Image: true, PDF: true, Audio: true}
