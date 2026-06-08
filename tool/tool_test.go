@@ -499,7 +499,8 @@ func TestHookExecutionOrder(t *testing.T) {
 	}
 }
 
-// TestHookErrorHandling tests that hook errors don't stop execution
+// TestHookErrorHandling tests that a panicking before hook is recovered and
+// does not prevent subsequent hooks or the tool itself from executing.
 func TestHookErrorHandling(t *testing.T) {
 	reg := tool.NewRegistry()
 
@@ -515,42 +516,41 @@ func TestHookErrorHandling(t *testing.T) {
 
 	exec := tool.NewExecutor(reg)
 
-	beforeHooksCalled := 0
-	afterHooksCalled := 0
+	secondBeforeRan := false
+	afterRan := false
 
-	// Add before hook that panics
+	// A before hook that panics. The executor recovers each hook individually,
+	// so the panic must neither crash execution nor stop later hooks from running.
 	exec.AddBeforeHook(func(ctx context.Context, toolName string, params map[string]any) {
-		beforeHooksCalled++
-		// Note: Current implementation doesn't catch panics
-		// This test documents the behavior
+		panic("before hook boom")
 	})
 
-	// Add normal before hook
+	// A subsequent before hook must still run after the panicking one.
 	exec.AddBeforeHook(func(ctx context.Context, toolName string, params map[string]any) {
-		beforeHooksCalled++
+		secondBeforeRan = true
 	})
 
-	// Add after hook
+	// The after hook must still run after a before hook panicked.
 	exec.AddAfterHook(func(ctx context.Context, toolName string, params map[string]any, result *tool.Result, err error) {
-		afterHooksCalled++
+		afterRan = true
 	})
 
 	result, err := exec.Execute(context.Background(), "resilient_tool", nil)
 
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("unexpected error after a panicking before hook: %v", err)
 	}
 	if !executeCalled {
-		t.Error("expected tool execution to be called")
+		t.Error("tool was not executed despite the before-hook panic being recovered")
 	}
-	if !result.Success {
-		t.Error("expected successful result")
+	if result == nil || !result.Success {
+		t.Error("expected a successful result despite the before-hook panic")
 	}
-	if beforeHooksCalled != 2 {
-		t.Errorf("expected 2 before hooks called, got %d", beforeHooksCalled)
+	if !secondBeforeRan {
+		t.Error("subsequent before hook did not run after the panicking hook")
 	}
-	if afterHooksCalled != 1 {
-		t.Errorf("expected 1 after hook called, got %d", afterHooksCalled)
+	if !afterRan {
+		t.Error("after hook did not run after a before hook panicked")
 	}
 }
 
@@ -1048,6 +1048,29 @@ func TestConcurrentRegistrationAndExecution(t *testing.T) {
 	// At least some executions should have succeeded
 	if successCount == 0 {
 		t.Error("expected at least some executions to succeed")
+	}
+}
+
+func TestExecutorAfterHookPanicDoesNotCrash(t *testing.T) {
+	reg := tool.NewRegistry()
+	mock := &mockTool{name: "hook_test"}
+	reg.Register(mock)
+
+	exec := tool.NewExecutor(reg)
+
+	// A panicking after hook must not crash tool execution. The executor
+	// recovers (mirroring before-hook behavior), so Execute returns the
+	// tool's result and the panic does not propagate to the caller.
+	exec.AddAfterHook(func(ctx context.Context, toolName string, params map[string]any, result *tool.Result, err error) {
+		panic("after hook boom")
+	})
+
+	result, err := exec.Execute(context.Background(), "hook_test", nil)
+	if err != nil {
+		t.Fatalf("Execute returned unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result despite panicking after hook")
 	}
 }
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -1875,6 +1877,132 @@ func TestClientConcurrentMixedCalls(t *testing.T) {
 	}
 }
 
+func TestStdioInitializeFailureCleansUp(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:      "noinit",
+		Transport: "stdio",
+		Command:   "sh",
+		Args:      []string{"-c", "cat >/dev/null"},
+	}
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	err = client.Start(ctx)
+	if err == nil {
+		client.Close()
+		t.Fatal("expected initialize to fail (server never responds)")
+	}
+	// A second Close must be safe and prompt even though Start failed.
+	done := make(chan error, 1)
+	go func() { done <- client.Close() }()
+	select {
+	case <-done:
+	case <-time.After(7 * time.Second):
+		t.Fatal("Close after failed Start hung; cleanup did not run")
+	}
+}
+
+func TestStdioInitializeFailureReapsResources(t *testing.T) {
+	// A server that rejects initialize with a JSON-RPC error while staying alive
+	// exercises the leak path that ctx-cancellation masks: initialize fails
+	// promptly (no ctx timeout), so without teardown the reader goroutine stays
+	// blocked on Scan() forever and the child process is never reaped.
+	config := mcp.ServerConfig{
+		Name:      "initfail",
+		Transport: "stdio",
+		Command:   "node",
+		Args:      []string{"testdata/init_fail_server.js"},
+	}
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	before := runtime.NumGoroutine()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err = client.Start(ctx)
+	if err == nil {
+		client.Close()
+		t.Fatal("expected initialize to fail (server rejects it)")
+	}
+	// Clean up at test end regardless, so a leak never pollutes later tests.
+	defer client.Close()
+
+	// With the fix, Start tears down the reader goroutine and reaps the child
+	// before returning, so the goroutine count settles back to baseline. Without
+	// it, the reader goroutine is blocked on Scan() forever and never returns.
+	// Do NOT call Close before this poll — that would mask the leak.
+	deadline := time.Now().Add(5 * time.Second)
+	for runtime.NumGoroutine() > before && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := runtime.NumGoroutine(); n > before {
+		t.Fatalf("reader goroutine leaked after failed Start: baseline=%d now=%d", before, n)
+	}
+}
+
+func TestStdioCloseReapsProcess(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:      "reap",
+		Transport: "stdio",
+		Command:   "node",
+		Args:      []string{"testdata/mock_server.js"},
+	}
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := client.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- client.Close() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(7 * time.Second):
+		t.Fatal("Close did not return; Wait may be blocking")
+	}
+}
+
+func TestStdioLargeToolResult(t *testing.T) {
+	config := mcp.ServerConfig{
+		Name:      "big",
+		Transport: "stdio",
+		Command:   "node",
+		Args:      []string{"testdata/mock_server.js"},
+	}
+	client, err := mcp.NewClient(config)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := client.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer client.Close()
+
+	result, err := client.CallTool(ctx, "big_tool", map[string]any{})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if len(result.Content) == 0 || len(result.Content[0].Text) < 100000 {
+		t.Fatalf("expected large payload, got %d content blocks", len(result.Content))
+	}
+}
+
 func TestNotificationType(t *testing.T) {
 	jsonData := `{"method":"tools/changed","params":{"reason":"update"}}`
 	var notif mcp.Notification
@@ -2017,4 +2145,31 @@ func TestClientNotificationsReturnsNilForStdio(t *testing.T) {
 	if client.Notifications() != nil {
 		t.Error("expected nil notifications channel for stdio transport")
 	}
+}
+
+func TestToolManagerConcurrentRefresh(t *testing.T) {
+	provider := &stubProvider{tools: []mcp.ToolInfo{
+		{Name: "a"}, {Name: "b"}, {Name: "c"},
+	}}
+	m := mcp.NewToolManager(provider)
+	if err := m.Refresh(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(2)
+		go func() { defer wg.Done(); _ = m.Refresh(context.Background()) }()
+		go func() { defer wg.Done(); _ = m.Tools(); _, _ = m.Get("a") }()
+	}
+	wg.Wait()
+}
+
+type stubProvider struct{ tools []mcp.ToolInfo }
+
+func (s *stubProvider) ListTools(ctx context.Context) ([]mcp.ToolInfo, error) {
+	return s.tools, nil
+}
+func (s *stubProvider) CallTool(ctx context.Context, name string, args map[string]any) (*mcp.ToolCallResult, error) {
+	return &mcp.ToolCallResult{}, nil
 }

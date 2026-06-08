@@ -28,7 +28,9 @@ type httpClient struct {
 	sessionID     string
 	notifications chan Notification
 
-	closeOnce sync.Once
+	closeOnce    sync.Once
+	notifyMu     sync.Mutex // guards notifyClosed and the send to notifications
+	notifyClosed bool       // set true under notifyMu before close(notifications)
 }
 
 // newHTTPClient creates a new HTTP transport client.
@@ -144,10 +146,14 @@ func (c *httpClient) post(ctx context.Context, method string, params any) (*Resp
 				// First try to parse as a notification (has Method, no ID in JSON-RPC)
 				var notif Notification
 				if err := json.Unmarshal([]byte(event.Data), &notif); err == nil && notif.Method != "" {
-					select {
-					case c.notifications <- notif:
-					default:
+					c.notifyMu.Lock()
+					if !c.notifyClosed {
+						select {
+						case c.notifications <- notif:
+						default:
+						}
 					}
+					c.notifyMu.Unlock()
 					continue
 				}
 
@@ -271,7 +277,10 @@ func (c *httpClient) Close() error {
 		c.mu.Lock()
 		c.running = false
 		c.mu.Unlock()
+		c.notifyMu.Lock()
+		c.notifyClosed = true
 		close(c.notifications)
+		c.notifyMu.Unlock()
 	})
 	return nil
 }

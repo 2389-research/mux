@@ -1,5 +1,8 @@
 // ABOUTME: Implements the permission checker - evaluates rules and modes
 // ABOUTME: to determine if tool execution should be allowed.
+
+// Package permission evaluates allow/deny rules and permission modes to
+// control which tools an agent is permitted to execute.
 package permission
 
 import "context"

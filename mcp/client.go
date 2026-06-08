@@ -1,5 +1,8 @@
 // ABOUTME: Defines the Client interface for MCP server communication.
 // ABOUTME: Factory function creates appropriate transport implementation.
+
+// Package mcp implements Model Context Protocol clients with stdio and HTTP/SSE
+// transports, and adapts MCP tools into the mux tool registry.
 package mcp
 
 import (

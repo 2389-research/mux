@@ -6,12 +6,18 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"sync"
 	"time"
+)
+
+var (
+	errClientRunning = errors.New("client already running")
+	errClientClosed  = errors.New("client closed")
 )
 
 // stdioClient communicates with an MCP server over stdin/stdout.
@@ -48,7 +54,7 @@ func (c *stdioClient) Start(ctx context.Context) error {
 	c.mu.Lock()
 	if c.running {
 		c.mu.Unlock()
-		return fmt.Errorf("client already running")
+		return errClientRunning
 	}
 
 	// MCP servers are configured by the user, command execution is intentional
@@ -78,11 +84,21 @@ func (c *stdioClient) Start(ctx context.Context) error {
 	}
 
 	c.scanner = bufio.NewScanner(c.stdout)
+	// MCP tool results routinely exceed bufio.Scanner's 64KB default; raise the
+	// per-line ceiling so large responses are not silently truncated.
+	const maxResponseBytes = 16 * 1024 * 1024
+	c.scanner.Buffer(make([]byte, 0, 64*1024), maxResponseBytes)
 	c.running = true
 	c.mu.Unlock()
 
 	go c.readResponses()
-	return c.initialize(ctx)
+	if err := c.initialize(ctx); err != nil {
+		// initialize failed - tear down the goroutine and child process so we
+		// do not leak them; the caller only sees the error.
+		_ = c.Close()
+		return err
+	}
+	return nil
 }
 
 func (c *stdioClient) initialize(ctx context.Context) error {
@@ -152,7 +168,7 @@ func (c *stdioClient) call(ctx context.Context, method string, params any) (*Res
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-c.closeChan:
-		return nil, fmt.Errorf("client closed")
+		return nil, errClientClosed
 	}
 }
 
@@ -169,7 +185,7 @@ func (c *stdioClient) send(req *Request) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.running {
-		return fmt.Errorf("client closed")
+		return errClientClosed
 	}
 	_, err = c.stdin.Write(append(data, '\n'))
 	return err
@@ -179,7 +195,10 @@ func (c *stdioClient) readResponses() {
 	defer close(c.done)
 	for {
 		if !c.scanner.Scan() {
-			// Scanner stopped - either EOF, error, or closed
+			// Scanner stopped - distinguish real error from EOF/close.
+			if err := c.scanner.Err(); err != nil {
+				fmt.Fprintf(os.Stderr, "mcp: stdio read error: %v\n", err)
+			}
 			return
 		}
 		line := c.scanner.Bytes()
@@ -188,7 +207,7 @@ func (c *stdioClient) readResponses() {
 		}
 		var resp Response
 		if err := json.Unmarshal(line, &resp); err != nil {
-			fmt.Printf("mcp: failed to unmarshal response: %v (line: %s)\n", err, string(line))
+			fmt.Fprintf(os.Stderr, "mcp: failed to unmarshal response: %v (line: %s)\n", err, string(line))
 			continue
 		}
 		c.mu.Lock()
@@ -229,9 +248,10 @@ func (c *stdioClient) Close() error {
 		fmt.Fprintf(os.Stderr, "mcp: warning: readResponses goroutine did not exit within timeout\n")
 	}
 
-	// Kill process
+	// Kill the process and reap it so it does not linger as a zombie.
 	if c.cmd != nil && c.cmd.Process != nil {
-		c.cmd.Process.Kill()
+		_ = c.cmd.Process.Kill()
+		_ = c.cmd.Wait()
 	}
 	return nil
 }

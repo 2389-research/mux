@@ -1652,6 +1652,85 @@ func TestThinkingNilSettings(t *testing.T) {
 	}
 }
 
+// TestOrchestratorLockContract pins the orchestrator's locking contract so a
+// future lock rework cannot silently change it: SetMessages/Messages round-trip,
+// Run replaces history, Continue appends, and concurrent Run calls on a single
+// instance are serialized by the lock (no data race under -race).
+func TestOrchestratorLockContract(t *testing.T) {
+	registry := tool.NewRegistry()
+	executor := tool.NewExecutor(registry)
+
+	// A mockLLMClient with no canned responses is stateless: it always returns a
+	// terminal "done" response, so each Run/Continue settles in one iteration.
+	orch := orchestrator.New(&mockLLMClient{}, executor)
+
+	// 1. SetMessages -> Messages round-trips.
+	seed := []llm.Message{
+		llm.NewUserMessage("seed-1"),
+		llm.NewUserMessage("seed-2"),
+	}
+	orch.SetMessages(seed)
+	got := orch.Messages()
+	if len(got) != 2 || got[0].Content != "seed-1" || got[1].Content != "seed-2" {
+		t.Fatalf("SetMessages/Messages round-trip failed: %+v", got)
+	}
+
+	// 2. Run replaces history with a fresh prompt.
+	if err := orch.Run(context.Background(), "fresh-run"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	afterRun := orch.Messages()
+	if len(afterRun) == 0 || afterRun[0].Role != llm.RoleUser || afterRun[0].Content != "fresh-run" {
+		t.Fatalf("Run did not start fresh with the new prompt: %+v", afterRun)
+	}
+	for _, m := range afterRun {
+		if m.Content == "seed-1" || m.Content == "seed-2" {
+			t.Fatalf("Run did not replace prior history; a seed message survived: %+v", afterRun)
+		}
+	}
+
+	// 3. Continue appends to existing history.
+	beforeLen := len(orch.Messages())
+	if err := orch.Continue(context.Background(), "continued"); err != nil {
+		t.Fatalf("Continue: %v", err)
+	}
+	afterContinue := orch.Messages()
+	if len(afterContinue) <= beforeLen {
+		t.Fatalf("Continue did not append: before=%d after=%d", beforeLen, len(afterContinue))
+	}
+	foundContinued := false
+	for _, m := range afterContinue {
+		if m.Role == llm.RoleUser && m.Content == "continued" {
+			foundContinued = true
+		}
+	}
+	if !foundContinued {
+		t.Fatalf("Continue did not append the new user prompt: %+v", afterContinue)
+	}
+
+	// 4. Concurrent Run on the SAME instance is serialized by the lock: no data
+	// race under -race, and the final history is a valid single-run result.
+	creg := tool.NewRegistry()
+	cexec := tool.NewExecutor(creg)
+	concurrent := orchestrator.New(&mockLLMClient{}, cexec)
+	const goroutines = 16
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func(id int) {
+			defer wg.Done()
+			if err := concurrent.Run(context.Background(), fmt.Sprintf("run-%d", id)); err != nil {
+				t.Errorf("concurrent Run %d: %v", id, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	final := concurrent.Messages()
+	if len(final) == 0 || final[0].Role != llm.RoleUser {
+		t.Fatalf("concurrent runs left inconsistent history (lock not serializing?): %+v", final)
+	}
+}
+
 func TestThinkingAdaptiveFullCycle(t *testing.T) {
 	// Scenario:
 	// Call 0: first call → thinking ON (iteration 0)

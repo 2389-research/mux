@@ -205,12 +205,18 @@ func LoadJSONL(r io.Reader) (*Transcript, error) {
 }
 
 // SaveToFile writes the transcript to a file (JSON format).
-func (t *Transcript) SaveToFile(path string) error {
+func (t *Transcript) SaveToFile(path string) (err error) {
 	f, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("create file: %w", err)
 	}
-	defer f.Close()
+	// Capture a close error so a failed flush on networked or buffered
+	// filesystems surfaces instead of silently losing the trailing write.
+	defer func() {
+		if cerr := f.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("close file: %w", cerr)
+		}
+	}()
 
 	return t.SaveJSON(f)
 }
@@ -227,12 +233,18 @@ func LoadFromFile(path string) (*Transcript, error) {
 }
 
 // SaveToFileJSONL writes the transcript to a file (JSONL format).
-func (t *Transcript) SaveToFileJSONL(path string) error {
+func (t *Transcript) SaveToFileJSONL(path string) (err error) {
 	f, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("create file: %w", err)
 	}
-	defer f.Close()
+	// Capture a close error so a failed flush on networked or buffered
+	// filesystems surfaces instead of silently losing the trailing write.
+	defer func() {
+		if cerr := f.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("close file: %w", cerr)
+		}
+	}()
 
 	return t.SaveJSONL(f)
 }

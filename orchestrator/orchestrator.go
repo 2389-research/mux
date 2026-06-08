@@ -1,5 +1,8 @@
 // ABOUTME: Implements the core Orchestrator - the agentic think-act loop that
 // ABOUTME: coordinates LLM responses, tool execution, and event streaming.
+
+// Package orchestrator implements the agentic think-act loop that drives LLM
+// inference, tool execution, context compaction, and event streaming.
 package orchestrator
 
 import (
@@ -150,6 +153,11 @@ func (o *Orchestrator) ResetUsage() {
 }
 
 // Messages returns a copy of the current conversation history.
+//
+// Messages acquires the orchestrator lock, which Run and Continue hold for the
+// entire think-act loop. It must not be called from within a hook or tool that
+// runs during a Run or Continue: it would deadlock waiting for that loop to
+// finish. Observers should snapshot history before or after a run, not during.
 func (o *Orchestrator) Messages() []llm.Message {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -160,6 +168,10 @@ func (o *Orchestrator) Messages() []llm.Message {
 
 // SetMessages sets the conversation history.
 // Use this to restore conversation state from persistence.
+//
+// Like Messages, SetMessages acquires the orchestrator lock that Run and
+// Continue hold for the duration of the loop, so it must not be called from a
+// hook or tool running inside that loop.
 func (o *Orchestrator) SetMessages(messages []llm.Message) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -168,6 +180,10 @@ func (o *Orchestrator) SetMessages(messages []llm.Message) {
 }
 
 // ClearMessages resets the conversation history.
+//
+// Like Messages, ClearMessages acquires the orchestrator lock that Run and
+// Continue hold for the duration of the loop, so it must not be called from a
+// hook or tool running inside that loop.
 func (o *Orchestrator) ClearMessages() {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -178,6 +194,11 @@ func (o *Orchestrator) ClearMessages() {
 // Each call starts fresh with only the new prompt (no conversation history).
 // Use Continue() for multi-turn conversations that preserve history.
 // The orchestrator is not safe for concurrent Run() calls on the same instance.
+//
+// Run holds the orchestrator lock for the entire loop, including LLM calls,
+// tool execution, hooks, and compaction. The history accessors (Messages,
+// SetMessages, ClearMessages) block until Run returns, so they must not be
+// called from a hook or tool running inside the loop.
 func (o *Orchestrator) Run(ctx context.Context, prompt string) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -195,6 +216,10 @@ func (o *Orchestrator) Run(ctx context.Context, prompt string) error {
 // Use this for multi-turn conversations where the agent should remember previous exchanges.
 // Use SetMessages() to restore history from persistence before calling Continue().
 // The orchestrator is not safe for concurrent calls on the same instance.
+//
+// Like Run, Continue holds the orchestrator lock for the entire loop. The
+// history accessors block until it returns and must not be called from a hook
+// or tool running inside the loop.
 func (o *Orchestrator) Continue(ctx context.Context, prompt string) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()

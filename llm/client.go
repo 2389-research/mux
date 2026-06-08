@@ -1,5 +1,9 @@
 // ABOUTME: Defines the Client interface - the abstraction layer that allows
 // ABOUTME: mux to work with any LLM provider (Anthropic, OpenAI, etc.)
+
+// Package llm defines the provider-agnostic Client interface and shared types
+// for LLM communication, with concrete implementations for Anthropic, OpenAI,
+// Gemini, Ollama, and OpenRouter.
 package llm
 
 import "context"

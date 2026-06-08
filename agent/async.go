@@ -4,6 +4,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -45,6 +46,7 @@ type RunHandle struct {
 	done      chan struct{}
 	startTime time.Time
 	endTime   time.Time
+	cancel    context.CancelFunc
 	mu        sync.RWMutex
 }
 
@@ -110,13 +112,16 @@ func (h *RunHandle) Agent() *Agent {
 	return h.agent
 }
 
-// Cancel attempts to cancel the running agent via context cancellation.
-// This requires the original context to have been cancellable.
-// Returns true if the agent was still running when cancel was called.
+// Cancel cancels the running agent via context cancellation.
+// Returns true if the agent was still pending or running when Cancel was
+// called, or false if it had already finished.
 func (h *RunHandle) Cancel() bool {
 	status := h.Status()
 	if status == RunStatusPending || status == RunStatusRunning {
 		atomic.CompareAndSwapInt32(&h.status, int32(status), int32(RunStatusCancelled))
+		if h.cancel != nil {
+			h.cancel()
+		}
 		return true
 	}
 	return false
@@ -130,7 +135,7 @@ func (h *RunHandle) setComplete(err error) {
 	h.mu.Unlock()
 
 	if err != nil {
-		if err == context.Canceled {
+		if errors.Is(err, context.Canceled) {
 			atomic.StoreInt32(&h.status, int32(RunStatusCancelled))
 		} else {
 			atomic.StoreInt32(&h.status, int32(RunStatusFailed))
@@ -144,15 +149,24 @@ func (h *RunHandle) setComplete(err error) {
 // RunAsync executes the agent in the background and returns immediately.
 // The returned RunHandle can be used to check status, wait for completion, or cancel.
 func (a *Agent) RunAsync(ctx context.Context, prompt string) *RunHandle {
+	ctx, cancel := context.WithCancel(ctx)
 	handle := &RunHandle{
 		agent:     a,
 		status:    int32(RunStatusPending),
 		done:      make(chan struct{}),
 		startTime: time.Now(),
+		cancel:    cancel,
 	}
 
 	go func() {
-		atomic.StoreInt32(&handle.status, int32(RunStatusRunning))
+		defer cancel() // release context resources when the run finishes
+		// CAS Pending -> Running. If this fails, Cancel() already ran and
+		// flipped the status to Cancelled before the goroutine started;
+		// short-circuit instead of entering Run with an already-cancelled context.
+		if !atomic.CompareAndSwapInt32(&handle.status, int32(RunStatusPending), int32(RunStatusRunning)) {
+			handle.setComplete(context.Canceled)
+			return
+		}
 		err := a.Run(ctx, prompt)
 		handle.setComplete(err)
 	}()
@@ -163,15 +177,21 @@ func (a *Agent) RunAsync(ctx context.Context, prompt string) *RunHandle {
 // ContinueAsync continues the agent in the background and returns immediately.
 // Similar to RunAsync but uses Continue() which preserves conversation history.
 func (a *Agent) ContinueAsync(ctx context.Context, prompt string) *RunHandle {
+	ctx, cancel := context.WithCancel(ctx)
 	handle := &RunHandle{
 		agent:     a,
 		status:    int32(RunStatusPending),
 		done:      make(chan struct{}),
 		startTime: time.Now(),
+		cancel:    cancel,
 	}
 
 	go func() {
-		atomic.StoreInt32(&handle.status, int32(RunStatusRunning))
+		defer cancel() // release context resources when the run finishes
+		if !atomic.CompareAndSwapInt32(&handle.status, int32(RunStatusPending), int32(RunStatusRunning)) {
+			handle.setComplete(context.Canceled)
+			return
+		}
 		err := a.Continue(ctx, prompt)
 		handle.setComplete(err)
 	}()
@@ -182,15 +202,21 @@ func (a *Agent) ContinueAsync(ctx context.Context, prompt string) *RunHandle {
 // RunChildAsync runs a child agent in the background, firing SubagentStop when complete.
 // Combines SpawnChild semantics with async execution.
 func (a *Agent) RunChildAsync(ctx context.Context, child *Agent, prompt string) *RunHandle {
+	ctx, cancel := context.WithCancel(ctx)
 	handle := &RunHandle{
 		agent:     child,
 		status:    int32(RunStatusPending),
 		done:      make(chan struct{}),
 		startTime: time.Now(),
+		cancel:    cancel,
 	}
 
 	go func() {
-		atomic.StoreInt32(&handle.status, int32(RunStatusRunning))
+		defer cancel() // release context resources when the run finishes
+		if !atomic.CompareAndSwapInt32(&handle.status, int32(RunStatusPending), int32(RunStatusRunning)) {
+			handle.setComplete(context.Canceled)
+			return
+		}
 		err := a.RunChild(ctx, child, prompt)
 		handle.setComplete(err)
 	}()
