@@ -85,8 +85,13 @@ func (c *stdioClient) Start(ctx context.Context) error {
 
 	c.scanner = bufio.NewScanner(c.stdout)
 	// MCP tool results routinely exceed bufio.Scanner's 64KB default; raise the
-	// per-line ceiling so large responses are not silently truncated.
-	const maxResponseBytes = 16 * 1024 * 1024
+	// per-line ceiling so large responses are not silently truncated. The
+	// ceiling is configurable via ServerConfig.MaxResponseBytes; zero falls
+	// back to DefaultMaxResponseBytes (16 MiB).
+	maxResponseBytes := c.config.MaxResponseBytes
+	if maxResponseBytes <= 0 {
+		maxResponseBytes = DefaultMaxResponseBytes
+	}
 	c.scanner.Buffer(make([]byte, 0, 64*1024), maxResponseBytes)
 	c.running = true
 	c.mu.Unlock()

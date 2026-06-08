@@ -95,7 +95,20 @@ type ServerConfig struct {
 	// HTTP transport fields
 	URL     string            `json:"url,omitempty"`
 	Headers map[string]string `json:"headers,omitempty"`
+
+	// MaxResponseBytes overrides the per-line scanner ceiling used by the
+	// stdio transport. Zero means use the default (DefaultMaxResponseBytes,
+	// 16 MiB). Servers that emit unusually large tool results can raise
+	// this; embedders that want to enforce stricter quotas can lower it.
+	// Has no effect on the HTTP transport.
+	MaxResponseBytes int `json:"max_response_bytes,omitempty"`
 }
+
+// DefaultMaxResponseBytes is the per-line scanner ceiling for the stdio
+// transport when ServerConfig.MaxResponseBytes is zero. 16 MiB covers the
+// great majority of MCP tool results; the 64 KiB bufio default routinely
+// truncates real-world responses.
+const DefaultMaxResponseBytes = 16 * 1024 * 1024
 
 // Notification is a server-initiated message (no ID field).
 type Notification struct {
