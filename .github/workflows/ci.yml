@@ -50,4 +50,8 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          # Pin to v2.x — the repo's .golangci.yml uses the v2 schema
+          # (version: "2"), which v1.x of the linter rejects with
+          # "additional properties 'formatters', 'version' not allowed".
+          # 'latest' currently resolves to v1.x in the action's resolver.
+          version: v2.12.2
