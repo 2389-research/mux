@@ -8,6 +8,9 @@ package llm
 // tool_result) are ignored. Source-form constraints (e.g. OpenAI rejecting
 // URL-form PDFs) are checked separately inside each provider's convert path.
 func validateRequest(provider string, caps Capabilities, req *Request) error {
+	if req == nil {
+		return &ErrMalformedMedia{Provider: provider, Media: "request", Reason: "nil Request"}
+	}
 	for _, msg := range req.Messages {
 		for _, block := range msg.Blocks {
 			if err := checkBlock(provider, caps, block); err != nil {
