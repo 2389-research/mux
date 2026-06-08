@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/openai/openai-go"
+	"github.com/openai/openai-go/v3"
 )
 
 // failClient is a test double that fails a configurable number of times.

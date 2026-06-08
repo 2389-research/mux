@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/option"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
 )
 
 func TestNewOllamaClient(t *testing.T) {
@@ -99,6 +99,7 @@ func TestOllamaClient_CreateMessage(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("ollama"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "llama3.2",
 	}
@@ -168,6 +169,7 @@ func TestOllamaClient_CreateMessageWithToolCalls(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("ollama"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "llama3.2",
 	}
@@ -248,6 +250,7 @@ func TestOllamaClient_ServerError(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("ollama"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "nonexistent-model",
 	}
@@ -274,6 +277,7 @@ func TestOllamaClient_ContextCancellation(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("ollama"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "llama3.2",
 	}
@@ -305,6 +309,7 @@ func TestOllamaClient_NetworkTimeout(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("ollama"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 			option.WithHTTPClient(&http.Client{Timeout: 50 * time.Millisecond}),
 		),
 		model: "llama3.2",
@@ -354,6 +359,7 @@ func TestOllamaClient_CreateMessageStream(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("ollama"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "llama3.2",
 	}
@@ -443,6 +449,7 @@ func TestOllamaClient_StreamWithToolCalls(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("ollama"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "llama3.2",
 	}
@@ -517,6 +524,7 @@ func TestOllamaClient_StreamContextCancellation(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("ollama"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "llama3.2",
 	}
@@ -560,6 +568,7 @@ func TestOllamaClient_StreamServerError(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("ollama"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "llama3.2",
 	}
@@ -620,6 +629,7 @@ func TestOllamaClient_ModelOverride(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("ollama"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "llama3.2",
 	}
@@ -675,6 +685,7 @@ func TestOllamaClient_DefaultMaxTokens(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("ollama"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "llama3.2",
 	}
@@ -734,6 +745,7 @@ func TestOllamaClient_SystemPrompt(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("ollama"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "llama3.2",
 	}

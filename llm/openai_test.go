@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/option"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
 	"github.com/tidwall/gjson"
 )
 
@@ -95,6 +95,7 @@ func TestOpenAIClient_InvalidAPIKey(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("invalid-key"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "gpt-5.2",
 	}
@@ -128,6 +129,11 @@ func TestOpenAIClient_RateLimiting(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("test-key"),
 			option.WithBaseURL(server.URL),
+			// Without this the SDK retries on 429 honoring Retry-After,
+			// which would have this test wait 60+ seconds before
+			// surfacing the error. This test only cares about error
+			// propagation, not retry logic.
+			option.WithMaxRetries(0),
 		),
 		model: "gpt-5.2",
 	}
@@ -154,6 +160,7 @@ func TestOpenAIClient_NetworkTimeout(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("test-key"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 			option.WithHTTPClient(&http.Client{Timeout: 50 * time.Millisecond}),
 		),
 		model: "gpt-5.2",
@@ -181,6 +188,7 @@ func TestOpenAIClient_ContextCancellation(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("test-key"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "gpt-5.2",
 	}
@@ -218,6 +226,7 @@ func TestOpenAIClient_ServerError(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("test-key"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "gpt-5.2",
 	}
@@ -277,6 +286,7 @@ func TestOpenAIClient_CreateMessageUsesResponsesAPIWithToolsAndReasoning(t *test
 		client: openai.NewClient(
 			option.WithAPIKey("test-key"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "gpt-5.5",
 	}
@@ -339,6 +349,7 @@ func TestOpenAIClient_CreateMessageSendsFunctionCallOutputsToResponsesAPI(t *tes
 		client: openai.NewClient(
 			option.WithAPIKey("test-key"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "gpt-5.5",
 	}
@@ -442,8 +453,8 @@ func TestConvertOpenAIRequest_ToolDefinitions(t *testing.T) {
 	if len(params.Tools) != 1 {
 		t.Fatalf("expected 1 tool, got %d", len(params.Tools))
 	}
-	if params.Tools[0].Function.Name != "get_weather" {
-		t.Errorf("expected tool name get_weather, got %s", params.Tools[0].Function.Name)
+	if params.Tools[0].OfFunction == nil || params.Tools[0].OfFunction.Function.Name != "get_weather" {
+		t.Errorf("expected tool name get_weather, got %+v", params.Tools[0])
 	}
 }
 
@@ -551,8 +562,9 @@ func TestConvertAssistantMessage_WithToolCalls(t *testing.T) {
 	if len(result.OfAssistant.ToolCalls) != 1 {
 		t.Fatalf("expected 1 tool call, got %d", len(result.OfAssistant.ToolCalls))
 	}
-	if result.OfAssistant.ToolCalls[0].Function.Name != "get_weather" {
-		t.Errorf("expected tool name get_weather, got %s", result.OfAssistant.ToolCalls[0].Function.Name)
+	tc := result.OfAssistant.ToolCalls[0].OfFunction
+	if tc == nil || tc.Function.Name != "get_weather" {
+		t.Errorf("expected tool name get_weather, got %+v", result.OfAssistant.ToolCalls[0])
 	}
 }
 
@@ -603,11 +615,11 @@ func TestConvertOpenAIResponse_ToolCalls(t *testing.T) {
 			{
 				Message: openai.ChatCompletionMessage{
 					Role: "assistant",
-					ToolCalls: []openai.ChatCompletionMessageToolCall{
+					ToolCalls: []openai.ChatCompletionMessageToolCallUnion{
 						{
 							ID:   "call_abc123",
 							Type: "function",
-							Function: openai.ChatCompletionMessageToolCallFunction{
+							Function: openai.ChatCompletionMessageFunctionToolCallFunction{
 								Name:      "get_weather",
 								Arguments: `{"location": "New York"}`,
 							},
@@ -652,16 +664,16 @@ func TestConvertOpenAIResponse_MultipleToolCalls(t *testing.T) {
 			{
 				Message: openai.ChatCompletionMessage{
 					Role: "assistant",
-					ToolCalls: []openai.ChatCompletionMessageToolCall{
+					ToolCalls: []openai.ChatCompletionMessageToolCallUnion{
 						{
 							ID:       "call_1",
 							Type:     "function",
-							Function: openai.ChatCompletionMessageToolCallFunction{Name: "tool1", Arguments: `{}`},
+							Function: openai.ChatCompletionMessageFunctionToolCallFunction{Name: "tool1", Arguments: `{}`},
 						},
 						{
 							ID:       "call_2",
 							Type:     "function",
-							Function: openai.ChatCompletionMessageToolCallFunction{Name: "tool2", Arguments: `{}`},
+							Function: openai.ChatCompletionMessageFunctionToolCallFunction{Name: "tool2", Arguments: `{}`},
 						},
 					},
 				},
@@ -724,11 +736,11 @@ func TestConvertOpenAIResponse_InvalidToolCallArguments(t *testing.T) {
 			{
 				Message: openai.ChatCompletionMessage{
 					Role: "assistant",
-					ToolCalls: []openai.ChatCompletionMessageToolCall{
+					ToolCalls: []openai.ChatCompletionMessageToolCallUnion{
 						{
 							ID:       "call_1",
 							Type:     "function",
-							Function: openai.ChatCompletionMessageToolCallFunction{Name: "tool1", Arguments: `{invalid json`},
+							Function: openai.ChatCompletionMessageFunctionToolCallFunction{Name: "tool1", Arguments: `{invalid json`},
 						},
 					},
 				},
@@ -798,6 +810,7 @@ func TestOpenAIClient_StreamContextCancellation(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("test-key"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "gpt-5.2",
 	}
@@ -841,6 +854,7 @@ func TestOpenAIClient_StreamServerError(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("test-key"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "gpt-5.2",
 	}
@@ -906,6 +920,7 @@ func TestOpenAIClient_StreamWithToolCalls(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("test-key"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "gpt-5.2",
 	}
@@ -996,6 +1011,7 @@ func TestOpenAIClient_StreamWithMultipleContentDeltas(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("test-key"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "gpt-5.2",
 	}
@@ -1081,6 +1097,7 @@ func TestOpenAIClient_StreamJustFinishedToolCallEvent(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("test-key"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "gpt-5.2",
 	}

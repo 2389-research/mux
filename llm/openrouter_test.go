@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/option"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
 )
 
 func TestNewOpenRouterClient(t *testing.T) {
@@ -74,6 +74,7 @@ func TestOpenRouterClient_BaseURLIsCorrect(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("test-key"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "anthropic/claude-3.5-sonnet",
 	}
@@ -121,6 +122,7 @@ func TestOpenRouterClient_CreateMessage(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("test-key"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "anthropic/claude-3.5-sonnet",
 	}
@@ -188,6 +190,7 @@ func TestOpenRouterClient_ToolCalling(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("test-key"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "anthropic/claude-3.5-sonnet",
 	}
@@ -252,6 +255,7 @@ func TestOpenRouterClient_InvalidAPIKey(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("invalid-key"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "anthropic/claude-3.5-sonnet",
 	}
@@ -285,6 +289,7 @@ func TestOpenRouterClient_RateLimiting(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("test-key"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "anthropic/claude-3.5-sonnet",
 	}
@@ -311,6 +316,7 @@ func TestOpenRouterClient_ContextCancellation(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("test-key"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "anthropic/claude-3.5-sonnet",
 	}
@@ -348,6 +354,7 @@ func TestOpenRouterClient_ServerError(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("test-key"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "anthropic/claude-3.5-sonnet",
 	}
@@ -389,6 +396,7 @@ func TestOpenRouterClient_DefaultMaxTokens(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("test-key"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "anthropic/claude-3.5-sonnet",
 	}
@@ -435,6 +443,7 @@ func TestOpenRouterClient_ModelOverride(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("test-key"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "anthropic/claude-3.5-sonnet",
 	}
@@ -490,6 +499,7 @@ func TestOpenRouterClient_StreamBasic(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("test-key"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "anthropic/claude-3.5-sonnet",
 	}
@@ -579,6 +589,7 @@ func TestOpenRouterClient_StreamWithToolCalls(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("test-key"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "anthropic/claude-3.5-sonnet",
 	}
@@ -646,6 +657,7 @@ func TestOpenRouterClient_StreamServerError(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("test-key"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "anthropic/claude-3.5-sonnet",
 	}
@@ -694,6 +706,7 @@ func TestOpenRouterClient_StreamContextCancellation(t *testing.T) {
 		client: openai.NewClient(
 			option.WithAPIKey("test-key"),
 			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
 		),
 		model: "anthropic/claude-3.5-sonnet",
 	}
