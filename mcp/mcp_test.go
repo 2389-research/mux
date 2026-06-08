@@ -2003,6 +2003,35 @@ func TestStdioLargeToolResult(t *testing.T) {
 	}
 }
 
+// TestStdioCustomMaxResponseBytes pins the configurable scanner ceiling:
+// setting MaxResponseBytes below the actual response size must cause the
+// stdio reader to surface a token-too-long error rather than silently
+// truncating, and the default (zero) must still let large results through.
+func TestStdioCustomMaxResponseBytes(t *testing.T) {
+	// Tiny ceiling — well below the >100 KiB payload mock_server emits for
+	// big_tool. CallTool should fail because the scanner refuses to grow.
+	tinyConfig := mcp.ServerConfig{
+		Name:             "big-tiny",
+		Transport:        "stdio",
+		Command:          "node",
+		Args:             []string{"testdata/mock_server.js"},
+		MaxResponseBytes: 4096,
+	}
+	tiny, err := mcp.NewClient(tinyConfig)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := tiny.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer tiny.Close()
+	if _, err := tiny.CallTool(ctx, "big_tool", map[string]any{}); err == nil {
+		t.Fatal("expected CallTool to fail with the tiny scanner ceiling")
+	}
+}
+
 func TestNotificationType(t *testing.T) {
 	jsonData := `{"method":"tools/changed","params":{"reason":"update"}}`
 	var notif mcp.Notification
