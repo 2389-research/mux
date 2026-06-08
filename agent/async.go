@@ -160,7 +160,13 @@ func (a *Agent) RunAsync(ctx context.Context, prompt string) *RunHandle {
 
 	go func() {
 		defer cancel() // release context resources when the run finishes
-		atomic.StoreInt32(&handle.status, int32(RunStatusRunning))
+		// CAS Pending -> Running. If this fails, Cancel() already ran and
+		// flipped the status to Cancelled before the goroutine started;
+		// short-circuit instead of entering Run with an already-cancelled context.
+		if !atomic.CompareAndSwapInt32(&handle.status, int32(RunStatusPending), int32(RunStatusRunning)) {
+			handle.setComplete(context.Canceled)
+			return
+		}
 		err := a.Run(ctx, prompt)
 		handle.setComplete(err)
 	}()
@@ -182,7 +188,10 @@ func (a *Agent) ContinueAsync(ctx context.Context, prompt string) *RunHandle {
 
 	go func() {
 		defer cancel() // release context resources when the run finishes
-		atomic.StoreInt32(&handle.status, int32(RunStatusRunning))
+		if !atomic.CompareAndSwapInt32(&handle.status, int32(RunStatusPending), int32(RunStatusRunning)) {
+			handle.setComplete(context.Canceled)
+			return
+		}
 		err := a.Continue(ctx, prompt)
 		handle.setComplete(err)
 	}()
@@ -204,7 +213,10 @@ func (a *Agent) RunChildAsync(ctx context.Context, child *Agent, prompt string) 
 
 	go func() {
 		defer cancel() // release context resources when the run finishes
-		atomic.StoreInt32(&handle.status, int32(RunStatusRunning))
+		if !atomic.CompareAndSwapInt32(&handle.status, int32(RunStatusPending), int32(RunStatusRunning)) {
+			handle.setComplete(context.Canceled)
+			return
+		}
 		err := a.RunChild(ctx, child, prompt)
 		handle.setComplete(err)
 	}()
