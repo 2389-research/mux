@@ -1225,6 +1225,8 @@ func (c *capturingClient) CreateMessageStream(ctx context.Context, req *llm.Requ
 	return nil, nil
 }
 
+func (c *capturingClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
+
 func TestAgentThinkingSettingsPassthrough(t *testing.T) {
 	registry := tool.NewRegistry()
 

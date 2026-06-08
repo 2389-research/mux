@@ -1393,6 +1393,8 @@ func (c *capturingLLMClient) CreateMessageStream(ctx context.Context, req *llm.R
 	return ch, nil
 }
 
+func (c *capturingLLMClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
+
 func TestThinkingStrategyOff(t *testing.T) {
 	client := &capturingLLMClient{
 		responses: []*llm.Response{{
