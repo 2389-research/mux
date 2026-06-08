@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime/debug"
 )
 
 var (
@@ -113,8 +114,7 @@ func (e *Executor) Execute(ctx context.Context, toolName string, params map[stri
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					// Hook panicked - log and continue execution
-					fmt.Fprintf(os.Stderr, "Warning: before hook panicked for tool %s: %v\n", toolName, r)
+					fmt.Fprintf(os.Stderr, "Warning: before hook panicked for tool %s: %v\n%s\n", toolName, r, debug.Stack())
 				}
 			}()
 			hook(ctx, toolName, params)
@@ -129,8 +129,7 @@ func (e *Executor) Execute(ctx context.Context, toolName string, params map[stri
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					// Hook panicked - log and continue execution
-					fmt.Fprintf(os.Stderr, "Warning: after hook panicked for tool %s: %v\n", toolName, r)
+					fmt.Fprintf(os.Stderr, "Warning: after hook panicked for tool %s: %v\n%s\n", toolName, r, debug.Stack())
 				}
 			}()
 			hook(ctx, toolName, params, result, err)
