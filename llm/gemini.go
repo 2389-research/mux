@@ -380,10 +380,23 @@ func validateGeminiSources(req *Request) error {
 			if block.Source == nil || block.Source.Kind != SourceKindURL {
 				continue
 			}
+			// Map ContentType to an explicit media-name string so the error
+			// stays stable if the ContentType constant values are ever
+			// renamed. Matches the pattern in checkBlock / validateOpenAISources.
+			var media string
 			switch block.Type {
-			case ContentTypeImage, ContentTypePDF, ContentTypeAudio, ContentTypeVideo:
-				return &ErrUnsupportedSource{Provider: "gemini", Media: string(block.Type), Kind: "url"}
+			case ContentTypeImage:
+				media = "image"
+			case ContentTypePDF:
+				media = "pdf"
+			case ContentTypeAudio:
+				media = "audio"
+			case ContentTypeVideo:
+				media = "video"
+			default:
+				continue
 			}
+			return &ErrUnsupportedSource{Provider: "gemini", Media: media, Kind: "url"}
 		}
 	}
 	return nil
