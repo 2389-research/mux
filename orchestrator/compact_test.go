@@ -382,3 +382,104 @@ func TestCompactIntegration(t *testing.T) {
 		t.Errorf("expected 1 LLM request, got %d", len(client.requests))
 	}
 }
+
+// firstOrphanedToolResult returns the ToolUseID of the first tool_result block
+// that has no matching tool_use in any preceding message, or "" if every
+// tool_result is properly paired. An orphaned tool_result serializes to a
+// function_call_output with no preceding function_call, which the Bedrock
+// gateway rejects with "toolResult blocks exceed toolUse blocks of previous turn".
+func firstOrphanedToolResult(msgs []llm.Message) string {
+	seen := make(map[string]bool)
+	for _, m := range msgs {
+		for _, b := range m.Blocks {
+			switch b.Type {
+			case llm.ContentTypeToolUse:
+				seen[b.ID] = true
+			case llm.ContentTypeToolResult:
+				if !seen[b.ToolUseID] {
+					return b.ToolUseID
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func TestCollectRecentUserMessagesSkipsToolResults(t *testing.T) {
+	// A pure tool-result message must not be collected as a "recent user
+	// message": compaction summarizes away the assistant turn that held the
+	// matching tool_use, so retaining the tool_result would orphan it.
+	client := &compactMockClient{}
+	executor := newTestExecutor()
+	orch := NewWithConfig(client, executor, DefaultConfig())
+
+	orch.mu.Lock()
+	orch.messages = []llm.Message{
+		llm.NewUserMessage("Genuine user task"),
+		{Role: llm.RoleAssistant, Blocks: []llm.ContentBlock{
+			{Type: llm.ContentTypeToolUse, ID: "call_1", Name: "search", Input: map[string]any{"q": "x"}},
+		}},
+		{Role: llm.RoleUser, Blocks: []llm.ContentBlock{
+			{Type: llm.ContentTypeToolResult, ToolUseID: "call_1", Text: "result"},
+		}},
+	}
+	recent := orch.collectRecentUserMessages(10000)
+	orch.mu.Unlock()
+
+	for _, m := range recent {
+		for _, b := range m.Blocks {
+			if b.Type == llm.ContentTypeToolResult {
+				t.Errorf("collected a tool-result message %q; it would orphan after compaction", b.ToolUseID)
+			}
+		}
+	}
+	if len(recent) != 1 || recent[0].Content != "Genuine user task" {
+		t.Fatalf("expected only the genuine user task, got %d messages: %+v", len(recent), recent)
+	}
+}
+
+func TestCompactDoesNotOrphanToolResults(t *testing.T) {
+	// End-to-end: when compaction fires while the most recent message carries
+	// tool results, the rebuilt history must not leave those results orphaned.
+	summaryText := "Summary: explored the codebase."
+	client := &compactMockClient{
+		response: &llm.Response{
+			ID:         "r",
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: summaryText}},
+			StopReason: llm.StopReasonEndTurn,
+			Usage:      llm.Usage{InputTokens: 100, OutputTokens: 20},
+		},
+	}
+	executor := newTestExecutor()
+	largeText := strings.Repeat("x", 2000) // ~500 tokens of removable history
+	config := Config{MaxIterations: 10, ContextBudget: 100, Model: "claude-3-opus"}
+	orch := NewWithConfig(client, executor, config)
+
+	orch.mu.Lock()
+	orch.messages = []llm.Message{
+		llm.NewUserMessage("Investigate the thing"),
+		llm.NewAssistantMessage(largeText),
+		llm.NewUserMessage(largeText),
+		{Role: llm.RoleAssistant, Blocks: []llm.ContentBlock{
+			{Type: llm.ContentTypeToolUse, ID: "call_1", Name: "search", Input: map[string]any{"q": "x"}},
+			{Type: llm.ContentTypeToolUse, ID: "call_2", Name: "fetch", Input: map[string]any{"u": "y"}},
+		}},
+		{Role: llm.RoleUser, Blocks: []llm.ContentBlock{
+			{Type: llm.ContentTypeToolResult, ToolUseID: "call_1", Text: "ok1"},
+			{Type: llm.ContentTypeToolResult, ToolUseID: "call_2", Text: "ok2"},
+		}},
+	}
+	result, err := orch.compact(context.Background())
+	compacted := orch.messages
+	orch.mu.Unlock()
+
+	if err != nil {
+		t.Fatalf("compact failed: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected compaction to occur, got nil result")
+	}
+	if id := firstOrphanedToolResult(compacted); id != "" {
+		t.Errorf("compacted history orphans tool_result %q (no preceding tool_use); gateway would 400", id)
+	}
+}

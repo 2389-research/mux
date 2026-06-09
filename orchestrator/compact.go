@@ -111,15 +111,32 @@ func (o *Orchestrator) buildSummarizationRequest() *llm.Request {
 	}
 }
 
+// hasUserContent reports whether a user message carries genuine prompt content
+// rather than being a pure tool-result carrier. Compaction summarizes away the
+// assistant turn that held the matching tool_use, so a retained tool-result
+// message would be orphaned: it serializes to a tool_result / function_call_output
+// block with no preceding tool_use, which providers reject as an invalid request.
+func hasUserContent(msg llm.Message) bool {
+	if msg.Content != "" {
+		return true
+	}
+	for _, b := range msg.Blocks {
+		if b.Type != llm.ContentTypeToolResult {
+			return true
+		}
+	}
+	return false
+}
+
 // collectRecentUserMessages extracts recent user messages up to token limit.
 // Returns messages in chronological order, prioritizing the most recent messages.
 func (o *Orchestrator) collectRecentUserMessages(maxTokens int) []llm.Message {
-	// Collect user messages from most recent to oldest
+	// Collect user messages from most recent to oldest, skipping pure
+	// tool-result carriers (see hasUserContent).
 	var recentFirst []llm.Message
 	for i := len(o.messages) - 1; i >= 0; i-- {
 		msg := o.messages[i]
-		// Include user messages with content in either Content field or Blocks
-		if msg.Role == llm.RoleUser && (msg.Content != "" || len(msg.Blocks) > 0) {
+		if msg.Role == llm.RoleUser && hasUserContent(msg) {
 			recentFirst = append(recentFirst, msg)
 		}
 	}
