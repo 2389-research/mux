@@ -34,10 +34,15 @@ func TestRunStatusString(t *testing.T) {
 
 func TestRunAsync_Success(t *testing.T) {
 	registry := tool.NewRegistry()
+	// release keeps the worker blocked inside CreateMessage until we have
+	// observed the initial status, so the run cannot race to completion before
+	// the check below.
+	release := make(chan struct{})
 	client := &mockLLMClient{
 		response: &llm.Response{
 			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
 		},
+		release: release,
 	}
 
 	agent := New(Config{
@@ -53,6 +58,9 @@ func TestRunAsync_Success(t *testing.T) {
 	if status != RunStatusPending && status != RunStatusRunning {
 		t.Errorf("initial status = %v, want pending or running", status)
 	}
+
+	// Release the worker and let the run finish.
+	close(release)
 
 	// Wait for completion
 	err := handle.Wait()
@@ -329,12 +337,23 @@ type mockLLMClient struct {
 	err              error
 	delay            time.Duration
 	blockUntilCancel bool
+	release          chan struct{}
 }
 
 func (m *mockLLMClient) CreateMessage(ctx context.Context, req *llm.Request) (*llm.Response, error) {
 	if m.blockUntilCancel {
 		<-ctx.Done()
 		return nil, ctx.Err()
+	}
+	// release gates the success path: when set, block until the test closes the
+	// channel (or the context is cancelled). This lets a test deterministically
+	// observe the in-progress status before the run is allowed to complete.
+	if m.release != nil {
+		select {
+		case <-m.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 	if m.delay > 0 {
 		select {
