@@ -2025,3 +2025,52 @@ func TestRun_CheckpointsWithStore(t *testing.T) {
 		t.Errorf("final snapshot Status = %q, want %q", snap.Status, orchestrator.StatusComplete)
 	}
 }
+
+func TestResume_CrossProcess(t *testing.T) {
+	dir := t.TempDir()
+	const prompt = "ship"
+
+	// --- "Process A": suspends and persists, then is discarded. ---
+	storeA := session.NewFileStore(dir)
+	regA := tool.NewRegistry()
+	regA.Register(&approvalTool{name: "deploy"})
+	execA := tool.NewExecutor(regA)
+	clientA := &mockLLMClient{responses: []*llm.Response{
+		{Content: []llm.ContentBlock{{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "deploy", Input: map[string]any{}}}, StopReason: llm.StopReasonToolUse},
+	}}
+	orchA := orchestrator.NewWithConfig(clientA, execA, orchestrator.Config{
+		MaxIterations: 5, SessionStore: storeA, ApprovalMode: orchestrator.ApprovalSuspend,
+	})
+	var susp *orchestrator.Suspended
+	if err := orchA.Run(context.Background(), prompt); !errors.As(err, &susp) {
+		t.Fatalf("process A Run err = %v, want *Suspended", err)
+	}
+	sessionID := orchA.SessionID()
+
+	// --- "Process B": brand-new orchestrator + executor, same on-disk store. ---
+	storeB := session.NewFileStore(dir)
+	regB := tool.NewRegistry()
+	executed := false
+	regB.Register(&approvalTool{name: "deploy", executed: &executed})
+	execB := tool.NewExecutor(regB)
+	clientB := &mockLLMClient{responses: []*llm.Response{
+		{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "deployed"}}, StopReason: llm.StopReasonEndTurn},
+	}}
+	orchB := orchestrator.NewWithConfig(clientB, execB, orchestrator.Config{
+		MaxIterations: 5, SessionStore: storeB, ApprovalMode: orchestrator.ApprovalSuspend,
+	})
+
+	if err := orchB.Resume(context.Background(), sessionID, orchestrator.Approve(true)); err != nil {
+		t.Fatalf("process B Resume: %v", err)
+	}
+	if !executed {
+		t.Error("tool did not execute in resuming process")
+	}
+	snap, err := storeB.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if snap.Status != orchestrator.StatusComplete {
+		t.Errorf("final Status = %q, want %q", snap.Status, orchestrator.StatusComplete)
+	}
+}
