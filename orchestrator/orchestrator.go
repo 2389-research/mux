@@ -614,6 +614,109 @@ func (o *Orchestrator) pendingApproval(toolUses []llm.ContentBlock) *Suspension 
 	return &Suspension{Reason: ReasonApprovalRequired, Pending: pending}
 }
 
+// Resume reloads a suspended session and continues it using the caller's
+// approval Decision. Approved tools execute; denied tools become error
+// tool_results (so the model can react). The loop then continues until the next
+// suspension or completion. Returns *Suspended again if it re-suspends.
+func (o *Orchestrator) Resume(ctx context.Context, sessionID string, d Decision) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	if o.config.SessionStore == nil {
+		return fmt.Errorf("mux: Resume requires a SessionStore")
+	}
+	snap, err := o.config.SessionStore.Load(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	if snap.Status != StatusSuspended || snap.Suspension == nil {
+		return fmt.Errorf("mux: session %s is not suspended (status %q)", sessionID, snap.Status)
+	}
+
+	// Restore loop state from the snapshot.
+	o.sessionID = snap.SessionID
+	o.messages = make([]llm.Message, len(snap.Messages))
+	copy(o.messages, snap.Messages)
+	o.usage.Restore(&snap.Usage)
+	o.iteration = snap.Iteration
+	o.consecutiveToolIterations = 0
+	o.justCompacted = false
+	o.state.Reset()
+	defer o.eventBus.Reset()
+
+	return o.withSessionHooks(ctx, "", "resume", func() error {
+		return o.resumeCore(ctx, d)
+	})
+}
+
+// resumeCore replays the pending tool batch under the Decision, then continues
+// the loop from the next iteration. Must be called with mutex held.
+func (o *Orchestrator) resumeCore(ctx context.Context, d Decision) error {
+	toolUses := lastAssistantToolUses(o.messages)
+	if len(toolUses) == 0 {
+		return o.handleError(fmt.Errorf("mux: resume found no pending tool calls"))
+	}
+
+	if err := o.transition(StateStreaming); err != nil {
+		return o.handleError(err)
+	}
+
+	restore := o.installDecisionApproval(toolUses, d)
+	err := o.executeTools(ctx, toolUses)
+	restore()
+	if err != nil {
+		return o.handleError(err)
+	}
+	if err := o.checkpoint(ctx, StatusRunning); err != nil {
+		return o.handleError(fmt.Errorf("checkpoint failed: %w", err))
+	}
+
+	return o.runIterations(ctx, o.iteration+1, "")
+}
+
+// installDecisionApproval sets a temporary approval func that resolves each
+// approval-required tool in toolUses (in batch order) against d, and returns a
+// closure that restores the previous approval func. executeTools invokes the
+// approval func only for tools whose RequiresApproval is true, in the same order
+// as toolUses, so an ordered queue of those tool-use IDs aligns 1:1 with the calls.
+func (o *Orchestrator) installDecisionApproval(toolUses []llm.ContentBlock, d Decision) func() {
+	queue := make([]string, 0, len(toolUses))
+	for _, use := range toolUses {
+		if o.executor.NeedsApproval(use.Name, use.Input) {
+			queue = append(queue, use.ID)
+		}
+	}
+	prev := o.executor.ApprovalFunc()
+	idx := 0
+	o.executor.SetApprovalFunc(func(_ context.Context, _ tool.Tool, _ map[string]any) (bool, error) {
+		id := ""
+		if idx < len(queue) {
+			id = queue[idx]
+		}
+		idx++
+		return d.approves(id), nil
+	})
+	return func() { o.executor.SetApprovalFunc(prev) }
+}
+
+// lastAssistantToolUses returns the tool_use blocks of the most recent assistant
+// message — the authoritative pending batch to replay on resume.
+func lastAssistantToolUses(messages []llm.Message) []llm.ContentBlock {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role != llm.RoleAssistant {
+			continue
+		}
+		uses := make([]llm.ContentBlock, 0)
+		for _, b := range messages[i].Blocks {
+			if b.Type == llm.ContentTypeToolUse {
+				uses = append(uses, b)
+			}
+		}
+		return uses
+	}
+	return nil
+}
+
 // suspend checkpoints the loop awaiting approval and returns the *Suspended
 // sentinel. Not routed through handleError: suspension is a pause, not a failure.
 func (o *Orchestrator) suspend(ctx context.Context, susp Suspension) error {

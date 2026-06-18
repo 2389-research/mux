@@ -1907,6 +1907,90 @@ func TestRun_SuspendsOnApprovalTool(t *testing.T) {
 	}
 }
 
+func TestResume_Approve_ExecutesAndCompletes(t *testing.T) {
+	store := session.NewFileStore(t.TempDir())
+	registry := tool.NewRegistry()
+	executed := false
+	registry.Register(&approvalTool{name: "deploy", executed: &executed})
+	executor := tool.NewExecutor(registry)
+	// First response asks for the tool; after resume the second response ends the turn.
+	client := &mockLLMClient{responses: []*llm.Response{
+		{Content: []llm.ContentBlock{{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "deploy", Input: map[string]any{}}}, StopReason: llm.StopReasonToolUse},
+		{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "deployed"}}, StopReason: llm.StopReasonEndTurn},
+	}}
+	cfg := orchestrator.Config{MaxIterations: 5, SessionStore: store, ApprovalMode: orchestrator.ApprovalSuspend}
+	orch := orchestrator.NewWithConfig(client, executor, cfg)
+
+	var susp *orchestrator.Suspended
+	if err := orch.Run(context.Background(), "ship"); !errors.As(err, &susp) {
+		t.Fatalf("Run err = %v, want *Suspended", err)
+	}
+
+	if err := orch.Resume(context.Background(), orch.SessionID(), orchestrator.Approve(true)); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if !executed {
+		t.Error("approved tool did not execute on Resume")
+	}
+	snap, err := store.Load(context.Background(), orch.SessionID())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if snap.Status != orchestrator.StatusComplete {
+		t.Errorf("final Status = %q, want %q", snap.Status, orchestrator.StatusComplete)
+	}
+}
+
+func TestResume_Deny_SynthesizesErrorResultAndCompletes(t *testing.T) {
+	store := session.NewFileStore(t.TempDir())
+	registry := tool.NewRegistry()
+	executed := false
+	registry.Register(&approvalTool{name: "deploy", executed: &executed})
+	executor := tool.NewExecutor(registry)
+	client := &mockLLMClient{responses: []*llm.Response{
+		{Content: []llm.ContentBlock{{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "deploy", Input: map[string]any{}}}, StopReason: llm.StopReasonToolUse},
+		{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok, cancelled"}}, StopReason: llm.StopReasonEndTurn},
+	}}
+	cfg := orchestrator.Config{MaxIterations: 5, SessionStore: store, ApprovalMode: orchestrator.ApprovalSuspend}
+	orch := orchestrator.NewWithConfig(client, executor, cfg)
+
+	var susp *orchestrator.Suspended
+	if err := orch.Run(context.Background(), "ship"); !errors.As(err, &susp) {
+		t.Fatalf("Run err = %v, want *Suspended", err)
+	}
+	if err := orch.Resume(context.Background(), orch.SessionID(), orchestrator.Approve(false)); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if executed {
+		t.Error("denied tool must NOT execute")
+	}
+	// The denial must appear in history as an error tool_result so the model can react.
+	msgs := orch.Messages()
+	foundDenial := false
+	for _, m := range msgs {
+		for _, b := range m.Blocks {
+			if b.Type == llm.ContentTypeToolResult && b.ToolUseID == "call-1" && b.IsError {
+				foundDenial = true
+			}
+		}
+	}
+	if !foundDenial {
+		t.Error("no error tool_result for the denied call-1 in history")
+	}
+}
+
+func TestResume_NotSuspended(t *testing.T) {
+	store := session.NewFileStore(t.TempDir())
+	registry := tool.NewRegistry()
+	executor := tool.NewExecutor(registry)
+	cfg := orchestrator.Config{MaxIterations: 5, SessionStore: store, ApprovalMode: orchestrator.ApprovalSuspend}
+	orch := orchestrator.NewWithConfig(&mockLLMClient{}, executor, cfg)
+	// No snapshot saved for this ID.
+	if err := orch.Resume(context.Background(), "session-missing", orchestrator.Approve(true)); err == nil {
+		t.Fatal("Resume on missing session = nil error, want error")
+	}
+}
+
 func TestRun_CheckpointsWithStore(t *testing.T) {
 	// One tool round-trip then end_turn. A store is configured in the default
 	// ApprovalSync mode: the loop must persist a running checkpoint after the
