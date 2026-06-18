@@ -1741,6 +1741,28 @@ func TestOrchestratorLockContract(t *testing.T) {
 	}
 }
 
+func TestNewWithConfig_SuspendRequiresStore(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic when ApprovalSuspend has no SessionStore")
+		}
+	}()
+	registry := tool.NewRegistry()
+	executor := tool.NewExecutor(registry)
+	orchestrator.NewWithConfig(&mockLLMClient{}, executor, orchestrator.Config{
+		MaxIterations: 5,
+		ApprovalMode:  orchestrator.ApprovalSuspend,
+		// SessionStore intentionally nil
+	})
+}
+
+func TestNewWithConfig_DefaultsDoNotPanic(t *testing.T) {
+	registry := tool.NewRegistry()
+	executor := tool.NewExecutor(registry)
+	// ApprovalSync (zero value) + nil store must remain today's behavior: no panic.
+	_ = orchestrator.NewWithConfig(&mockLLMClient{}, executor, orchestrator.Config{MaxIterations: 5})
+}
+
 func TestThinkingAdaptiveFullCycle(t *testing.T) {
 	// Scenario:
 	// Call 0: first call → thinking ON (iteration 0)

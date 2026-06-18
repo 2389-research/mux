@@ -47,3 +47,23 @@ func TestSuspendedError_MentionsSessionAndReason(t *testing.T) {
 }
 
 // contains is defined in usage_test.go (same package).
+
+func TestTokenUsageRestore_CopiesCounters(t *testing.T) {
+	src := TokenUsage{
+		InputTokens:      11,
+		OutputTokens:     22,
+		ThinkingTokens:   3,
+		CacheReadTokens:  4,
+		CacheWriteTokens: 5,
+		RequestCount:     6,
+	}
+	dst := NewTokenUsage()
+	dst.Restore(&src)
+	got := dst.Snapshot()
+	if got != src {
+		t.Errorf("Restore counters mismatch: got input=%d out=%d thinking=%d cacheRead=%d cacheWrite=%d req=%d, want input=%d out=%d thinking=%d cacheRead=%d cacheWrite=%d req=%d",
+			got.InputTokens, got.OutputTokens, got.ThinkingTokens, got.CacheReadTokens, got.CacheWriteTokens, got.RequestCount,
+			src.InputTokens, src.OutputTokens, src.ThinkingTokens, src.CacheReadTokens, src.CacheWriteTokens, src.RequestCount,
+		)
+	}
+}

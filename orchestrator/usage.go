@@ -76,6 +76,20 @@ func (u *TokenUsage) Snapshot() TokenUsage {
 	}
 }
 
+// Restore overwrites the counters from a snapshot value. The inverse of Snapshot.
+// s is taken by pointer to avoid copying its (zero-value) mutex; callers pass a
+// freshly deserialized snapshot that no other goroutine touches.
+func (u *TokenUsage) Restore(s *TokenUsage) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.InputTokens = s.InputTokens
+	u.OutputTokens = s.OutputTokens
+	u.ThinkingTokens = s.ThinkingTokens
+	u.CacheReadTokens = s.CacheReadTokens
+	u.CacheWriteTokens = s.CacheWriteTokens
+	u.RequestCount = s.RequestCount
+}
+
 // Reset clears all usage statistics.
 func (u *TokenUsage) Reset() {
 	u.mu.Lock()

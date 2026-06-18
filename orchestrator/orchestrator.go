@@ -71,6 +71,8 @@ type Config struct {
 	ContextBudget    int               // Max tokens before compaction triggers (0 = disabled)
 	CompactionModel  string            // Model to use for summarization (defaults to main Model)
 	ThinkingSettings *ThinkingSettings // Per-call thinking control (nil = no thinking)
+	SessionStore     Store             // Optional snapshot store; enables checkpointing/resume (nil = disabled)
+	ApprovalMode     ApprovalMode      // How approval-required tools are handled (default ApprovalSync)
 }
 
 // DefaultConfig returns sensible defaults.
@@ -108,6 +110,9 @@ func NewWithConfig(client llm.Client, executor *tool.Executor, config Config) *O
 	}
 	if executor == nil {
 		panic("mux: executor must not be nil")
+	}
+	if config.ApprovalMode == ApprovalSuspend && config.SessionStore == nil {
+		panic("mux: ApprovalSuspend requires a SessionStore")
 	}
 	return &Orchestrator{
 		client:      client,
