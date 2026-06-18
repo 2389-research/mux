@@ -8,6 +8,7 @@ import (
 
 	"github.com/2389-research/mux/llm"
 	"github.com/2389-research/mux/orchestrator"
+	"github.com/2389-research/mux/session"
 	"github.com/2389-research/mux/tool"
 )
 
@@ -1843,5 +1844,40 @@ func TestThinkingAdaptiveFullCycle(t *testing.T) {
 		if hasThinking != expected[i] {
 			t.Errorf("request %d: thinking=%v, want %v", i, hasThinking, expected[i])
 		}
+	}
+}
+
+func TestRun_CheckpointsWithStore(t *testing.T) {
+	// One tool round-trip then end_turn. A store is configured in the default
+	// ApprovalSync mode: the loop must persist a running checkpoint after the
+	// tool batch and a complete checkpoint at the end.
+	store := session.NewFileStore(t.TempDir())
+	registry := tool.NewRegistry()
+	executed := false
+	registry.Register(&mockTool{name: "noop", execFunc: func(_ context.Context, _ map[string]any) (*tool.Result, error) {
+		executed = true
+		return tool.NewResult("noop", true, "done", ""), nil
+	}})
+	executor := tool.NewExecutor(registry)
+	client := &mockLLMClient{responses: []*llm.Response{
+		{Content: []llm.ContentBlock{{Type: llm.ContentTypeToolUse, ID: "u1", Name: "noop", Input: map[string]any{}}}, StopReason: llm.StopReasonToolUse},
+		{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "all done"}}, StopReason: llm.StopReasonEndTurn},
+	}}
+	orch := orchestrator.NewWithConfig(client, executor, orchestrator.Config{
+		MaxIterations: 5,
+		SessionStore:  store,
+	})
+	if err := orch.Run(context.Background(), "go"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !executed {
+		t.Fatal("tool was not executed")
+	}
+	snap, err := store.Load(context.Background(), orch.SessionID())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if snap.Status != orchestrator.StatusComplete {
+		t.Errorf("final snapshot Status = %q, want %q", snap.Status, orchestrator.StatusComplete)
 	}
 }

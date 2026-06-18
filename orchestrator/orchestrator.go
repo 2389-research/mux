@@ -9,9 +9,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/2389-research/mux/hooks"
 	"github.com/2389-research/mux/llm"
@@ -238,67 +240,70 @@ func (o *Orchestrator) Continue(ctx context.Context, prompt string) error {
 	return o.runWithHooks(ctx, prompt, "continue")
 }
 
-// runWithHooks wraps runLoop with hook firing for session lifecycle.
+// runWithHooks wraps the normal run loop with session lifecycle hooks.
 // Must be called with mutex held.
 func (o *Orchestrator) runWithHooks(ctx context.Context, prompt string, source string) error {
-	// Fire SessionStart hook
+	return o.withSessionHooks(ctx, prompt, source, func() error {
+		return o.runLoop(ctx, prompt)
+	})
+}
+
+// withSessionHooks fires SessionStart, runs core, and fires SessionEnd with a
+// reason derived from how core returned. Must be called with mutex held.
+func (o *Orchestrator) withSessionHooks(ctx context.Context, prompt, source string, core func() error) error {
 	if o.hookManager != nil {
-		event := &hooks.SessionStartEvent{
-			SessionID: o.sessionID,
-			Source:    source,
-			Prompt:    prompt,
-		}
+		event := &hooks.SessionStartEvent{SessionID: o.sessionID, Source: source, Prompt: prompt}
 		if err := o.hookManager.FireSessionStart(ctx, event); err != nil {
 			return o.handleError(err)
 		}
 	}
 
-	// Ensure SessionEnd fires when we return
 	var runErr error
 	defer func() {
 		if o.hookManager != nil {
 			reason := "complete"
 			if runErr != nil {
-				if ctx.Err() != nil {
+				var susp *Suspended
+				switch {
+				case errors.As(runErr, &susp):
+					reason = "suspended"
+				case ctx.Err() != nil:
 					reason = "cancelled"
-				} else {
+				default:
 					reason = "error"
 				}
 			}
-			event := &hooks.SessionEndEvent{
-				SessionID: o.sessionID,
-				Error:     runErr,
-				Reason:    reason,
-			}
-			// Fire SessionEnd - errors don't override runErr (notification-only)
+			event := &hooks.SessionEndEvent{SessionID: o.sessionID, Error: runErr, Reason: reason}
 			_ = o.hookManager.FireSessionEnd(ctx, event) //nolint:errcheck // notification-only hook
 		}
 	}()
 
-	runErr = o.runLoop(ctx, prompt)
+	runErr = core()
 	return runErr
 }
 
-// runLoop executes the core think-act loop. Must be called with mutex held.
+// runLoop executes the core think-act loop from a fresh turn. Must be called with mutex held.
 func (o *Orchestrator) runLoop(ctx context.Context, prompt string) error {
-	o.iteration = 0
 	o.consecutiveToolIterations = 0
 	o.justCompacted = false
-	for i := 0; i < o.config.MaxIterations; i++ {
+	return o.runIterations(ctx, 0, prompt)
+}
+
+// runIterations runs the think-act loop starting at iteration startIter.
+// Resume re-enters here after replaying a pending tool batch. Must be called with mutex held.
+func (o *Orchestrator) runIterations(ctx context.Context, startIter int, prompt string) error {
+	for i := startIter; i < o.config.MaxIterations; i++ {
 		o.iteration = i
-		// Check context at start of each iteration
 		select {
 		case <-ctx.Done():
 			return o.handleError(ctx.Err())
 		default:
 		}
 
-		// Check for compaction before LLM call
 		if result, err := o.compact(ctx); err != nil {
 			return o.handleError(fmt.Errorf("compaction failed: %w", err))
 		} else if result != nil {
 			o.justCompacted = true
-			// Fire compaction hook
 			if o.hookManager != nil {
 				event := &hooks.CompactionEvent{
 					SessionID:       o.sessionID,
@@ -313,12 +318,8 @@ func (o *Orchestrator) runLoop(ctx context.Context, prompt string) error {
 			}
 		}
 
-		// Fire Iteration hook at start of each loop iteration
 		if o.hookManager != nil {
-			event := &hooks.IterationEvent{
-				SessionID: o.sessionID,
-				Iteration: i,
-			}
+			event := &hooks.IterationEvent{SessionID: o.sessionID, Iteration: i}
 			if err := o.hookManager.FireIteration(ctx, event); err != nil {
 				return o.handleError(err)
 			}
@@ -334,9 +335,7 @@ func (o *Orchestrator) runLoop(ctx context.Context, prompt string) error {
 			return o.handleError(err)
 		}
 
-		// Track token usage
 		o.usage.Add(resp.Usage)
-
 		o.processResponse(resp)
 
 		if resp.HasToolUse() {
@@ -344,22 +343,20 @@ func (o *Orchestrator) runLoop(ctx context.Context, prompt string) error {
 			if err := o.executeTools(ctx, resp.ToolUses()); err != nil {
 				return o.handleError(err)
 			}
+			if err := o.checkpoint(ctx, StatusRunning); err != nil {
+				return o.handleError(fmt.Errorf("checkpoint failed: %w", err))
+			}
 			continue
 		}
 		o.consecutiveToolIterations = 0
 
-		// Fire Stop hook - allows hooks to prevent stopping
 		if o.hookManager != nil {
-			stopEvent := &hooks.StopEvent{
-				SessionID: o.sessionID,
-				FinalText: resp.TextContent(),
-			}
+			stopEvent := &hooks.StopEvent{SessionID: o.sessionID, FinalText: resp.TextContent()}
 			continueLoop, err := o.hookManager.FireStop(ctx, stopEvent)
 			if err != nil {
 				return o.handleError(err)
 			}
 			if continueLoop {
-				// Hook requested continuation - reset state and add user message for next iteration
 				o.state.Reset()
 				o.messages = append(o.messages, llm.NewUserMessage("continue"))
 				continue
@@ -370,6 +367,9 @@ func (o *Orchestrator) runLoop(ctx context.Context, prompt string) error {
 			return o.handleError(err)
 		}
 		o.eventBus.Publish(NewCompleteEvent(resp.TextContent()))
+		if err := o.checkpoint(ctx, StatusComplete); err != nil {
+			return o.handleError(fmt.Errorf("checkpoint failed: %w", err))
+		}
 		return nil
 	}
 
@@ -548,4 +548,28 @@ func (o *Orchestrator) handleError(err error) error {
 	o.state.Transition(StateError) //nolint:errcheck // best-effort transition to error state
 	o.eventBus.Publish(NewErrorEvent(err))
 	return err
+}
+
+// snapshot captures the current loop state. Usage is copied via Snapshot() to a
+// fresh, mutex-free value safe to serialize.
+func (o *Orchestrator) snapshot(status Status) *Snapshot {
+	msgs := make([]llm.Message, len(o.messages))
+	copy(msgs, o.messages)
+	return &Snapshot{
+		SessionID: o.sessionID,
+		Status:    status,
+		Messages:  msgs,
+		Usage:     o.usage.Snapshot(),
+		Iteration: o.iteration,
+		UpdatedAt: time.Now().UTC(),
+	}
+}
+
+// checkpoint persists the current state if a store is configured; otherwise it
+// is a no-op (preserving today's store-less behavior exactly).
+func (o *Orchestrator) checkpoint(ctx context.Context, status Status) error {
+	if o.config.SessionStore == nil {
+		return nil
+	}
+	return o.config.SessionStore.Save(ctx, o.snapshot(status))
 }
