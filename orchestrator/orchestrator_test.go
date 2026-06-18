@@ -1745,6 +1745,8 @@ func TestNewWithConfig_SuspendRequiresStore(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
 			t.Fatal("expected panic when ApprovalSuspend has no SessionStore")
+		} else if r != "mux: ApprovalSuspend requires a SessionStore" {
+			t.Fatalf("wrong panic value: %v", r)
 		}
 	}()
 	registry := tool.NewRegistry()
