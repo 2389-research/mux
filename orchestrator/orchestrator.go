@@ -348,7 +348,13 @@ func (o *Orchestrator) runIterations(ctx context.Context, startIter int, prompt 
 
 		if resp.HasToolUse() {
 			o.consecutiveToolIterations++
-			if err := o.executeTools(ctx, resp.ToolUses()); err != nil {
+			toolUses := resp.ToolUses()
+			if o.config.ApprovalMode == ApprovalSuspend {
+				if susp := o.pendingApproval(toolUses); susp != nil {
+					return o.suspend(ctx, *susp)
+				}
+			}
+			if err := o.executeTools(ctx, toolUses); err != nil {
 				return o.handleError(err)
 			}
 			if err := o.checkpoint(ctx, StatusRunning); err != nil {
@@ -582,4 +588,42 @@ func (o *Orchestrator) checkpoint(ctx context.Context, status Status) error {
 		return nil
 	}
 	return o.config.SessionStore.Save(ctx, o.snapshot(status))
+}
+
+// pendingApproval returns a Suspension if any tool use in the batch needs
+// approval, listing every call in the batch (so Resume replays the whole turn).
+// Returns nil when nothing needs approval.
+func (o *Orchestrator) pendingApproval(toolUses []llm.ContentBlock) *Suspension {
+	pending := make([]PendingToolCall, 0, len(toolUses))
+	needsAny := false
+	for _, use := range toolUses {
+		needs := o.executor.NeedsApproval(use.Name, use.Input)
+		if needs {
+			needsAny = true
+		}
+		pending = append(pending, PendingToolCall{
+			ID:            use.ID,
+			Name:          use.Name,
+			Params:        use.Input,
+			NeedsApproval: needs,
+		})
+	}
+	if !needsAny {
+		return nil
+	}
+	return &Suspension{Reason: ReasonApprovalRequired, Pending: pending}
+}
+
+// suspend checkpoints the loop awaiting approval and returns the *Suspended
+// sentinel. Not routed through handleError: suspension is a pause, not a failure.
+func (o *Orchestrator) suspend(ctx context.Context, susp Suspension) error {
+	if err := o.transition(StateAwaitingApproval); err != nil {
+		return o.handleError(err)
+	}
+	snap := o.snapshot(StatusSuspended)
+	snap.Suspension = &susp
+	if err := o.config.SessionStore.Save(ctx, snap); err != nil {
+		return o.handleError(fmt.Errorf("suspend checkpoint failed: %w", err))
+	}
+	return &Suspended{SessionID: o.sessionID, Suspension: susp}
 }

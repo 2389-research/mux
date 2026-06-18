@@ -2,6 +2,7 @@ package orchestrator_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -1844,6 +1845,65 @@ func TestThinkingAdaptiveFullCycle(t *testing.T) {
 		if hasThinking != expected[i] {
 			t.Errorf("request %d: thinking=%v, want %v", i, hasThinking, expected[i])
 		}
+	}
+}
+
+// approvalTool is a tool double that always requires approval and records
+// whether it was actually executed.
+type approvalTool struct {
+	name     string
+	executed *bool
+}
+
+func (a *approvalTool) Name() string                         { return a.name }
+func (a *approvalTool) Description() string                  { return "needs approval" }
+func (a *approvalTool) RequiresApproval(map[string]any) bool { return true }
+func (a *approvalTool) Execute(_ context.Context, _ map[string]any) (*tool.Result, error) {
+	if a.executed != nil {
+		*a.executed = true
+	}
+	return tool.NewResult(a.name, true, "executed", ""), nil
+}
+
+func TestRun_SuspendsOnApprovalTool(t *testing.T) {
+	store := session.NewFileStore(t.TempDir())
+	registry := tool.NewRegistry()
+	executed := false
+	registry.Register(&approvalTool{name: "deploy", executed: &executed})
+	executor := tool.NewExecutor(registry)
+	client := &mockLLMClient{responses: []*llm.Response{
+		{Content: []llm.ContentBlock{{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "deploy", Input: map[string]any{"env": "prod"}}}, StopReason: llm.StopReasonToolUse},
+	}}
+	orch := orchestrator.NewWithConfig(client, executor, orchestrator.Config{
+		MaxIterations: 5,
+		SessionStore:  store,
+		ApprovalMode:  orchestrator.ApprovalSuspend,
+	})
+
+	err := orch.Run(context.Background(), "ship it")
+
+	var susp *orchestrator.Suspended
+	if !errors.As(err, &susp) {
+		t.Fatalf("Run err = %v, want *Suspended", err)
+	}
+	if susp.Suspension.Reason != orchestrator.ReasonApprovalRequired {
+		t.Errorf("Reason = %q, want %q", susp.Suspension.Reason, orchestrator.ReasonApprovalRequired)
+	}
+	if len(susp.Suspension.Pending) != 1 || susp.Suspension.Pending[0].ID != "call-1" || !susp.Suspension.Pending[0].NeedsApproval {
+		t.Errorf("Pending = %+v", susp.Suspension.Pending)
+	}
+	if executed {
+		t.Error("tool executed despite suspension; must not run before approval")
+	}
+	if orch.State() != orchestrator.StateAwaitingApproval {
+		t.Errorf("State = %q, want %q", orch.State(), orchestrator.StateAwaitingApproval)
+	}
+	snap, err := store.Load(context.Background(), orch.SessionID())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if snap.Status != orchestrator.StatusSuspended || snap.Suspension == nil {
+		t.Errorf("snapshot Status=%q Suspension=%+v", snap.Status, snap.Suspension)
 	}
 }
 
