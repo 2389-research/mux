@@ -251,6 +251,7 @@ func (o *Orchestrator) runWithHooks(ctx context.Context, prompt string, source s
 // withSessionHooks fires SessionStart, runs core, and fires SessionEnd with a
 // reason derived from how core returned. Must be called with mutex held.
 func (o *Orchestrator) withSessionHooks(ctx context.Context, prompt, source string, core func() error) error {
+	// Fire SessionStart hook
 	if o.hookManager != nil {
 		event := &hooks.SessionStartEvent{SessionID: o.sessionID, Source: source, Prompt: prompt}
 		if err := o.hookManager.FireSessionStart(ctx, event); err != nil {
@@ -258,6 +259,7 @@ func (o *Orchestrator) withSessionHooks(ctx context.Context, prompt, source stri
 		}
 	}
 
+	// Ensure SessionEnd fires when we return
 	var runErr error
 	defer func() {
 		if o.hookManager != nil {
@@ -274,6 +276,7 @@ func (o *Orchestrator) withSessionHooks(ctx context.Context, prompt, source stri
 				}
 			}
 			event := &hooks.SessionEndEvent{SessionID: o.sessionID, Error: runErr, Reason: reason}
+			// Fire SessionEnd - errors don't override runErr (notification-only)
 			_ = o.hookManager.FireSessionEnd(ctx, event) //nolint:errcheck // notification-only hook
 		}
 	}()
@@ -294,6 +297,7 @@ func (o *Orchestrator) runLoop(ctx context.Context, prompt string) error {
 func (o *Orchestrator) runIterations(ctx context.Context, startIter int, prompt string) error {
 	for i := startIter; i < o.config.MaxIterations; i++ {
 		o.iteration = i
+		// Check context at start of each iteration
 		select {
 		case <-ctx.Done():
 			return o.handleError(ctx.Err())
@@ -304,6 +308,7 @@ func (o *Orchestrator) runIterations(ctx context.Context, startIter int, prompt 
 			return o.handleError(fmt.Errorf("compaction failed: %w", err))
 		} else if result != nil {
 			o.justCompacted = true
+			// Fire compaction hook
 			if o.hookManager != nil {
 				event := &hooks.CompactionEvent{
 					SessionID:       o.sessionID,
@@ -318,6 +323,7 @@ func (o *Orchestrator) runIterations(ctx context.Context, startIter int, prompt 
 			}
 		}
 
+		// Fire Iteration hook at start of each loop iteration
 		if o.hookManager != nil {
 			event := &hooks.IterationEvent{SessionID: o.sessionID, Iteration: i}
 			if err := o.hookManager.FireIteration(ctx, event); err != nil {
@@ -335,7 +341,9 @@ func (o *Orchestrator) runIterations(ctx context.Context, startIter int, prompt 
 			return o.handleError(err)
 		}
 
+		// Track token usage
 		o.usage.Add(resp.Usage)
+
 		o.processResponse(resp)
 
 		if resp.HasToolUse() {
@@ -350,6 +358,7 @@ func (o *Orchestrator) runIterations(ctx context.Context, startIter int, prompt 
 		}
 		o.consecutiveToolIterations = 0
 
+		// Fire Stop hook - allows hooks to prevent stopping
 		if o.hookManager != nil {
 			stopEvent := &hooks.StopEvent{SessionID: o.sessionID, FinalText: resp.TextContent()}
 			continueLoop, err := o.hookManager.FireStop(ctx, stopEvent)
@@ -357,6 +366,7 @@ func (o *Orchestrator) runIterations(ctx context.Context, startIter int, prompt 
 				return o.handleError(err)
 			}
 			if continueLoop {
+				// Hook requested continuation - reset state and add user message for next iteration
 				o.state.Reset()
 				o.messages = append(o.messages, llm.NewUserMessage("continue"))
 				continue
