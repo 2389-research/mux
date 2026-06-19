@@ -11,6 +11,7 @@ import (
 	"github.com/2389-research/mux/agent"
 	"github.com/2389-research/mux/llm"
 	"github.com/2389-research/mux/orchestrator"
+	"github.com/2389-research/mux/session"
 	"github.com/2389-research/mux/tool"
 )
 
@@ -1261,5 +1262,71 @@ func TestAgentThinkingSettingsPassthrough(t *testing.T) {
 	}
 	if client.lastRequest.Thinking.Budget != thinkingBudget {
 		t.Errorf("expected Thinking.Budget %d, got %d", thinkingBudget, client.lastRequest.Thinking.Budget)
+	}
+}
+
+// scriptedClient plays back a fixed sequence of LLM responses for testing suspend/resume flows.
+type scriptedClient struct {
+	responses []*llm.Response
+	idx       int
+}
+
+func (c *scriptedClient) CreateMessage(ctx context.Context, req *llm.Request) (*llm.Response, error) {
+	r := c.responses[c.idx]
+	if c.idx < len(c.responses)-1 {
+		c.idx++
+	}
+	return r, nil
+}
+
+func (c *scriptedClient) CreateMessageStream(ctx context.Context, req *llm.Request) (<-chan llm.StreamEvent, error) {
+	return nil, nil
+}
+
+func (c *scriptedClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
+
+func TestAgent_SuspendAndResume(t *testing.T) {
+	store := session.NewFileStore(t.TempDir())
+
+	registry := tool.NewRegistry()
+	registry.Register(&mockTool{name: "deploy", requiresApproval: true})
+
+	// Two-phase client: first call returns tool_use (triggers suspension),
+	// second call returns end_turn (completes after resume+approval).
+	client := &scriptedClient{
+		responses: []*llm.Response{
+			{
+				Content:    []llm.ContentBlock{{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "deploy", Input: map[string]any{}}},
+				StopReason: llm.StopReasonToolUse,
+			},
+			{
+				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "deployed"}},
+				StopReason: llm.StopReasonEndTurn,
+			},
+		},
+	}
+
+	ag := agent.New(agent.Config{
+		Name:          "test-agent",
+		Registry:      registry,
+		LLMClient:     client,
+		SessionStore:  store,
+		ApprovalMode:  orchestrator.ApprovalSuspend,
+		MaxIterations: 5,
+	})
+
+	var susp *orchestrator.Suspended
+	if err := ag.Run(context.Background(), "ship"); !errors.As(err, &susp) {
+		t.Fatalf("Agent.Run err = %v, want *Suspended", err)
+	}
+	if err := ag.Resume(context.Background(), ag.SessionID(), orchestrator.Approve(true)); err != nil {
+		t.Fatalf("Agent.Resume: %v", err)
+	}
+	snap, err := store.Load(context.Background(), ag.SessionID())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if snap.Status != orchestrator.StatusComplete {
+		t.Errorf("final Status = %q, want %q", snap.Status, orchestrator.StatusComplete)
 	}
 }

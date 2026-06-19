@@ -43,4 +43,9 @@ type Config struct {
 
 	// ThinkingSettings configures per-call thinking behavior (nil = no thinking).
 	ThinkingSettings *orchestrator.ThinkingSettings
+
+	// SessionStore enables durable suspend/resume; passed through to the orchestrator.
+	SessionStore orchestrator.Store
+	// ApprovalMode selects synchronous approval (default) or suspend-on-approval.
+	ApprovalMode orchestrator.ApprovalMode
 }

@@ -87,6 +87,8 @@ func (a *Agent) init() {
 	}
 	orchConfig.HookManager = a.hookManager
 	orchConfig.ThinkingSettings = a.config.ThinkingSettings
+	orchConfig.SessionStore = a.config.SessionStore
+	orchConfig.ApprovalMode = a.config.ApprovalMode
 
 	// Create orchestrator
 	a.orch = orchestrator.NewWithConfig(a.config.LLMClient, a.executor, orchConfig)
@@ -104,6 +106,17 @@ func (a *Agent) Run(ctx context.Context, prompt string) error {
 // Use SetMessages() to restore history from persistence before calling Continue().
 func (a *Agent) Continue(ctx context.Context, prompt string) error {
 	return a.orch.Continue(ctx, prompt)
+}
+
+// SessionID returns the orchestrator's session identifier (the handle for Resume).
+func (a *Agent) SessionID() string {
+	return a.orch.SessionID()
+}
+
+// Resume continues a suspended session using the caller's approval Decision.
+// See orchestrator.Resume. Returns *orchestrator.Suspended if it re-suspends.
+func (a *Agent) Resume(ctx context.Context, sessionID string, d orchestrator.Decision) error {
+	return a.orch.Resume(ctx, sessionID, d)
 }
 
 // Subscribe returns a channel for receiving orchestrator events.
