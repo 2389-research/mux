@@ -4,6 +4,8 @@ package session_test
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -114,5 +116,23 @@ func TestFileStore_ListEmptyDir(t *testing.T) {
 	}
 	if len(ids) != 0 {
 		t.Errorf("List = %v, want empty", ids)
+	}
+}
+
+func TestFileStore_SaveCleansTempOnRenameFailure(t *testing.T) {
+	dir := t.TempDir()
+	store := session.NewFileStore(dir)
+	const sid = "session-collide"
+	// Make the target path a directory so os.Rename(tmp, target) fails.
+	target := filepath.Join(dir, sid+".json")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatalf("Mkdir target: %v", err)
+	}
+	if err := store.Save(context.Background(), sampleSnapshot(sid)); err == nil {
+		t.Fatal("Save onto a directory target = nil error, want error")
+	}
+	// The temp file must not be left behind after the failed rename.
+	if _, statErr := os.Stat(target + ".tmp"); !os.IsNotExist(statErr) {
+		t.Errorf("temp file %q not cleaned up after rename failure (stat err = %v)", target+".tmp", statErr)
 	}
 }

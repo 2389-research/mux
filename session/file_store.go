@@ -54,7 +54,11 @@ func (s *FileStore) Save(_ context.Context, snap *orchestrator.Snapshot) error {
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, target)
+	if err := os.Rename(tmp, target); err != nil {
+		os.Remove(tmp) // best-effort: don't leave an orphan temp file behind
+		return err
+	}
+	return nil
 }
 
 // Load reads and decodes a snapshot, returning ErrSessionNotFound if absent.
