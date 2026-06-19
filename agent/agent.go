@@ -64,10 +64,19 @@ func (a *Agent) ID() string {
 }
 
 func (a *Agent) init() {
+	// When skills are configured, register the load_skill tool and ensure it is
+	// reachable through this agent's filtered registry.
+	allowed := a.config.AllowedTools
+	if a.config.Skills != nil {
+		loadTool := a.config.Skills.Tool()
+		a.config.Registry.Register(loadTool)
+		allowed = ensureAllowed(allowed, loadTool.Name())
+	}
+
 	// Create filtered view of registry
 	a.filtered = tool.NewFilteredRegistry(
 		a.config.Registry,
-		a.config.AllowedTools,
+		allowed,
 		a.config.DeniedTools,
 	)
 
@@ -90,8 +99,42 @@ func (a *Agent) init() {
 	orchConfig.SessionStore = a.config.SessionStore
 	orchConfig.ApprovalMode = a.config.ApprovalMode
 
+	// Inject the skills catalog into the effective system prompt (default or custom).
+	if a.config.Skills != nil {
+		if cat := a.config.Skills.Catalog(); cat != "" {
+			orchConfig.SystemPrompt = appendSystemSection(orchConfig.SystemPrompt, cat)
+		}
+	}
+
 	// Create orchestrator
 	a.orch = orchestrator.NewWithConfig(a.config.LLMClient, a.executor, orchConfig)
+}
+
+// ensureAllowed returns an allowlist that permits name. An empty allowlist already
+// permits everything, so it is returned unchanged. Otherwise name is appended to a
+// copy — the caller's stored Config.AllowedTools is never mutated.
+func ensureAllowed(allowed []string, name string) []string {
+	if len(allowed) == 0 {
+		return allowed
+	}
+	for _, a := range allowed {
+		if a == name {
+			return allowed
+		}
+	}
+	out := make([]string, len(allowed)+1)
+	copy(out, allowed)
+	out[len(allowed)] = name
+	return out
+}
+
+// appendSystemSection joins a base system prompt and an added section with a blank
+// line, returning the section alone when the base is empty.
+func appendSystemSection(base, section string) string {
+	if base == "" {
+		return section
+	}
+	return base + "\n\n" + section
 }
 
 // Run executes the agent's think-act loop with the given prompt.
