@@ -1991,6 +1991,24 @@ func TestResume_NotSuspended(t *testing.T) {
 	}
 }
 
+func TestResume_NotSuspended_AlreadyComplete(t *testing.T) {
+	store := session.NewFileStore(t.TempDir())
+	const sid = "session-done"
+	// Persist a completed (non-suspended) session directly.
+	if err := store.Save(context.Background(), &orchestrator.Snapshot{
+		SessionID: sid,
+		Status:    orchestrator.StatusComplete,
+	}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	executor := tool.NewExecutor(tool.NewRegistry())
+	cfg := orchestrator.Config{MaxIterations: 5, SessionStore: store, ApprovalMode: orchestrator.ApprovalSuspend}
+	orch := orchestrator.NewWithConfig(&mockLLMClient{}, executor, cfg)
+	if err := orch.Resume(context.Background(), sid, orchestrator.Approve(true)); err == nil {
+		t.Fatal("Resume on a completed (non-suspended) session = nil error, want error")
+	}
+}
+
 func TestRun_CheckpointsWithStore(t *testing.T) {
 	// One tool round-trip then end_turn. A store is configured in the default
 	// ApprovalSync mode: the loop must persist a running checkpoint after the
