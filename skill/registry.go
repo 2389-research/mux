@@ -111,13 +111,21 @@ func (r *Registry) Count() int {
 // one line per skill (name + description), in sorted order. It returns "" when the
 // registry is empty so callers never inject a dangling header.
 func (r *Registry) Catalog() string {
-	if r.Count() == 0 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.skills) == 0 {
 		return ""
 	}
+	names := make([]string, 0, len(r.skills))
+	for name := range r.skills {
+		names = append(names, name)
+	}
+	sort.Strings(names)
 	var b strings.Builder
 	b.WriteString("## Available Skills\n\n")
 	b.WriteString("Load full instructions with the load_skill tool before acting on one.\n\n")
-	for _, s := range r.All() {
+	for _, name := range names {
+		s := r.skills[name]
 		fmt.Fprintf(&b, "- **%s** — %s\n", s.Name, s.Description)
 	}
 	return strings.TrimRight(b.String(), "\n")

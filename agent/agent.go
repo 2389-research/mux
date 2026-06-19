@@ -117,8 +117,8 @@ func ensureAllowed(allowed []string, name string) []string {
 	if len(allowed) == 0 {
 		return allowed
 	}
-	for _, a := range allowed {
-		if a == name {
+	for _, entry := range allowed {
+		if entry == name {
 			return allowed
 		}
 	}

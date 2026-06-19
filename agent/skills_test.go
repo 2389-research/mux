@@ -129,6 +129,30 @@ func TestAgentLoadSkillReachableWithAllowlist(t *testing.T) {
 	}
 }
 
+func TestAgentInjectsSkillCatalogDefaultPrompt(t *testing.T) {
+	client := &capturingClient{
+		response: &llm.Response{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}}},
+	}
+	// No SystemPrompt set: the catalog must still be injected into the effective
+	// (default) system prompt.
+	a := agent.New(agent.Config{
+		Name:      "root",
+		Registry:  tool.NewRegistry(),
+		LLMClient: client,
+		Skills:    skillsDir(t),
+	})
+	if err := a.Run(context.Background(), "hi"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if client.lastRequest == nil {
+		t.Fatal("no request captured")
+	}
+	sys := client.lastRequest.System
+	if !strings.Contains(sys, "## Available Skills") || !strings.Contains(sys, "- **greet** — Say hi to the user.") {
+		t.Errorf("catalog missing from default-prompt path:\n%s", sys)
+	}
+}
+
 func TestAgentNoSkillsUnaffected(t *testing.T) {
 	client := &capturingClient{
 		response: &llm.Response{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}}},

@@ -35,6 +35,10 @@ func TestLoadSkillToolMetadata(t *testing.T) {
 	if schema["type"] != "object" {
 		t.Errorf("schema type = %v, want object", schema["type"])
 	}
+	req, ok := schema["required"].([]string)
+	if !ok || len(req) != 1 || req[0] != "name" {
+		t.Errorf("schema required = %v, want [name]", schema["required"])
+	}
 }
 
 func TestLoadSkillToolExecuteFound(t *testing.T) {

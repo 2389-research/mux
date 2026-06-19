@@ -97,6 +97,9 @@ func TestCatalog(t *testing.T) {
 	if !strings.Contains(cat, "## Available Skills") {
 		t.Errorf("catalog missing header:\n%s", cat)
 	}
+	if !strings.Contains(cat, "Load full instructions with the load_skill tool before acting on one.") {
+		t.Errorf("catalog missing instruction line:\n%s", cat)
+	}
 	if !strings.Contains(cat, "- **alpha** — First skill.") {
 		t.Errorf("catalog missing alpha entry:\n%s", cat)
 	}
