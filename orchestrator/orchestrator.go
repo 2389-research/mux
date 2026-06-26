@@ -67,6 +67,7 @@ type Config struct {
 	MaxIterations    int
 	SystemPrompt     string
 	Model            string
+	Stream           bool              // Use CreateMessageStream and collect a final response
 	HookManager      *hooks.Manager    // Optional hook manager for lifecycle events
 	ContextBudget    int               // Max tokens before compaction triggers (0 = disabled)
 	CompactionModel  string            // Model to use for summarization (defaults to main Model)
@@ -323,7 +324,7 @@ func (o *Orchestrator) runLoop(ctx context.Context, prompt string) error {
 			return o.handleError(err)
 		}
 
-		resp, err := o.client.CreateMessage(ctx, o.buildRequest())
+		resp, err := o.createMessage(ctx, o.buildRequest())
 		o.justCompacted = false
 		if err != nil {
 			return o.handleError(err)
@@ -369,6 +370,46 @@ func (o *Orchestrator) runLoop(ctx context.Context, prompt string) error {
 	}
 
 	return o.handleError(fmt.Errorf("exceeded max iterations (%d) while processing: %s", o.config.MaxIterations, prompt))
+}
+
+func (o *Orchestrator) createMessage(ctx context.Context, req *llm.Request) (*llm.Response, error) {
+	if !o.config.Stream {
+		return o.client.CreateMessage(ctx, req)
+	}
+	return o.collectStreamResponse(ctx, req)
+}
+
+func (o *Orchestrator) collectStreamResponse(ctx context.Context, req *llm.Request) (*llm.Response, error) {
+	events, err := o.client.CreateMessageStream(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	var final *llm.Response
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case event, ok := <-events:
+			if !ok {
+				if final == nil {
+					return nil, fmt.Errorf("stream closed without final message_stop response")
+				}
+				return final, nil
+			}
+			switch event.Type {
+			case llm.EventError:
+				if event.Error != nil {
+					return nil, event.Error
+				}
+				return nil, fmt.Errorf("stream returned error event without error")
+			case llm.EventMessageStop:
+				if event.Response != nil {
+					final = event.Response
+				}
+			}
+		}
+	}
 }
 
 // shouldEnableThinking decides whether to enable thinking for the current API call.

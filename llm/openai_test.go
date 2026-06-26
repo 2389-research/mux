@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -791,14 +792,16 @@ func TestConvertOpenAIResponse_UsageTracking(t *testing.T) {
 
 func TestOpenAIClient_StreamContextCancellation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Errorf("expected /responses request, got %s", r.URL.Path)
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			t.Fatal("expected http.Flusher")
 		}
 
-		// Send initial event
-		w.Write([]byte("data: {\"id\":\"chatcmpl-123\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"index\":0}]}\n\n"))
+		writeOpenAIResponseSSE(t, w, "response.created", `{"type":"response.created","response":{"id":"resp_123","status":"in_progress","model":"gpt-5.2"}}`)
 		flusher.Flush()
 
 		// Wait before sending more
@@ -884,34 +887,31 @@ func TestOpenAIClient_StreamServerError(t *testing.T) {
 
 func TestOpenAIClient_StreamWithToolCalls(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Errorf("expected /responses request, got %s", r.URL.Path)
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			t.Fatal("expected http.Flusher")
 		}
 
-		// Chunk 1: Start with role
-		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}` + "\n\n"))
+		writeOpenAIResponseSSE(t, w, "response.created", `{"type":"response.created","response":{"id":"resp_123","status":"in_progress","model":"gpt-5.2"}}`)
 		flusher.Flush()
 
-		// Chunk 2: Tool call start
-		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_abc123","type":"function","function":{"name":"get_weather","arguments":""}}]},"finish_reason":null}]}` + "\n\n"))
+		writeOpenAIResponseSSE(t, w, "response.output_item.added", `{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_123","call_id":"call_abc123","name":"get_weather","arguments":"","status":"in_progress"}}`)
 		flusher.Flush()
 
-		// Chunk 3: Tool call arguments
-		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"location\":"}}]},"finish_reason":null}]}` + "\n\n"))
+		writeOpenAIResponseSSE(t, w, "response.function_call_arguments.delta", `{"type":"response.function_call_arguments.delta","item_id":"fc_123","output_index":0,"delta":"{\"location\":"}`)
 		flusher.Flush()
 
-		// Chunk 4: More arguments
-		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"New York\"}"}}]},"finish_reason":null}]}` + "\n\n"))
+		writeOpenAIResponseSSE(t, w, "response.function_call_arguments.delta", `{"type":"response.function_call_arguments.delta","item_id":"fc_123","output_index":0,"delta":"\"New York\"}"}`)
 		flusher.Flush()
 
-		// Chunk 5: End with tool_calls finish reason
-		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}` + "\n\n"))
+		writeOpenAIResponseSSE(t, w, "response.function_call_arguments.done", `{"type":"response.function_call_arguments.done","item_id":"fc_123","output_index":0,"arguments":"{\"location\":\"New York\"}"}`)
 		flusher.Flush()
 
-		// Done
-		w.Write([]byte("data: [DONE]\n\n"))
+		writeOpenAIResponseSSE(t, w, "response.completed", `{"type":"response.completed","response":{"id":"resp_123","status":"completed","model":"gpt-5.2","output":[{"type":"function_call","id":"fc_123","call_id":"call_abc123","name":"get_weather","arguments":"{\"location\":\"New York\"}","status":"completed"}],"usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18}}}`)
 		flusher.Flush()
 	}))
 	defer server.Close()
@@ -968,41 +968,42 @@ func TestOpenAIClient_StreamWithToolCalls(t *testing.T) {
 		if toolCallBlock.Type != ContentTypeToolUse {
 			t.Errorf("expected tool_use block, got %s", toolCallBlock.Type)
 		}
+		if toolCallBlock.ID != "call_abc123" {
+			t.Errorf("expected tool call id call_abc123, got %s", toolCallBlock.ID)
+		}
 		if toolCallBlock.Name != "get_weather" {
 			t.Errorf("expected tool name get_weather, got %s", toolCallBlock.Name)
+		}
+		if toolCallBlock.Input["location"] != "New York" {
+			t.Errorf("expected location New York, got %#v", toolCallBlock.Input["location"])
 		}
 	}
 }
 
 func TestOpenAIClient_StreamWithMultipleContentDeltas(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Errorf("expected /responses request, got %s", r.URL.Path)
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			t.Fatal("expected http.Flusher")
 		}
 
-		// Chunk 1: Role
-		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}` + "\n\n"))
+		writeOpenAIResponseSSE(t, w, "response.created", `{"type":"response.created","response":{"id":"resp_123","status":"in_progress","model":"gpt-5.2"}}`)
 		flusher.Flush()
 
-		// Chunk 2: First content delta
-		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}` + "\n\n"))
+		writeOpenAIResponseSSE(t, w, "response.output_text.delta", `{"type":"response.output_text.delta","item_id":"msg_123","output_index":0,"content_index":0,"delta":"Hello"}`)
 		flusher.Flush()
 
-		// Chunk 3: Second content delta
-		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{"content":" there"},"finish_reason":null}]}` + "\n\n"))
+		writeOpenAIResponseSSE(t, w, "response.output_text.delta", `{"type":"response.output_text.delta","item_id":"msg_123","output_index":0,"content_index":0,"delta":" there"}`)
 		flusher.Flush()
 
-		// Chunk 4: Third content delta
-		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{"content":"!"},"finish_reason":null}]}` + "\n\n"))
+		writeOpenAIResponseSSE(t, w, "response.output_text.delta", `{"type":"response.output_text.delta","item_id":"msg_123","output_index":0,"content_index":0,"delta":"!"}`)
 		flusher.Flush()
 
-		// Chunk 5: End
-		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n"))
-		flusher.Flush()
-
-		w.Write([]byte("data: [DONE]\n\n"))
+		writeOpenAIResponseSSE(t, w, "response.completed", `{"type":"response.completed","response":{"id":"resp_123","status":"completed","model":"gpt-5.2","output":[{"type":"message","id":"msg_123","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hello there!","annotations":[]}]}],"usage":{"input_tokens":4,"output_tokens":3,"total_tokens":7,"output_tokens_details":{"reasoning_tokens":1}}}}`)
 		flusher.Flush()
 	}))
 	defer server.Close()
@@ -1065,30 +1066,31 @@ func TestOpenAIClient_StreamWithMultipleContentDeltas(t *testing.T) {
 
 func TestOpenAIClient_StreamJustFinishedToolCallEvent(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Errorf("expected /responses request, got %s", r.URL.Path)
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			t.Fatal("expected http.Flusher")
 		}
 
-		// Simulate streaming tool call that gets completed
-		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}` + "\n\n"))
+		writeOpenAIResponseSSE(t, w, "response.created", `{"type":"response.created","response":{"id":"resp_123","status":"in_progress","model":"gpt-5.2"}}`)
 		flusher.Flush()
 
-		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_test","type":"function","function":{"name":"test_tool","arguments":""}}]},"finish_reason":null}]}` + "\n\n"))
+		writeOpenAIResponseSSE(t, w, "response.output_item.added", `{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_test","call_id":"call_test","name":"test_tool","arguments":"","status":"in_progress"}}`)
 		flusher.Flush()
 
-		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"key\":\"value\"}"}}]},"finish_reason":null}]}` + "\n\n"))
+		writeOpenAIResponseSSE(t, w, "response.function_call_arguments.done", `{"type":"response.function_call_arguments.done","item_id":"fc_test","output_index":0,"arguments":"{\"key\":\"value\"}"}`)
 		flusher.Flush()
 
-		// Next chunk signals tool call completion via JustFinishedToolCall
-		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_test2","type":"function","function":{"name":"another_tool","arguments":""}}]},"finish_reason":null}]}` + "\n\n"))
+		writeOpenAIResponseSSE(t, w, "response.output_item.added", `{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_test2","call_id":"call_test2","name":"another_tool","arguments":"","status":"in_progress"}}`)
 		flusher.Flush()
 
-		w.Write([]byte(`data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-5.2","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}` + "\n\n"))
+		writeOpenAIResponseSSE(t, w, "response.function_call_arguments.done", `{"type":"response.function_call_arguments.done","item_id":"fc_test2","output_index":1,"arguments":"{\"other\":true}"}`)
 		flusher.Flush()
 
-		w.Write([]byte("data: [DONE]\n\n"))
+		writeOpenAIResponseSSE(t, w, "response.completed", `{"type":"response.completed","response":{"id":"resp_123","status":"completed","model":"gpt-5.2","output":[{"type":"function_call","id":"fc_test","call_id":"call_test","name":"test_tool","arguments":"{\"key\":\"value\"}","status":"completed"},{"type":"function_call","id":"fc_test2","call_id":"call_test2","name":"another_tool","arguments":"{\"other\":true}","status":"completed"}],"usage":{"input_tokens":6,"output_tokens":4,"total_tokens":10}}}`)
 		flusher.Flush()
 	}))
 	defer server.Close()
@@ -1134,6 +1136,178 @@ func TestOpenAIClient_StreamJustFinishedToolCallEvent(t *testing.T) {
 	// Should get at least one ContentStop for completed tool call
 	if contentStopEvents == 0 {
 		t.Error("expected at least one ContentStop event for tool call completion")
+	}
+}
+
+func TestOpenAIClient_StreamCompletedResponseCarriesUsageAndContent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Errorf("expected /responses request, got %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		writeOpenAIResponseSSE(t, w, "response.created", `{"type":"response.created","response":{"id":"resp_123","status":"in_progress","model":"gpt-5.2"}}`)
+		writeOpenAIResponseSSE(t, w, "response.completed", `{"type":"response.completed","response":{"id":"resp_123","status":"completed","model":"gpt-5.2","output":[{"type":"message","id":"msg_123","status":"completed","role":"assistant","content":[{"type":"output_text","text":"final text","annotations":[]}]}],"usage":{"input_tokens":12,"output_tokens":5,"total_tokens":17,"output_tokens_details":{"reasoning_tokens":2}}}}`)
+	}))
+	defer server.Close()
+
+	client := &OpenAIClient{
+		client: openai.NewClient(
+			option.WithAPIKey("test-key"),
+			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
+		),
+		model: "gpt-5.2",
+	}
+
+	eventChan, err := client.CreateMessageStream(context.Background(), &Request{
+		Messages: []Message{NewUserMessage("Hello")},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error creating stream: %v", err)
+	}
+
+	var final *Response
+	for event := range eventChan {
+		if event.Type == EventError {
+			t.Fatalf("unexpected error event: %v", event.Error)
+		}
+		if event.Type == EventMessageStop {
+			final = event.Response
+		}
+	}
+
+	if final == nil {
+		t.Fatal("expected final response")
+	}
+	if final.ID != "resp_123" {
+		t.Errorf("expected response id resp_123, got %s", final.ID)
+	}
+	if final.TextContent() != "final text" {
+		t.Errorf("expected final text, got %q", final.TextContent())
+	}
+	if final.Usage.InputTokens != 12 || final.Usage.OutputTokens != 5 || final.Usage.ThinkingTokens != 2 {
+		t.Errorf("unexpected usage: %+v", final.Usage)
+	}
+}
+
+func TestOpenAIClient_StreamResponsesErrorEvent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Errorf("expected /responses request, got %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		writeOpenAIResponseSSE(t, w, "error", `{"type":"error","message":"stream failed","param":"input"}`)
+	}))
+	defer server.Close()
+
+	client := &OpenAIClient{
+		client: openai.NewClient(
+			option.WithAPIKey("test-key"),
+			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
+		),
+		model: "gpt-5.2",
+	}
+
+	eventChan, err := client.CreateMessageStream(context.Background(), &Request{
+		Messages: []Message{NewUserMessage("Hello")},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error creating stream: %v", err)
+	}
+
+	var gotError bool
+	for event := range eventChan {
+		if event.Type == EventError {
+			gotError = true
+			if !strings.Contains(event.Error.Error(), "stream failed") {
+				t.Errorf("expected stream failed error, got %v", event.Error)
+			}
+		}
+	}
+	if !gotError {
+		t.Fatal("expected error event")
+	}
+}
+
+func TestOpenAIClient_StreamResponsesFailedEvent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Errorf("expected /responses request, got %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		writeOpenAIResponseSSE(t, w, "response.failed", `{"type":"response.failed","response":{"id":"resp_failed","status":"failed","model":"gpt-5.2","error":{"message":"model failed","type":"server_error"}}}`)
+	}))
+	defer server.Close()
+
+	client := &OpenAIClient{
+		client: openai.NewClient(
+			option.WithAPIKey("test-key"),
+			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
+		),
+		model: "gpt-5.2",
+	}
+
+	eventChan, err := client.CreateMessageStream(context.Background(), &Request{
+		Messages: []Message{NewUserMessage("Hello")},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error creating stream: %v", err)
+	}
+
+	assertOpenAIStreamErrorContains(t, eventChan, "model failed")
+}
+
+func TestOpenAIClient_StreamResponsesIncompleteEvent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Errorf("expected /responses request, got %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		writeOpenAIResponseSSE(t, w, "response.incomplete", `{"type":"response.incomplete","response":{"id":"resp_incomplete","status":"incomplete","model":"gpt-5.2","incomplete_details":{"reason":"max_output_tokens"}}}`)
+	}))
+	defer server.Close()
+
+	client := &OpenAIClient{
+		client: openai.NewClient(
+			option.WithAPIKey("test-key"),
+			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
+		),
+		model: "gpt-5.2",
+	}
+
+	eventChan, err := client.CreateMessageStream(context.Background(), &Request{
+		Messages: []Message{NewUserMessage("Hello")},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error creating stream: %v", err)
+	}
+
+	assertOpenAIStreamErrorContains(t, eventChan, "max_output_tokens")
+}
+
+func assertOpenAIStreamErrorContains(t *testing.T, eventChan <-chan StreamEvent, want string) {
+	t.Helper()
+	var gotError bool
+	for event := range eventChan {
+		if event.Type == EventError {
+			gotError = true
+			if !strings.Contains(event.Error.Error(), want) {
+				t.Errorf("expected error containing %q, got %v", want, event.Error)
+			}
+		}
+	}
+	if !gotError {
+		t.Fatal("expected error event")
+	}
+}
+
+func writeOpenAIResponseSSE(t *testing.T, w http.ResponseWriter, eventName string, data string) {
+	t.Helper()
+	if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventName, data); err != nil {
+		t.Fatalf("failed to write SSE event: %v", err)
 	}
 }
 

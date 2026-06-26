@@ -1,7 +1,10 @@
+// ABOUTME: Exercises orchestrator state, event, tool, and streaming behavior.
+// ABOUTME: Uses focused test clients to validate the think-act loop contract.
 package orchestrator_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -197,6 +200,296 @@ func (m *mockTool) Execute(ctx context.Context, params map[string]any) (*tool.Re
 		return m.execFunc(ctx, params)
 	}
 	return tool.NewResult(m.name, true, "executed", ""), nil
+}
+
+type recordingStreamClient struct {
+	responses         []*llm.Response
+	events            [][]llm.StreamEvent
+	createErr         error
+	streamSetupErr    error
+	createCalls       int
+	streamCalls       int
+	lastStreamRequest *llm.Request
+}
+
+func (c *recordingStreamClient) CreateMessage(ctx context.Context, req *llm.Request) (*llm.Response, error) {
+	c.createCalls++
+	if c.createErr != nil {
+		return nil, c.createErr
+	}
+	if c.createCalls > len(c.responses) {
+		return &llm.Response{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
+			StopReason: llm.StopReasonEndTurn,
+		}, nil
+	}
+	return c.responses[c.createCalls-1], nil
+}
+
+func (c *recordingStreamClient) CreateMessageStream(ctx context.Context, req *llm.Request) (<-chan llm.StreamEvent, error) {
+	c.streamCalls++
+	c.lastStreamRequest = req
+	if c.streamSetupErr != nil {
+		return nil, c.streamSetupErr
+	}
+
+	ch := make(chan llm.StreamEvent)
+	callIndex := c.streamCalls - 1
+	go func() {
+		defer close(ch)
+		if callIndex < len(c.events) {
+			for _, event := range c.events[callIndex] {
+				ch <- event
+			}
+			return
+		}
+		if callIndex < len(c.responses) {
+			ch <- llm.StreamEvent{Type: llm.EventMessageStop, Response: c.responses[callIndex]}
+		}
+	}()
+	return ch, nil
+}
+
+func (c *recordingStreamClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
+
+func TestOrchestratorStreamingModeUsesCreateMessageStream(t *testing.T) {
+	streamedResponse := &llm.Response{
+		Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "streamed"}},
+		StopReason: llm.StopReasonEndTurn,
+	}
+	client := &recordingStreamClient{
+		createErr: errors.New("CreateMessage should not be called"),
+		events: [][]llm.StreamEvent{{
+			{Type: llm.EventMessageStop, Response: streamedResponse},
+		}},
+	}
+	registry := tool.NewRegistry()
+	executor := tool.NewExecutor(registry)
+
+	config := orchestrator.DefaultConfig()
+	config.Stream = true
+	orch := orchestrator.NewWithConfig(client, executor, config)
+	events := orch.Subscribe()
+
+	if err := orch.Run(context.Background(), "Say hello"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if client.createCalls != 0 {
+		t.Fatalf("expected CreateMessage not to be called, got %d calls", client.createCalls)
+	}
+	if client.streamCalls != 1 {
+		t.Fatalf("expected CreateMessageStream to be called once, got %d calls", client.streamCalls)
+	}
+
+	var gotText bool
+	for event := range events {
+		if event.Type == orchestrator.EventText && event.Text == "streamed" {
+			gotText = true
+		}
+	}
+	if !gotText {
+		t.Fatal("expected streamed response to be processed as text")
+	}
+}
+
+func TestOrchestratorStreamingModeProcessesToolUse(t *testing.T) {
+	client := &recordingStreamClient{
+		createErr: errors.New("CreateMessage should not be called"),
+		events: [][]llm.StreamEvent{
+			{
+				{Type: llm.EventMessageStop, Response: &llm.Response{
+					Content: []llm.ContentBlock{{
+						Type:  llm.ContentTypeToolUse,
+						ID:    "tool_1",
+						Name:  "test_tool",
+						Input: map[string]any{"arg": "value"},
+					}},
+					StopReason: llm.StopReasonToolUse,
+				}},
+			},
+			{
+				{Type: llm.EventMessageStop, Response: &llm.Response{
+					Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "tool complete"}},
+					StopReason: llm.StopReasonEndTurn,
+				}},
+			},
+		},
+	}
+
+	var toolCalls int
+	registry := tool.NewRegistry()
+	registry.Register(&mockTool{
+		name: "test_tool",
+		execFunc: func(ctx context.Context, params map[string]any) (*tool.Result, error) {
+			toolCalls++
+			if params["arg"] != "value" {
+				t.Fatalf("expected tool arg value, got %v", params["arg"])
+			}
+			return tool.NewResult("test_tool", true, "executed", ""), nil
+		},
+	})
+	executor := tool.NewExecutor(registry)
+
+	config := orchestrator.DefaultConfig()
+	config.Stream = true
+	orch := orchestrator.NewWithConfig(client, executor, config)
+	events := orch.Subscribe()
+
+	if err := orch.Run(context.Background(), "Use the tool"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if client.createCalls != 0 {
+		t.Fatalf("expected CreateMessage not to be called, got %d calls", client.createCalls)
+	}
+	if client.streamCalls != 2 {
+		t.Fatalf("expected two streaming calls for tool loop, got %d", client.streamCalls)
+	}
+	if toolCalls != 1 {
+		t.Fatalf("expected tool to execute once, got %d", toolCalls)
+	}
+
+	var gotToolCall, gotToolResult, gotComplete bool
+	for event := range events {
+		switch event.Type {
+		case orchestrator.EventToolCall:
+			gotToolCall = true
+		case orchestrator.EventToolResult:
+			gotToolResult = true
+		case orchestrator.EventComplete:
+			gotComplete = true
+		}
+	}
+	if !gotToolCall {
+		t.Error("expected tool call event")
+	}
+	if !gotToolResult {
+		t.Error("expected tool result event")
+	}
+	if !gotComplete {
+		t.Error("expected completion after streamed tool loop")
+	}
+}
+
+func TestOrchestratorStreamingModeReturnsStreamError(t *testing.T) {
+	streamErr := errors.New("stream failed")
+	client := &recordingStreamClient{
+		createErr: errors.New("CreateMessage should not be called"),
+		events: [][]llm.StreamEvent{{
+			{Type: llm.EventError, Error: streamErr},
+		}},
+	}
+	registry := tool.NewRegistry()
+	executor := tool.NewExecutor(registry)
+
+	config := orchestrator.DefaultConfig()
+	config.Stream = true
+	orch := orchestrator.NewWithConfig(client, executor, config)
+	events := orch.Subscribe()
+
+	err := orch.Run(context.Background(), "Fail in stream")
+	if !errors.Is(err, streamErr) {
+		t.Fatalf("expected stream error, got %v", err)
+	}
+	if client.createCalls != 0 {
+		t.Fatalf("expected CreateMessage not to be called, got %d calls", client.createCalls)
+	}
+	if client.streamCalls != 1 {
+		t.Fatalf("expected CreateMessageStream to be called once, got %d calls", client.streamCalls)
+	}
+
+	var gotError bool
+	for event := range events {
+		if event.Type == orchestrator.EventError && errors.Is(event.Error, streamErr) {
+			gotError = true
+		}
+	}
+	if !gotError {
+		t.Fatal("expected stream error event")
+	}
+
+	setupErr := errors.New("stream setup failed")
+	setupClient := &recordingStreamClient{
+		createErr:      errors.New("CreateMessage should not be called"),
+		streamSetupErr: setupErr,
+	}
+	setupOrch := orchestrator.NewWithConfig(setupClient, executor, config)
+	setupEvents := setupOrch.Subscribe()
+
+	err = setupOrch.Run(context.Background(), "Fail before stream")
+	if !errors.Is(err, setupErr) {
+		t.Fatalf("expected setup error, got %v", err)
+	}
+	if setupClient.createCalls != 0 {
+		t.Fatalf("expected CreateMessage not to be called for setup error, got %d calls", setupClient.createCalls)
+	}
+	for range setupEvents {
+	}
+
+	missingFinalClient := &recordingStreamClient{
+		createErr: errors.New("CreateMessage should not be called"),
+		events:    [][]llm.StreamEvent{{}},
+	}
+	missingFinalOrch := orchestrator.NewWithConfig(missingFinalClient, executor, config)
+	missingFinalEvents := missingFinalOrch.Subscribe()
+
+	err = missingFinalOrch.Run(context.Background(), "Close without final response")
+	if err == nil {
+		t.Fatal("expected error when stream closes without final message stop response")
+	}
+	if !contains(err.Error(), "stream closed without final message_stop response") {
+		t.Fatalf("expected missing final response error, got %v", err)
+	}
+	if missingFinalClient.createCalls != 0 {
+		t.Fatalf("expected CreateMessage not to be called for missing final response, got %d calls", missingFinalClient.createCalls)
+	}
+	for range missingFinalEvents {
+	}
+}
+
+func TestOrchestratorStreamingModeKeepsUsage(t *testing.T) {
+	client := &recordingStreamClient{
+		createErr: errors.New("CreateMessage should not be called"),
+		events: [][]llm.StreamEvent{{
+			{Type: llm.EventMessageStop, Response: &llm.Response{
+				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "usage"}},
+				StopReason: llm.StopReasonEndTurn,
+				Usage: llm.Usage{
+					InputTokens:    11,
+					OutputTokens:   7,
+					ThinkingTokens: 3,
+				},
+			}},
+		}},
+	}
+	registry := tool.NewRegistry()
+	executor := tool.NewExecutor(registry)
+
+	config := orchestrator.DefaultConfig()
+	config.Stream = true
+	orch := orchestrator.NewWithConfig(client, executor, config)
+	events := orch.Subscribe()
+
+	if err := orch.Run(context.Background(), "Track usage"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for range events {
+	}
+
+	usage := orch.Usage()
+	if usage.InputTokens != 11 {
+		t.Errorf("expected 11 input tokens, got %d", usage.InputTokens)
+	}
+	if usage.OutputTokens != 7 {
+		t.Errorf("expected 7 output tokens, got %d", usage.OutputTokens)
+	}
+	if usage.ThinkingTokens != 3 {
+		t.Errorf("expected 3 thinking tokens, got %d", usage.ThinkingTokens)
+	}
+	if usage.RequestCount != 1 {
+		t.Errorf("expected 1 request, got %d", usage.RequestCount)
+	}
 }
 
 func TestOrchestratorSimpleResponse(t *testing.T) {

@@ -1,5 +1,5 @@
 // ABOUTME: OpenAI API client implementing the llm.Client interface.
-// ABOUTME: Handles both streaming and non-streaming chat completions with tool calling.
+// ABOUTME: Handles Responses API message creation and streaming with tool calling.
 package llm
 
 import (
@@ -661,8 +661,8 @@ func (o *OpenAIClient) CreateMessageStream(ctx context.Context, req *Request) (<
 		return nil, err
 	}
 
-	params := convertOpenAIRequest(req)
-	stream := o.client.Chat.Completions.NewStreaming(ctx, params)
+	params := convertOpenAIResponsesRequest(req)
+	stream := o.client.Responses.NewStreaming(ctx, params)
 
 	eventChan := make(chan StreamEvent, 100)
 
@@ -678,42 +678,75 @@ func (o *OpenAIClient) CreateMessageStream(ctx context.Context, req *Request) (<
 			close(eventChan)
 		}()
 
-		var acc openai.ChatCompletionAccumulator
-
-		// Send message start
-		eventChan <- StreamEvent{
-			Type: EventMessageStart,
+		type streamingToolCall struct {
+			callID    string
+			name      string
+			arguments string
 		}
+		toolCalls := make(map[string]streamingToolCall)
+		messageStarted := false
 
 		for stream.Next() {
-			chunk := stream.Current()
-			acc.AddChunk(chunk)
-
-			// Emit text deltas
-			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
+			event := stream.Current()
+			switch event.Type {
+			case "response.created":
+				messageStarted = true
+				eventChan <- StreamEvent{Type: EventMessageStart}
+			case "response.output_text.delta":
 				eventChan <- StreamEvent{
 					Type: EventContentDelta,
-					Text: chunk.Choices[0].Delta.Content,
+					Text: event.Delta,
 				}
-			}
-
-			// Check for completed tool calls
-			if toolCall, ok := acc.JustFinishedToolCall(); ok {
-				var input map[string]any
-				if err := json.Unmarshal([]byte(toolCall.Arguments), &input); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to parse tool call arguments for %s: %v\n", toolCall.Name, err)
-					input = make(map[string]any)
+			case "response.output_item.added":
+				if event.Item.Type == "function_call" {
+					toolCalls[event.Item.ID] = streamingToolCall{
+						callID:    event.Item.CallID,
+						name:      event.Item.Name,
+						arguments: event.Item.Arguments.OfString,
+					}
 				}
-
+			case "response.function_call_arguments.delta":
+				toolCall := toolCalls[event.ItemID]
+				toolCall.arguments += event.Delta
+				toolCalls[event.ItemID] = toolCall
+			case "response.function_call_arguments.done":
+				toolCall := toolCalls[event.ItemID]
+				if event.Arguments != "" {
+					toolCall.arguments = event.Arguments
+				}
+				toolCalls[event.ItemID] = toolCall
+				block := openAIStreamingToolCallBlock(event.ItemID, toolCall)
 				eventChan <- StreamEvent{
-					Type: EventContentStop,
-					Block: &ContentBlock{
-						Type:  ContentTypeToolUse,
-						ID:    toolCall.ID,
-						Name:  toolCall.Name,
-						Input: input,
-					},
+					Type:  EventContentStop,
+					Block: block,
 				}
+			case "response.completed":
+				if !messageStarted {
+					eventChan <- StreamEvent{Type: EventMessageStart}
+				}
+				resp := convertOpenAIResponsesResponse(&event.Response)
+				eventChan <- StreamEvent{
+					Type:     EventMessageStop,
+					Response: resp,
+				}
+			case "error":
+				eventChan <- StreamEvent{
+					Type:  EventError,
+					Error: fmt.Errorf("openai stream error: %s", event.Message),
+				}
+				return
+			case "response.failed":
+				eventChan <- StreamEvent{
+					Type:  EventError,
+					Error: fmt.Errorf("openai stream failed: %s", event.Response.Error.Message),
+				}
+				return
+			case "response.incomplete":
+				eventChan <- StreamEvent{
+					Type:  EventError,
+					Error: fmt.Errorf("openai stream incomplete: %s", event.Response.IncompleteDetails.Reason),
+				}
+				return
 			}
 		}
 
@@ -724,20 +757,36 @@ func (o *OpenAIClient) CreateMessageStream(ctx context.Context, req *Request) (<
 			}
 			return
 		}
-
-		// Final message with complete response
-		eventChan <- StreamEvent{
-			Type:     EventMessageStop,
-			Response: convertOpenAIResponse(&acc.ChatCompletion),
-		}
 	}()
 
 	return eventChan, nil
 }
 
-// Capabilities reports which media types OpenAI supports across the two
-// transports this client uses: Responses API for CreateMessage, Chat
-// Completions for CreateMessageStream. Image and PDF are supported by both.
+func openAIStreamingToolCallBlock(itemID string, toolCall struct {
+	callID    string
+	name      string
+	arguments string
+}) *ContentBlock {
+	var input map[string]any
+	if err := json.Unmarshal([]byte(toolCall.arguments), &input); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to parse tool call arguments for %s: %v\n", toolCall.name, err)
+		input = make(map[string]any)
+	}
+	id := toolCall.callID
+	if id == "" {
+		id = itemID
+	}
+	return &ContentBlock{
+		Type:  ContentTypeToolUse,
+		ID:    id,
+		Name:  toolCall.name,
+		Input: input,
+	}
+}
+
+// Capabilities reports which media types OpenAI supports through the Responses
+// API paths used by both CreateMessage and CreateMessageStream. Image and PDF
+// are supported.
 // Audio is reported as false because OpenAI's Responses API does not accept
 // audio input at the API level — only Chat Completions does. Narrowing here
 // keeps the non-streaming path from silently dropping audio. Restoration is
