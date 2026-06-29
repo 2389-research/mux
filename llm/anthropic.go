@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -210,6 +211,119 @@ func (a *AnthropicClient) CreateMessage(ctx context.Context, req *Request) (*Res
 	return convertResponse(msg), nil
 }
 
+type anthropicStreamBlock struct {
+	block    ContentBlock
+	inputRaw string
+}
+
+type anthropicStreamAccumulator struct {
+	response *Response
+	blocks   map[int]*anthropicStreamBlock
+}
+
+func newAnthropicStreamAccumulator() *anthropicStreamAccumulator {
+	return &anthropicStreamAccumulator{blocks: make(map[int]*anthropicStreamBlock)}
+}
+
+func (a *anthropicStreamAccumulator) start(msg *anthropic.Message) *Response {
+	a.response = convertResponse(msg)
+	a.response.Content = nil
+	return a.response
+}
+
+func (a *anthropicStreamAccumulator) startBlock(index int, blockType ContentType, id string, name string, text string, thinking string) {
+	block := ContentBlock{
+		Type:     blockType,
+		ID:       id,
+		Name:     name,
+		Text:     text,
+		Thinking: thinking,
+	}
+	a.blocks[index] = &anthropicStreamBlock{block: block}
+}
+
+func (a *anthropicStreamAccumulator) appendDelta(index int, deltaType string, text string) {
+	block, ok := a.blocks[index]
+	if !ok {
+		return
+	}
+	switch deltaType {
+	case "text_delta":
+		block.block.Text += text
+	case "thinking_delta":
+		block.block.Thinking += text
+	case "input_json_delta":
+		block.inputRaw += text
+	}
+}
+
+func (a *anthropicStreamAccumulator) stopBlock(index int) {
+	block, ok := a.blocks[index]
+	if !ok || block.block.Type != ContentTypeToolUse {
+		return
+	}
+	if block.inputRaw == "" {
+		block.block.Input = make(map[string]any)
+		return
+	}
+	var input map[string]any
+	if err := json.Unmarshal([]byte(block.inputRaw), &input); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to parse streamed tool input for %s: %v\n", block.block.Name, err)
+		input = make(map[string]any)
+	}
+	block.block.Input = input
+}
+
+func (a *anthropicStreamAccumulator) mergeDelta(stopReason StopReason, usage Usage) *Response {
+	if a.response == nil {
+		a.response = &Response{}
+	}
+	if stopReason != "" {
+		a.response.StopReason = stopReason
+	}
+	if usage.OutputTokens > 0 {
+		a.response.Usage.OutputTokens = usage.OutputTokens
+	}
+	return &Response{StopReason: stopReason, Usage: usage}
+}
+
+func (a *anthropicStreamAccumulator) finish() *Response {
+	if a.response == nil {
+		a.response = &Response{}
+	}
+	indexes := make([]int, 0, len(a.blocks))
+	for index := range a.blocks {
+		indexes = append(indexes, index)
+	}
+	sort.Ints(indexes)
+
+	a.response.Content = make([]ContentBlock, 0, len(indexes))
+	for _, index := range indexes {
+		a.response.Content = append(a.response.Content, a.blocks[index].block)
+	}
+	return a.response
+}
+
+func cloneResponse(response *Response) *Response {
+	if response == nil {
+		return nil
+	}
+	clone := *response
+	if len(response.Content) > 0 {
+		clone.Content = make([]ContentBlock, len(response.Content))
+		for i, block := range response.Content {
+			clone.Content[i] = block
+			if block.Input != nil {
+				clone.Content[i].Input = make(map[string]any, len(block.Input))
+				for key, value := range block.Input {
+					clone.Content[i].Input[key] = value
+				}
+			}
+		}
+	}
+	return &clone
+}
+
 // CreateMessageStream sends a message and returns a channel of streaming events.
 func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request) (<-chan StreamEvent, error) {
 	if req.Model == "" {
@@ -239,13 +353,15 @@ func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request)
 			close(eventChan)
 		}()
 
+		acc := newAnthropicStreamAccumulator()
 		for stream.Next() {
 			event := stream.Current()
 			switch event.Type {
 			case "message_start":
+				response := acc.start(&event.Message)
 				eventChan <- StreamEvent{
 					Type:     EventMessageStart,
-					Response: convertResponse(&event.Message),
+					Response: cloneResponse(response),
 				}
 			case "content_block_start":
 				se := StreamEvent{
@@ -254,11 +370,13 @@ func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request)
 				}
 				// Populate Block so consumers can distinguish text from tool_use
 				if event.ContentBlock.Type != "" {
+					blockType := ContentType(event.ContentBlock.Type)
 					se.Block = &ContentBlock{
-						Type: ContentType(event.ContentBlock.Type),
+						Type: blockType,
 						ID:   event.ContentBlock.ID,
 						Name: event.ContentBlock.Name,
 					}
+					acc.startBlock(int(event.Index), blockType, event.ContentBlock.ID, event.ContentBlock.Name, event.ContentBlock.Text, event.ContentBlock.Thinking)
 				}
 				eventChan <- se
 			case "content_block_delta":
@@ -271,12 +389,14 @@ func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request)
 				case "thinking_delta":
 					text = event.Delta.Thinking
 				}
+				acc.appendDelta(int(event.Index), event.Delta.Type, text)
 				eventChan <- StreamEvent{
 					Type:  EventContentDelta,
 					Index: int(event.Index),
 					Text:  text,
 				}
 			case "content_block_stop":
+				acc.stopBlock(int(event.Index))
 				eventChan <- StreamEvent{
 					Type:  EventContentStop,
 					Index: int(event.Index),
@@ -287,17 +407,13 @@ func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request)
 				}
 				// Carry stop_reason and usage from the final message_delta
 				if event.Delta.StopReason != "" || event.Usage.OutputTokens > 0 {
-					se.Response = &Response{
-						StopReason: StopReason(event.Delta.StopReason),
-						Usage: Usage{
-							OutputTokens: int(event.Usage.OutputTokens),
-						},
-					}
+					se.Response = acc.mergeDelta(StopReason(event.Delta.StopReason), Usage{OutputTokens: int(event.Usage.OutputTokens)})
 				}
 				eventChan <- se
 			case "message_stop":
 				eventChan <- StreamEvent{
-					Type: EventMessageStop,
+					Type:     EventMessageStop,
+					Response: acc.finish(),
 				}
 			}
 		}
