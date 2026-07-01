@@ -64,6 +64,22 @@ func (e *Executor) SetApprovalFunc(fn ApprovalFunc) {
 	e.approvalFunc = fn
 }
 
+// ApprovalFunc returns the currently configured approval function (may be nil).
+func (e *Executor) ApprovalFunc() ApprovalFunc {
+	return e.approvalFunc
+}
+
+// NeedsApproval reports whether the named tool would require approval for these
+// params, without executing it. Unknown tools return false; Execute will surface
+// ErrToolNotFound when actually invoked.
+func (e *Executor) NeedsApproval(toolName string, params map[string]any) bool {
+	t, ok := e.source.Get(toolName)
+	if !ok {
+		return false
+	}
+	return t.RequiresApproval(params)
+}
+
 // AddBeforeHook adds a hook that runs before tool execution.
 func (e *Executor) AddBeforeHook(hook BeforeHook) {
 	e.beforeHooks = append(e.beforeHooks, hook)

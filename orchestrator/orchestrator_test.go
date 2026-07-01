@@ -13,6 +13,7 @@ import (
 
 	"github.com/2389-research/mux/llm"
 	"github.com/2389-research/mux/orchestrator"
+	"github.com/2389-research/mux/session"
 	"github.com/2389-research/mux/tool"
 )
 
@@ -2197,6 +2198,30 @@ func TestOrchestratorLockContract(t *testing.T) {
 	}
 }
 
+func TestNewWithConfig_SuspendRequiresStore(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic when ApprovalSuspend has no SessionStore")
+		} else if r != "mux: ApprovalSuspend requires a SessionStore" {
+			t.Fatalf("wrong panic value: %v", r)
+		}
+	}()
+	registry := tool.NewRegistry()
+	executor := tool.NewExecutor(registry)
+	orchestrator.NewWithConfig(&mockLLMClient{}, executor, orchestrator.Config{
+		MaxIterations: 5,
+		ApprovalMode:  orchestrator.ApprovalSuspend,
+		// SessionStore intentionally nil
+	})
+}
+
+func TestNewWithConfig_DefaultsDoNotPanic(t *testing.T) {
+	registry := tool.NewRegistry()
+	executor := tool.NewExecutor(registry)
+	// ApprovalSync (zero value) + nil store must remain today's behavior: no panic.
+	_ = orchestrator.NewWithConfig(&mockLLMClient{}, executor, orchestrator.Config{MaxIterations: 5})
+}
+
 func TestThinkingAdaptiveFullCycle(t *testing.T) {
 	// Scenario:
 	// Call 0: first call → thinking ON (iteration 0)
@@ -2275,5 +2300,250 @@ func TestThinkingAdaptiveFullCycle(t *testing.T) {
 		if hasThinking != expected[i] {
 			t.Errorf("request %d: thinking=%v, want %v", i, hasThinking, expected[i])
 		}
+	}
+}
+
+// approvalTool is a tool double that always requires approval and records
+// whether it was actually executed.
+type approvalTool struct {
+	name     string
+	executed *bool
+}
+
+func (a *approvalTool) Name() string                         { return a.name }
+func (a *approvalTool) Description() string                  { return "needs approval" }
+func (a *approvalTool) RequiresApproval(map[string]any) bool { return true }
+func (a *approvalTool) Execute(_ context.Context, _ map[string]any) (*tool.Result, error) {
+	if a.executed != nil {
+		*a.executed = true
+	}
+	return tool.NewResult(a.name, true, "executed", ""), nil
+}
+
+func TestRun_SuspendsOnApprovalTool(t *testing.T) {
+	store := session.NewFileStore(t.TempDir())
+	registry := tool.NewRegistry()
+	executed := false
+	registry.Register(&approvalTool{name: "deploy", executed: &executed})
+	executor := tool.NewExecutor(registry)
+	client := &mockLLMClient{responses: []*llm.Response{
+		{Content: []llm.ContentBlock{{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "deploy", Input: map[string]any{"env": "prod"}}}, StopReason: llm.StopReasonToolUse},
+	}}
+	orch := orchestrator.NewWithConfig(client, executor, orchestrator.Config{
+		MaxIterations: 5,
+		SessionStore:  store,
+		ApprovalMode:  orchestrator.ApprovalSuspend,
+	})
+
+	err := orch.Run(context.Background(), "ship it")
+
+	var susp *orchestrator.Suspended
+	if !errors.As(err, &susp) {
+		t.Fatalf("Run err = %v, want *Suspended", err)
+	}
+	if susp.Suspension.Reason != orchestrator.ReasonApprovalRequired {
+		t.Errorf("Reason = %q, want %q", susp.Suspension.Reason, orchestrator.ReasonApprovalRequired)
+	}
+	if len(susp.Suspension.Pending) != 1 || susp.Suspension.Pending[0].ID != "call-1" || !susp.Suspension.Pending[0].NeedsApproval {
+		t.Errorf("Pending = %+v", susp.Suspension.Pending)
+	}
+	if executed {
+		t.Error("tool executed despite suspension; must not run before approval")
+	}
+	if orch.State() != orchestrator.StateAwaitingApproval {
+		t.Errorf("State = %q, want %q", orch.State(), orchestrator.StateAwaitingApproval)
+	}
+	snap, err := store.Load(context.Background(), orch.SessionID())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if snap.Status != orchestrator.StatusSuspended || snap.Suspension == nil {
+		t.Errorf("snapshot Status=%q Suspension=%+v", snap.Status, snap.Suspension)
+	}
+}
+
+func TestResume_Approve_ExecutesAndCompletes(t *testing.T) {
+	store := session.NewFileStore(t.TempDir())
+	registry := tool.NewRegistry()
+	executed := false
+	registry.Register(&approvalTool{name: "deploy", executed: &executed})
+	executor := tool.NewExecutor(registry)
+	// First response asks for the tool; after resume the second response ends the turn.
+	client := &mockLLMClient{responses: []*llm.Response{
+		{Content: []llm.ContentBlock{{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "deploy", Input: map[string]any{}}}, StopReason: llm.StopReasonToolUse},
+		{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "deployed"}}, StopReason: llm.StopReasonEndTurn},
+	}}
+	cfg := orchestrator.Config{MaxIterations: 5, SessionStore: store, ApprovalMode: orchestrator.ApprovalSuspend}
+	orch := orchestrator.NewWithConfig(client, executor, cfg)
+
+	var susp *orchestrator.Suspended
+	if err := orch.Run(context.Background(), "ship"); !errors.As(err, &susp) {
+		t.Fatalf("Run err = %v, want *Suspended", err)
+	}
+
+	if err := orch.Resume(context.Background(), orch.SessionID(), orchestrator.Approve(true)); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if !executed {
+		t.Error("approved tool did not execute on Resume")
+	}
+	snap, err := store.Load(context.Background(), orch.SessionID())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if snap.Status != orchestrator.StatusComplete {
+		t.Errorf("final Status = %q, want %q", snap.Status, orchestrator.StatusComplete)
+	}
+}
+
+func TestResume_Deny_SynthesizesErrorResultAndCompletes(t *testing.T) {
+	store := session.NewFileStore(t.TempDir())
+	registry := tool.NewRegistry()
+	executed := false
+	registry.Register(&approvalTool{name: "deploy", executed: &executed})
+	executor := tool.NewExecutor(registry)
+	client := &mockLLMClient{responses: []*llm.Response{
+		{Content: []llm.ContentBlock{{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "deploy", Input: map[string]any{}}}, StopReason: llm.StopReasonToolUse},
+		{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok, cancelled"}}, StopReason: llm.StopReasonEndTurn},
+	}}
+	cfg := orchestrator.Config{MaxIterations: 5, SessionStore: store, ApprovalMode: orchestrator.ApprovalSuspend}
+	orch := orchestrator.NewWithConfig(client, executor, cfg)
+
+	var susp *orchestrator.Suspended
+	if err := orch.Run(context.Background(), "ship"); !errors.As(err, &susp) {
+		t.Fatalf("Run err = %v, want *Suspended", err)
+	}
+	if err := orch.Resume(context.Background(), orch.SessionID(), orchestrator.Approve(false)); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if executed {
+		t.Error("denied tool must NOT execute")
+	}
+	// The denial must appear in history as an error tool_result so the model can react.
+	msgs := orch.Messages()
+	foundDenial := false
+	for _, m := range msgs {
+		for _, b := range m.Blocks {
+			if b.Type == llm.ContentTypeToolResult && b.ToolUseID == "call-1" && b.IsError {
+				foundDenial = true
+			}
+		}
+	}
+	if !foundDenial {
+		t.Error("no error tool_result for the denied call-1 in history")
+	}
+}
+
+func TestResume_NotSuspended(t *testing.T) {
+	store := session.NewFileStore(t.TempDir())
+	registry := tool.NewRegistry()
+	executor := tool.NewExecutor(registry)
+	cfg := orchestrator.Config{MaxIterations: 5, SessionStore: store, ApprovalMode: orchestrator.ApprovalSuspend}
+	orch := orchestrator.NewWithConfig(&mockLLMClient{}, executor, cfg)
+	// No snapshot saved for this ID.
+	if err := orch.Resume(context.Background(), "session-missing", orchestrator.Approve(true)); err == nil {
+		t.Fatal("Resume on missing session = nil error, want error")
+	}
+}
+
+func TestResume_NotSuspended_AlreadyComplete(t *testing.T) {
+	store := session.NewFileStore(t.TempDir())
+	const sid = "session-done"
+	// Persist a completed (non-suspended) session directly.
+	if err := store.Save(context.Background(), &orchestrator.Snapshot{
+		SessionID: sid,
+		Status:    orchestrator.StatusComplete,
+	}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	executor := tool.NewExecutor(tool.NewRegistry())
+	cfg := orchestrator.Config{MaxIterations: 5, SessionStore: store, ApprovalMode: orchestrator.ApprovalSuspend}
+	orch := orchestrator.NewWithConfig(&mockLLMClient{}, executor, cfg)
+	if err := orch.Resume(context.Background(), sid, orchestrator.Approve(true)); err == nil {
+		t.Fatal("Resume on a completed (non-suspended) session = nil error, want error")
+	}
+}
+
+func TestRun_CheckpointsWithStore(t *testing.T) {
+	// One tool round-trip then end_turn. A store is configured in the default
+	// ApprovalSync mode: the loop must persist a running checkpoint after the
+	// tool batch and a complete checkpoint at the end.
+	store := session.NewFileStore(t.TempDir())
+	registry := tool.NewRegistry()
+	executed := false
+	registry.Register(&mockTool{name: "noop", execFunc: func(_ context.Context, _ map[string]any) (*tool.Result, error) {
+		executed = true
+		return tool.NewResult("noop", true, "done", ""), nil
+	}})
+	executor := tool.NewExecutor(registry)
+	client := &mockLLMClient{responses: []*llm.Response{
+		{Content: []llm.ContentBlock{{Type: llm.ContentTypeToolUse, ID: "u1", Name: "noop", Input: map[string]any{}}}, StopReason: llm.StopReasonToolUse},
+		{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "all done"}}, StopReason: llm.StopReasonEndTurn},
+	}}
+	orch := orchestrator.NewWithConfig(client, executor, orchestrator.Config{
+		MaxIterations: 5,
+		SessionStore:  store,
+	})
+	if err := orch.Run(context.Background(), "go"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !executed {
+		t.Fatal("tool was not executed")
+	}
+	snap, err := store.Load(context.Background(), orch.SessionID())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if snap.Status != orchestrator.StatusComplete {
+		t.Errorf("final snapshot Status = %q, want %q", snap.Status, orchestrator.StatusComplete)
+	}
+}
+
+func TestResume_CrossProcess(t *testing.T) {
+	dir := t.TempDir()
+	const prompt = "ship"
+
+	// --- "Process A": suspends and persists, then is discarded. ---
+	storeA := session.NewFileStore(dir)
+	regA := tool.NewRegistry()
+	regA.Register(&approvalTool{name: "deploy"})
+	execA := tool.NewExecutor(regA)
+	clientA := &mockLLMClient{responses: []*llm.Response{
+		{Content: []llm.ContentBlock{{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "deploy", Input: map[string]any{}}}, StopReason: llm.StopReasonToolUse},
+	}}
+	orchA := orchestrator.NewWithConfig(clientA, execA, orchestrator.Config{
+		MaxIterations: 5, SessionStore: storeA, ApprovalMode: orchestrator.ApprovalSuspend,
+	})
+	var susp *orchestrator.Suspended
+	if err := orchA.Run(context.Background(), prompt); !errors.As(err, &susp) {
+		t.Fatalf("process A Run err = %v, want *Suspended", err)
+	}
+	sessionID := orchA.SessionID()
+
+	// --- "Process B": brand-new orchestrator + executor, same on-disk store. ---
+	storeB := session.NewFileStore(dir)
+	regB := tool.NewRegistry()
+	executed := false
+	regB.Register(&approvalTool{name: "deploy", executed: &executed})
+	execB := tool.NewExecutor(regB)
+	clientB := &mockLLMClient{responses: []*llm.Response{
+		{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "deployed"}}, StopReason: llm.StopReasonEndTurn},
+	}}
+	orchB := orchestrator.NewWithConfig(clientB, execB, orchestrator.Config{
+		MaxIterations: 5, SessionStore: storeB, ApprovalMode: orchestrator.ApprovalSuspend,
+	})
+
+	if err := orchB.Resume(context.Background(), sessionID, orchestrator.Approve(true)); err != nil {
+		t.Fatalf("process B Resume: %v", err)
+	}
+	if !executed {
+		t.Error("tool did not execute in resuming process")
+	}
+	snap, err := storeB.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if snap.Status != orchestrator.StatusComplete {
+		t.Errorf("final Status = %q, want %q", snap.Status, orchestrator.StatusComplete)
 	}
 }

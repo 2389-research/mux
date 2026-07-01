@@ -9,9 +9,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/2389-research/mux/hooks"
 	"github.com/2389-research/mux/llm"
@@ -72,6 +74,8 @@ type Config struct {
 	ContextBudget    int               // Max tokens before compaction triggers (0 = disabled)
 	CompactionModel  string            // Model to use for summarization (defaults to main Model)
 	ThinkingSettings *ThinkingSettings // Per-call thinking control (nil = no thinking)
+	SessionStore     Store             // Optional snapshot store; enables checkpointing/resume (nil = disabled)
+	ApprovalMode     ApprovalMode      // How approval-required tools are handled (default ApprovalSync)
 }
 
 // DefaultConfig returns sensible defaults.
@@ -109,6 +113,9 @@ func NewWithConfig(client llm.Client, executor *tool.Executor, config Config) *O
 	}
 	if executor == nil {
 		panic("mux: executor must not be nil")
+	}
+	if config.ApprovalMode == ApprovalSuspend && config.SessionStore == nil {
+		panic("mux: ApprovalSuspend requires a SessionStore")
 	}
 	return &Orchestrator{
 		client:      client,
@@ -234,16 +241,20 @@ func (o *Orchestrator) Continue(ctx context.Context, prompt string) error {
 	return o.runWithHooks(ctx, prompt, "continue")
 }
 
-// runWithHooks wraps runLoop with hook firing for session lifecycle.
+// runWithHooks wraps the normal run loop with session lifecycle hooks.
 // Must be called with mutex held.
 func (o *Orchestrator) runWithHooks(ctx context.Context, prompt string, source string) error {
+	return o.withSessionHooks(ctx, prompt, source, func() error {
+		return o.runLoop(ctx, prompt)
+	})
+}
+
+// withSessionHooks fires SessionStart, runs core, and fires SessionEnd with a
+// reason derived from how core returned. Must be called with mutex held.
+func (o *Orchestrator) withSessionHooks(ctx context.Context, prompt, source string, core func() error) error {
 	// Fire SessionStart hook
 	if o.hookManager != nil {
-		event := &hooks.SessionStartEvent{
-			SessionID: o.sessionID,
-			Source:    source,
-			Prompt:    prompt,
-		}
+		event := &hooks.SessionStartEvent{SessionID: o.sessionID, Source: source, Prompt: prompt}
 		if err := o.hookManager.FireSessionStart(ctx, event); err != nil {
 			return o.handleError(err)
 		}
@@ -255,32 +266,37 @@ func (o *Orchestrator) runWithHooks(ctx context.Context, prompt string, source s
 		if o.hookManager != nil {
 			reason := "complete"
 			if runErr != nil {
-				if ctx.Err() != nil {
+				var susp *Suspended
+				switch {
+				case errors.As(runErr, &susp):
+					reason = "suspended"
+				case ctx.Err() != nil:
 					reason = "cancelled"
-				} else {
+				default:
 					reason = "error"
 				}
 			}
-			event := &hooks.SessionEndEvent{
-				SessionID: o.sessionID,
-				Error:     runErr,
-				Reason:    reason,
-			}
+			event := &hooks.SessionEndEvent{SessionID: o.sessionID, Error: runErr, Reason: reason}
 			// Fire SessionEnd - errors don't override runErr (notification-only)
 			_ = o.hookManager.FireSessionEnd(ctx, event) //nolint:errcheck // notification-only hook
 		}
 	}()
 
-	runErr = o.runLoop(ctx, prompt)
+	runErr = core()
 	return runErr
 }
 
-// runLoop executes the core think-act loop. Must be called with mutex held.
+// runLoop executes the core think-act loop from a fresh turn. Must be called with mutex held.
 func (o *Orchestrator) runLoop(ctx context.Context, prompt string) error {
-	o.iteration = 0
 	o.consecutiveToolIterations = 0
 	o.justCompacted = false
-	for i := 0; i < o.config.MaxIterations; i++ {
+	return o.runIterations(ctx, 0, prompt)
+}
+
+// runIterations runs the think-act loop starting at iteration startIter.
+// Resume re-enters here after replaying a pending tool batch. Must be called with mutex held.
+func (o *Orchestrator) runIterations(ctx context.Context, startIter int, prompt string) error {
+	for i := startIter; i < o.config.MaxIterations; i++ {
 		o.iteration = i
 		// Check context at start of each iteration
 		select {
@@ -289,7 +305,6 @@ func (o *Orchestrator) runLoop(ctx context.Context, prompt string) error {
 		default:
 		}
 
-		// Check for compaction before LLM call
 		if result, err := o.compact(ctx); err != nil {
 			return o.handleError(fmt.Errorf("compaction failed: %w", err))
 		} else if result != nil {
@@ -311,10 +326,7 @@ func (o *Orchestrator) runLoop(ctx context.Context, prompt string) error {
 
 		// Fire Iteration hook at start of each loop iteration
 		if o.hookManager != nil {
-			event := &hooks.IterationEvent{
-				SessionID: o.sessionID,
-				Iteration: i,
-			}
+			event := &hooks.IterationEvent{SessionID: o.sessionID, Iteration: i}
 			if err := o.hookManager.FireIteration(ctx, event); err != nil {
 				return o.handleError(err)
 			}
@@ -337,8 +349,17 @@ func (o *Orchestrator) runLoop(ctx context.Context, prompt string) error {
 
 		if resp.HasToolUse() {
 			o.consecutiveToolIterations++
-			if err := o.executeTools(ctx, resp.ToolUses()); err != nil {
+			toolUses := resp.ToolUses()
+			if o.config.ApprovalMode == ApprovalSuspend {
+				if susp := o.pendingApproval(toolUses); susp != nil {
+					return o.suspend(ctx, *susp)
+				}
+			}
+			if err := o.executeTools(ctx, toolUses); err != nil {
 				return o.handleError(err)
+			}
+			if err := o.checkpoint(ctx, StatusRunning); err != nil {
+				return o.handleError(fmt.Errorf("checkpoint failed: %w", err))
 			}
 			continue
 		}
@@ -346,10 +367,7 @@ func (o *Orchestrator) runLoop(ctx context.Context, prompt string) error {
 
 		// Fire Stop hook - allows hooks to prevent stopping
 		if o.hookManager != nil {
-			stopEvent := &hooks.StopEvent{
-				SessionID: o.sessionID,
-				FinalText: resp.TextContent(),
-			}
+			stopEvent := &hooks.StopEvent{SessionID: o.sessionID, FinalText: resp.TextContent()}
 			continueLoop, err := o.hookManager.FireStop(ctx, stopEvent)
 			if err != nil {
 				return o.handleError(err)
@@ -366,6 +384,9 @@ func (o *Orchestrator) runLoop(ctx context.Context, prompt string) error {
 			return o.handleError(err)
 		}
 		o.eventBus.Publish(NewCompleteEvent(resp.TextContent()))
+		if err := o.checkpoint(ctx, StatusComplete); err != nil {
+			return o.handleError(fmt.Errorf("checkpoint failed: %w", err))
+		}
 		return nil
 	}
 
@@ -584,4 +605,169 @@ func (o *Orchestrator) handleError(err error) error {
 	o.state.Transition(StateError) //nolint:errcheck // best-effort transition to error state
 	o.eventBus.Publish(NewErrorEvent(err))
 	return err
+}
+
+// snapshot captures the current loop state. Usage is copied via Snapshot() to a
+// fresh, mutex-free value safe to serialize.
+func (o *Orchestrator) snapshot(status Status) *Snapshot {
+	msgs := make([]llm.Message, len(o.messages))
+	copy(msgs, o.messages)
+	return &Snapshot{
+		SessionID: o.sessionID,
+		Status:    status,
+		Messages:  msgs,
+		Usage:     o.usage.Snapshot(),
+		Iteration: o.iteration,
+		UpdatedAt: time.Now().UTC(),
+	}
+}
+
+// checkpoint persists the current state if a store is configured; otherwise it
+// is a no-op (preserving today's store-less behavior exactly).
+func (o *Orchestrator) checkpoint(ctx context.Context, status Status) error {
+	if o.config.SessionStore == nil {
+		return nil
+	}
+	return o.config.SessionStore.Save(ctx, o.snapshot(status))
+}
+
+// pendingApproval returns a Suspension if any tool use in the batch needs
+// approval, listing every call in the batch (so Resume replays the whole turn).
+// Returns nil when nothing needs approval.
+func (o *Orchestrator) pendingApproval(toolUses []llm.ContentBlock) *Suspension {
+	pending := make([]PendingToolCall, 0, len(toolUses))
+	needsAny := false
+	for _, use := range toolUses {
+		needs := o.executor.NeedsApproval(use.Name, use.Input)
+		if needs {
+			needsAny = true
+		}
+		pending = append(pending, PendingToolCall{
+			ID:            use.ID,
+			Name:          use.Name,
+			Params:        use.Input,
+			NeedsApproval: needs,
+		})
+	}
+	if !needsAny {
+		return nil
+	}
+	return &Suspension{Reason: ReasonApprovalRequired, Pending: pending}
+}
+
+// Resume reloads a suspended session and continues it using the caller's
+// approval Decision. Approved tools execute; denied tools become error
+// tool_results (so the model can react). The loop then continues until the next
+// suspension or completion. Returns *Suspended again if it re-suspends.
+func (o *Orchestrator) Resume(ctx context.Context, sessionID string, d Decision) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	if o.config.SessionStore == nil {
+		return fmt.Errorf("mux: Resume requires a SessionStore")
+	}
+	snap, err := o.config.SessionStore.Load(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	if snap.Status != StatusSuspended || snap.Suspension == nil {
+		return fmt.Errorf("mux: session %s is not suspended (status %q)", sessionID, snap.Status)
+	}
+
+	// Restore loop state from the snapshot.
+	o.sessionID = snap.SessionID
+	o.messages = make([]llm.Message, len(snap.Messages))
+	copy(o.messages, snap.Messages)
+	o.usage.Restore(&snap.Usage)
+	o.iteration = snap.Iteration
+	o.consecutiveToolIterations = 0
+	o.justCompacted = false
+	o.state.Reset()
+	defer o.eventBus.Reset()
+
+	return o.withSessionHooks(ctx, "", "resume", func() error {
+		return o.resumeCore(ctx, d)
+	})
+}
+
+// resumeCore replays the pending tool batch under the Decision, then continues
+// the loop from the next iteration. Must be called with mutex held.
+func (o *Orchestrator) resumeCore(ctx context.Context, d Decision) error {
+	toolUses := lastAssistantToolUses(o.messages)
+	if len(toolUses) == 0 {
+		return o.handleError(fmt.Errorf("mux: resume found no pending tool calls"))
+	}
+
+	if err := o.transition(StateStreaming); err != nil {
+		return o.handleError(err)
+	}
+
+	restore := o.installDecisionApproval(toolUses, d)
+	err := o.executeTools(ctx, toolUses)
+	restore()
+	if err != nil {
+		return o.handleError(err)
+	}
+	if err := o.checkpoint(ctx, StatusRunning); err != nil {
+		return o.handleError(fmt.Errorf("checkpoint failed: %w", err))
+	}
+
+	return o.runIterations(ctx, o.iteration+1, "")
+}
+
+// installDecisionApproval sets a temporary approval func that resolves each
+// approval-required tool in toolUses (in batch order) against d, and returns a
+// closure that restores the previous approval func. executeTools invokes the
+// approval func only for tools whose RequiresApproval is true, in the same order
+// as toolUses, so an ordered queue of those tool-use IDs aligns 1:1 with the calls.
+func (o *Orchestrator) installDecisionApproval(toolUses []llm.ContentBlock, d Decision) func() {
+	queue := make([]string, 0, len(toolUses))
+	for _, use := range toolUses {
+		if o.executor.NeedsApproval(use.Name, use.Input) {
+			queue = append(queue, use.ID)
+		}
+	}
+	prev := o.executor.ApprovalFunc()
+	idx := 0
+	o.executor.SetApprovalFunc(func(_ context.Context, _ tool.Tool, _ map[string]any) (bool, error) {
+		id := ""
+		if idx < len(queue) {
+			id = queue[idx]
+		}
+		idx++
+		return d.approves(id), nil
+	})
+	return func() { o.executor.SetApprovalFunc(prev) }
+}
+
+// lastAssistantToolUses returns the tool_use blocks of the most recent assistant
+// message — the authoritative pending batch to replay on resume.
+func lastAssistantToolUses(messages []llm.Message) []llm.ContentBlock {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role != llm.RoleAssistant {
+			continue
+		}
+		uses := make([]llm.ContentBlock, 0)
+		for _, b := range messages[i].Blocks {
+			if b.Type == llm.ContentTypeToolUse {
+				uses = append(uses, b)
+			}
+		}
+		return uses
+	}
+	return nil
+}
+
+// suspend checkpoints the loop awaiting approval and returns the *Suspended
+// sentinel. Not routed through handleError: suspension is a pause, not a failure.
+func (o *Orchestrator) suspend(ctx context.Context, susp Suspension) error {
+	if err := o.transition(StateAwaitingApproval); err != nil {
+		return o.handleError(err)
+	}
+	snap := o.snapshot(StatusSuspended)
+	snap.Suspension = &susp
+	if err := o.config.SessionStore.Save(ctx, snap); err != nil {
+		return o.handleError(fmt.Errorf("suspend checkpoint failed: %w", err))
+	}
+	return &Suspended{SessionID: o.sessionID, Suspension: susp}
 }

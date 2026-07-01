@@ -10,6 +10,7 @@ require (
 	github.com/openai/openai-go/v3 v3.39.0
 	github.com/tidwall/gjson v1.18.0
 	google.golang.org/genai v1.54.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
