@@ -30,6 +30,27 @@ func (m *mockClient) CreateMessageStream(ctx context.Context, req *llm.Request) 
 
 func (m *mockClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
 
+type recordingStreamClient struct {
+	response          *llm.Response
+	createCalls       int
+	createStreamCalls int
+}
+
+func (r *recordingStreamClient) CreateMessage(ctx context.Context, req *llm.Request) (*llm.Response, error) {
+	r.createCalls++
+	return r.response, nil
+}
+
+func (r *recordingStreamClient) CreateMessageStream(ctx context.Context, req *llm.Request) (<-chan llm.StreamEvent, error) {
+	r.createStreamCalls++
+	events := make(chan llm.StreamEvent, 1)
+	events <- llm.StreamEvent{Type: llm.EventMessageStop, Response: r.response}
+	close(events)
+	return events, nil
+}
+
+func (r *recordingStreamClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
+
 // mockTool implements tool.Tool for testing
 type mockTool struct {
 	name             string
@@ -147,6 +168,33 @@ func TestNewAgentWithMaxIterations(t *testing.T) {
 	cfg := a.Config()
 	if cfg.MaxIterations != 50 {
 		t.Errorf("expected MaxIterations 50, got %d", cfg.MaxIterations)
+	}
+}
+
+func TestAgentConfigStream(t *testing.T) {
+	registry := tool.NewRegistry()
+	client := &recordingStreamClient{
+		response: &llm.Response{
+			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "streamed"}},
+		},
+	}
+
+	a := agent.New(agent.Config{
+		Name:      "stream-agent",
+		Registry:  registry,
+		LLMClient: client,
+		Stream:    true,
+	})
+
+	if err := a.Run(context.Background(), "hello"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if client.createStreamCalls != 1 {
+		t.Errorf("expected CreateMessageStream to be called once, got %d", client.createStreamCalls)
+	}
+	if client.createCalls != 0 {
+		t.Errorf("expected CreateMessage not to be called, got %d", client.createCalls)
 	}
 }
 

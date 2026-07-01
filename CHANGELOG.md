@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-06-26
+
+### Added
+- `Stream` option on `orchestrator.Config` and `agent.Config` to route LLM calls through provider streaming APIs while preserving the normal final response flow.
+- Orchestrator stream collector that drains `llm.StreamEvent` values into a final `llm.Response` for existing tool execution, hooks, usage accounting, and completion handling.
+
+### Changed
+- OpenAI streaming now uses the Responses API, matching the non-streaming OpenAI transport and preserving Responses API semantics for text, function calls, usage, and typed stream errors.
+
+### Fixed
+- Long-running Anthropic workflows can opt into streaming transport instead of forcing lower reasoning budgets to avoid provider non-streaming duration limits.
+
 ## [0.6.0] - 2026-01-01
 
 ### Added

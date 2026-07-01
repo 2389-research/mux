@@ -94,6 +94,7 @@ func (a *Agent) init() {
 	if a.config.MaxIterations > 0 {
 		orchConfig.MaxIterations = a.config.MaxIterations
 	}
+	orchConfig.Stream = a.config.Stream
 	orchConfig.HookManager = a.hookManager
 	orchConfig.ThinkingSettings = a.config.ThinkingSettings
 	orchConfig.SessionStore = a.config.SessionStore
