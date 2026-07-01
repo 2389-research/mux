@@ -1628,18 +1628,20 @@ func TestOpenAIConvertUserMessage_AudioWAV(t *testing.T) {
 	}
 }
 
-func TestOpenAICreateMessage_PDFFromURL_ErrUnsupportedSource(t *testing.T) {
-	pdf := NewPDFFromURL("https://example.com/x.pdf")
-	c := NewOpenAIClient("fake-key", "")
-	_, err := c.CreateMessage(context.Background(), &Request{
-		Messages: []Message{NewUserMessageWithBlocks(pdf)},
-	})
-	var ue *ErrUnsupportedSource
-	if !errors.As(err, &ue) {
-		t.Fatalf("expected *ErrUnsupportedSource, got %T: %v", err, err)
+// URL-form PDFs are accepted on the Responses path (CreateMessage) because
+// ResponseInputFileParam exposes a FileURL field. validateOpenAISources
+// must therefore NOT reject them when allowURLPDF is true. Asymmetry with
+// the streaming path (Chat Completions) is preserved — see
+// TestOpenAICreateMessageStream_PDFFromURL_ErrUnsupportedSource below.
+func TestValidateOpenAISources_URLPDFAllowedOnResponsesPath(t *testing.T) {
+	req := &Request{
+		Messages: []Message{NewUserMessageWithBlocks(NewPDFFromURL("https://example.com/x.pdf"))},
 	}
-	if ue.Provider != "openai" || ue.Media != "pdf" || ue.Kind != "url" {
-		t.Errorf("err fields: %+v", ue)
+	if err := validateOpenAISources("openai", true, req); err != nil {
+		t.Fatalf("URL PDF should pass validation on the Responses path; got %v", err)
+	}
+	if err := validateOpenAISources("openai", false, req); err == nil {
+		t.Fatalf("URL PDF must still be rejected on the Chat Completions path")
 	}
 }
 
@@ -1906,6 +1908,30 @@ func TestOpenAIResponsesWireFormat_PDFBytes(t *testing.T) {
 	}
 	if v := gjson.GetBytes(body, "input.0.content.0.file_data").String(); v == "" {
 		t.Errorf("file_data should be non-empty base64; body=%s", body)
+	}
+}
+
+// URL-form PDFs are emitted as input_file parts with the file_url field
+// populated (not file_data). file_data and filename must be absent so the
+// Responses API treats it as a remote-fetch request.
+func TestOpenAIResponsesWireFormat_PDFURL(t *testing.T) {
+	pdf := NewPDFFromURL("https://example.com/paper.pdf")
+	params := convertOpenAIResponsesRequest(&Request{
+		Messages: []Message{NewUserMessageWithBlocks(pdf)},
+	})
+	body, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	if v := gjson.GetBytes(body, "input.0.content.0.type").String(); v != "input_file" {
+		t.Errorf("type: got %q want input_file; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "input.0.content.0.file_url").String(); v != "https://example.com/paper.pdf" {
+		t.Errorf("file_url: got %q; body=%s", v, body)
+	}
+	if v := gjson.GetBytes(body, "input.0.content.0.file_data").String(); v != "" {
+		t.Errorf("file_data should be empty for URL-form PDF; got %q", v)
 	}
 }
 

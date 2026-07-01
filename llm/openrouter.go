@@ -100,7 +100,9 @@ func (o *OpenRouterClient) CreateMessage(ctx context.Context, req *Request) (*Re
 	if err := validateRequest("openrouter", o.Capabilities(), req); err != nil {
 		return nil, err
 	}
-	if err := validateOpenAISources("openrouter", req); err != nil {
+	// OpenRouter uses Chat Completions on both transports, which has no URL
+	// form for PDFs.
+	if err := validateOpenAISources("openrouter", false, req); err != nil {
 		return nil, err
 	}
 
@@ -124,7 +126,9 @@ func (o *OpenRouterClient) CreateMessageStream(ctx context.Context, req *Request
 	if err := validateRequest("openrouter", o.Capabilities(), req); err != nil {
 		return nil, err
 	}
-	if err := validateOpenAISources("openrouter", req); err != nil {
+	// OpenRouter uses Chat Completions on both transports, which has no URL
+	// form for PDFs.
+	if err := validateOpenAISources("openrouter", false, req); err != nil {
 		return nil, err
 	}
 
