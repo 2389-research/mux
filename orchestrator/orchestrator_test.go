@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 
@@ -489,6 +491,167 @@ func TestOrchestratorStreamingModeKeepsUsage(t *testing.T) {
 	}
 	if usage.RequestCount != 1 {
 		t.Errorf("expected 1 request, got %d", usage.RequestCount)
+	}
+}
+
+func TestOrchestratorStreamingModeAnthropicDeltaStream(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("expected http.ResponseWriter to be an http.Flusher")
+		}
+
+		w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_stream\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-20250514\",\"stop_reason\":null,\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}\n\n"))
+		flusher.Flush()
+		w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"))
+		flusher.Flush()
+		w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"streamed\"}}\n\n"))
+		flusher.Flush()
+		w.Write([]byte("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"))
+		flusher.Flush()
+		w.Write([]byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":4}}\n\n"))
+		flusher.Flush()
+		w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	client := llm.NewAnthropicClientWithBaseURL("test-key", "claude-sonnet-4-20250514", server.URL)
+	registry := tool.NewRegistry()
+	executor := tool.NewExecutor(registry)
+	config := orchestrator.DefaultConfig()
+	config.Stream = true
+	orch := orchestrator.NewWithConfig(client, executor, config)
+	events := orch.Subscribe()
+
+	if err := orch.Run(context.Background(), "say streamed"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var gotComplete bool
+	for event := range events {
+		if event.Type == orchestrator.EventComplete {
+			gotComplete = true
+			if event.FinalText != "streamed" {
+				t.Errorf("expected complete text streamed, got %q", event.FinalText)
+			}
+		}
+		if event.Type == orchestrator.EventError {
+			t.Fatalf("unexpected orchestrator error event: %v", event.Error)
+		}
+	}
+	if !gotComplete {
+		t.Fatal("expected complete event")
+	}
+	usage := orch.Usage()
+	if usage.InputTokens != 3 || usage.OutputTokens != 4 {
+		t.Errorf("unexpected usage: input=%d output=%d", usage.InputTokens, usage.OutputTokens)
+	}
+}
+
+func TestOrchestratorStreamingModeAnthropicToolUseDeltaStream(t *testing.T) {
+	var mu sync.Mutex
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requestCount++
+		currentRequest := requestCount
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("expected http.ResponseWriter to be an http.Flusher")
+		}
+
+		if currentRequest == 1 {
+			w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_tool\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-20250514\",\"stop_reason\":null,\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n"))
+			flusher.Flush()
+			w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool_call_1\",\"name\":\"test_tool\"}}\n\n"))
+			flusher.Flush()
+			w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"arg\\\":\"}}\n\n"))
+			flusher.Flush()
+			w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"value\\\"}\"}}\n\n"))
+			flusher.Flush()
+			w.Write([]byte("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"))
+			flusher.Flush()
+			w.Write([]byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":7}}\n\n"))
+			flusher.Flush()
+			w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+			flusher.Flush()
+			return
+		}
+
+		w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_done\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-20250514\",\"stop_reason\":null,\"usage\":{\"input_tokens\":6,\"output_tokens\":0}}}\n\n"))
+		flusher.Flush()
+		w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"))
+		flusher.Flush()
+		w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"tool complete\"}}\n\n"))
+		flusher.Flush()
+		w.Write([]byte("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"))
+		flusher.Flush()
+		w.Write([]byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":3}}\n\n"))
+		flusher.Flush()
+		w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	var toolCalls int
+	registry := tool.NewRegistry()
+	registry.Register(&mockTool{
+		name: "test_tool",
+		execFunc: func(ctx context.Context, params map[string]any) (*tool.Result, error) {
+			toolCalls++
+			if params["arg"] != "value" {
+				t.Fatalf("expected tool arg value, got %v", params["arg"])
+			}
+			return tool.NewResult("test_tool", true, "tool output", ""), nil
+		},
+	})
+
+	client := llm.NewAnthropicClientWithBaseURL("test-key", "claude-sonnet-4-20250514", server.URL)
+	config := orchestrator.DefaultConfig()
+	config.Stream = true
+	orch := orchestrator.NewWithConfig(client, tool.NewExecutor(registry), config)
+	events := orch.Subscribe()
+
+	if err := orch.Run(context.Background(), "use tool"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var gotToolCall, gotToolResult, gotComplete bool
+	for event := range events {
+		switch event.Type {
+		case orchestrator.EventToolCall:
+			gotToolCall = true
+			if event.ToolName != "test_tool" {
+				t.Errorf("expected tool name test_tool, got %s", event.ToolName)
+			}
+		case orchestrator.EventToolResult:
+			gotToolResult = true
+		case orchestrator.EventComplete:
+			gotComplete = true
+			if event.FinalText != "tool complete" {
+				t.Errorf("expected final text tool complete, got %q", event.FinalText)
+			}
+		case orchestrator.EventError:
+			t.Fatalf("unexpected orchestrator error event: %v", event.Error)
+		}
+	}
+
+	if toolCalls != 1 {
+		t.Fatalf("expected tool to execute once, got %d", toolCalls)
+	}
+	if !gotToolCall {
+		t.Fatal("expected tool call event")
+	}
+	if !gotToolResult {
+		t.Fatal("expected tool result event")
+	}
+	if !gotComplete {
+		t.Fatal("expected complete event")
 	}
 }
 

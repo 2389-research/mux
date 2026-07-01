@@ -746,6 +746,16 @@ func TestCreateMessageStream_SuccessfulTextStream(t *testing.T) {
 		t.Error("message_start event should have response")
 	} else if events[0].Response.ID != "msg_123" {
 		t.Errorf("expected message ID msg_123, got %s", events[0].Response.ID)
+	} else {
+		if len(events[0].Response.Content) != 0 {
+			t.Errorf("message_start response should be a start snapshot with no content, got %+v", events[0].Response.Content)
+		}
+		if events[0].Response.StopReason != "" {
+			t.Errorf("message_start response should not have final stop reason, got %s", events[0].Response.StopReason)
+		}
+		if events[0].Response.Usage.OutputTokens != 0 {
+			t.Errorf("message_start response should not have final output usage, got %d", events[0].Response.Usage.OutputTokens)
+		}
 	}
 
 	// Verify content_delta events have text
@@ -762,6 +772,26 @@ func TestCreateMessageStream_SuccessfulTextStream(t *testing.T) {
 	}
 	if events[4].Index != 0 {
 		t.Errorf("expected content_stop index 0, got %d", events[4].Index)
+	}
+
+	final := events[len(events)-1].Response
+	if final == nil {
+		t.Fatal("expected final message_stop event to include reconstructed response")
+	}
+	if final.ID != "msg_123" {
+		t.Errorf("expected final response ID msg_123, got %s", final.ID)
+	}
+	if final.Model != "claude-sonnet-4-20250514" {
+		t.Errorf("expected final response model, got %s", final.Model)
+	}
+	if final.StopReason != StopReasonEndTurn {
+		t.Errorf("expected final stop reason end_turn, got %s", final.StopReason)
+	}
+	if final.Usage.InputTokens != 10 || final.Usage.OutputTokens != 5 {
+		t.Errorf("unexpected final usage: %+v", final.Usage)
+	}
+	if final.TextContent() != "Hello world" {
+		t.Errorf("expected final text 'Hello world', got %q", final.TextContent())
 	}
 }
 
@@ -795,6 +825,9 @@ func TestCreateMessageStream_WithToolUse(t *testing.T) {
 
 		// Send tool input delta (non-text delta)
 		w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\"}}\n\n"))
+		flusher.Flush()
+
+		w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"test.txt\\\"}\"}}\n\n"))
 		flusher.Flush()
 
 		// Send tool block stop
@@ -852,8 +885,8 @@ func TestCreateMessageStream_WithToolUse(t *testing.T) {
 	}
 
 	// Verify we got expected events including tool use blocks
-	if len(events) < 8 {
-		t.Fatalf("expected at least 8 events, got %d", len(events))
+	if len(events) < 9 {
+		t.Fatalf("expected at least 9 events, got %d", len(events))
 	}
 
 	// Verify message_start
@@ -887,8 +920,8 @@ func TestCreateMessageStream_WithToolUse(t *testing.T) {
 		if event.Type == EventContentDelta && event.Index == 1 {
 			foundToolDelta = true
 			// input_json_delta should be forwarded as text
-			if event.Text != "{\"path\":" {
-				t.Errorf("expected input_json_delta text = '{\"path\":', got '%s'", event.Text)
+			if event.Text != "{\"path\":" && event.Text != "\"test.txt\"}" {
+				t.Errorf("unexpected input_json_delta text: %q", event.Text)
 			}
 		}
 		if event.Type == EventMessageDelta {
@@ -924,6 +957,96 @@ func TestCreateMessageStream_WithToolUse(t *testing.T) {
 	lastEvent := events[len(events)-1]
 	if lastEvent.Type != EventMessageStop {
 		t.Errorf("expected last event to be message_stop, got %s", lastEvent.Type)
+	}
+	if lastEvent.Response == nil {
+		t.Fatal("expected message_stop event to include reconstructed response")
+	}
+	if !lastEvent.Response.HasToolUse() {
+		t.Fatal("expected final response to contain tool use")
+	}
+	toolUses := lastEvent.Response.ToolUses()
+	if len(toolUses) != 1 {
+		t.Fatalf("expected 1 tool use, got %d", len(toolUses))
+	}
+	if toolUses[0].ID != "tool_abc" {
+		t.Errorf("expected tool ID tool_abc, got %s", toolUses[0].ID)
+	}
+	if toolUses[0].Name != "read_file" {
+		t.Errorf("expected tool name read_file, got %s", toolUses[0].Name)
+	}
+	if toolUses[0].Input["path"] != "test.txt" {
+		t.Errorf("expected parsed path test.txt, got %#v", toolUses[0].Input["path"])
+	}
+	if lastEvent.Response.StopReason != StopReasonToolUse {
+		t.Errorf("expected final stop reason tool_use, got %s", lastEvent.Response.StopReason)
+	}
+}
+
+func TestCreateMessageStream_FinalResponsePreservesThinking(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("expected http.ResponseWriter to be an http.Flusher")
+		}
+
+		w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_thinking\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-opus-4-6-20250414\",\"stop_reason\":null,\"usage\":{\"input_tokens\":8,\"output_tokens\":0}}}\n\n"))
+		flusher.Flush()
+		w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"sig\"}}\n\n"))
+		flusher.Flush()
+		w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Let me reason\"}}\n\n"))
+		flusher.Flush()
+		w.Write([]byte("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"))
+		flusher.Flush()
+		w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"))
+		flusher.Flush()
+		w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"Answer\"}}\n\n"))
+		flusher.Flush()
+		w.Write([]byte("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n"))
+		flusher.Flush()
+		w.Write([]byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":9}}\n\n"))
+		flusher.Flush()
+		w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	client := &AnthropicClient{
+		client: anthropic.NewClient(
+			option.WithAPIKey("test-key"),
+			option.WithBaseURL(server.URL),
+		),
+		model: "claude-opus-4-6-20250414",
+	}
+
+	eventChan, err := client.CreateMessageStream(context.Background(), &Request{
+		Messages: []Message{NewUserMessage("Think")},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error creating stream: %v", err)
+	}
+
+	var final *Response
+	for event := range eventChan {
+		if event.Type == EventError {
+			t.Fatalf("unexpected error event: %v", event.Error)
+		}
+		if event.Type == EventMessageStop {
+			final = event.Response
+		}
+	}
+
+	if final == nil {
+		t.Fatal("expected final response")
+	}
+	if len(final.Content) != 2 {
+		t.Fatalf("expected 2 final content blocks, got %d", len(final.Content))
+	}
+	if final.Content[0].Type != ContentTypeThinking || final.Content[0].Thinking != "Let me reason" {
+		t.Errorf("unexpected thinking block: %+v", final.Content[0])
+	}
+	if final.Content[1].Type != ContentTypeText || final.Content[1].Text != "Answer" {
+		t.Errorf("unexpected text block: %+v", final.Content[1])
 	}
 }
 
