@@ -37,6 +37,9 @@ type Config struct {
 	// MaxIterations limits the think-act loop (0 = default).
 	MaxIterations int
 
+	// Stream uses streaming LLM responses while preserving the final response.
+	Stream bool
+
 	// HookManager enables lifecycle hooks for this agent and its children.
 	// If set, fires SubagentStart/SubagentStop events when children are spawned.
 	HookManager *hooks.Manager
