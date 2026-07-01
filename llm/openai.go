@@ -264,18 +264,24 @@ func convertResponsesImage(block ContentBlock) responses.ResponseInputContentUni
 }
 
 // convertResponsesPDF builds an input_file part for the Responses API.
-// URL form is rejected pre-flight by validateOpenAISources (matching the
-// Chat Completions path), so we only handle inline bytes here.
+// URL-form sources pass through as FileURL (the Responses API accepts
+// remote PDFs natively, unlike Chat Completions); inline bytes are base64
+// encoded into FileData with a filename derived from the original path.
 func convertResponsesPDF(block ContentBlock) responses.ResponseInputContentUnionParam {
 	f := responses.ResponseInputFileParam{}
 	if block.Source != nil {
-		encoded := base64.StdEncoding.EncodeToString(block.Source.Bytes)
-		filename := "file.pdf"
-		if block.Source.Path != "" {
-			filename = filepath.Base(block.Source.Path)
+		switch block.Source.Kind {
+		case SourceKindURL:
+			f.FileURL = openai.String(block.Source.URL)
+		case SourceKindBytes, SourceKindFile:
+			encoded := base64.StdEncoding.EncodeToString(block.Source.Bytes)
+			filename := "file.pdf"
+			if block.Source.Path != "" {
+				filename = filepath.Base(block.Source.Path)
+			}
+			f.FileData = openai.String(encoded)
+			f.Filename = openai.String(filename)
 		}
-		f.FileData = openai.String(encoded)
-		f.Filename = openai.String(filename)
 	}
 	return responses.ResponseInputContentUnionParam{OfInputFile: &f}
 }
@@ -376,11 +382,16 @@ func openaiAudioFormat(mediaType string) (format string, ok bool) {
 }
 
 // validateOpenAISources checks every user-message block for source-form
-// compatibility. Returns *ErrUnsupportedSource for PDF/audio via URL and for
-// audio MIME types OpenAI's input_audio doesn't accept. Used by
-// OpenAI-compatible providers (OpenAI, OpenRouter); the provider parameter
-// is attributed in returned errors.
-func validateOpenAISources(provider string, req *Request) error {
+// compatibility. Returns *ErrUnsupportedSource for audio via URL, audio
+// MIME types OpenAI's input_audio doesn't accept, and (when
+// allowURLPDF is false) PDF via URL. Used by OpenAI-compatible
+// providers (OpenAI, OpenRouter); the provider parameter is attributed
+// in returned errors.
+//
+// allowURLPDF should be true only when the request will be sent via the
+// Responses API, which exposes ResponseInputFileParam.FileURL — Chat
+// Completions has no equivalent and cannot accept URL-form PDFs.
+func validateOpenAISources(provider string, allowURLPDF bool, req *Request) error {
 	for _, msg := range req.Messages {
 		if msg.Role != RoleUser {
 			continue
@@ -392,7 +403,9 @@ func validateOpenAISources(provider string, req *Request) error {
 			if block.Source.Kind == SourceKindURL {
 				switch block.Type {
 				case ContentTypePDF:
-					return &ErrUnsupportedSource{Provider: provider, Media: "pdf", Kind: "url"}
+					if !allowURLPDF {
+						return &ErrUnsupportedSource{Provider: provider, Media: "pdf", Kind: "url"}
+					}
 				case ContentTypeAudio:
 					return &ErrUnsupportedSource{Provider: provider, Media: "audio", Kind: "url"}
 				}
@@ -632,7 +645,9 @@ func (o *OpenAIClient) CreateMessage(ctx context.Context, req *Request) (*Respon
 	if err := validateRequest("openai", o.Capabilities(), req); err != nil {
 		return nil, err
 	}
-	if err := validateOpenAISources("openai", req); err != nil {
+	// CreateMessage uses the Responses API, which accepts URL-form PDFs
+	// natively via ResponseInputFileParam.FileURL.
+	if err := validateOpenAISources("openai", true, req); err != nil {
 		return nil, err
 	}
 
@@ -657,7 +672,9 @@ func (o *OpenAIClient) CreateMessageStream(ctx context.Context, req *Request) (<
 	if err := validateRequest("openai", o.Capabilities(), req); err != nil {
 		return nil, err
 	}
-	if err := validateOpenAISources("openai", req); err != nil {
+	// CreateMessageStream uses Chat Completions, which has no URL form for
+	// PDFs — only inline base64. URL PDFs are rejected pre-flight.
+	if err := validateOpenAISources("openai", false, req); err != nil {
 		return nil, err
 	}
 
