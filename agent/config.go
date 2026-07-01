@@ -6,6 +6,7 @@ import (
 	"github.com/2389-research/mux/hooks"
 	"github.com/2389-research/mux/llm"
 	"github.com/2389-research/mux/orchestrator"
+	"github.com/2389-research/mux/skill"
 	"github.com/2389-research/mux/tool"
 )
 
@@ -51,4 +52,9 @@ type Config struct {
 	SessionStore orchestrator.Store
 	// ApprovalMode selects synchronous approval (default) or suspend-on-approval.
 	ApprovalMode orchestrator.ApprovalMode
+
+	// Skills, when non-nil, exposes its skills to this agent: the catalog is
+	// injected into the system prompt and the load_skill tool is registered and
+	// permitted. Construct it with skill.LoadDir at startup.
+	Skills *skill.Registry
 }
