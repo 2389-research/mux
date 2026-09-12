@@ -1,0 +1,12 @@
+HTTP strict-id Start: initialized notification: notification failed: 400 Bad Request
+HTTP strict-accept Start: initialized notification: notification failed: 406 Not Acceptable
+HTTP sse-default CallTool: response not found in SSE stream
+HTTP sse-large CallTool: read SSE: bufio.Scanner: token too long
+HTTP Close returned but pending request still blocked
+stdio EOF CallTool: context deadline exceeded
+stdio quota4096 accepted length=8192 error=<nil>
+mcp: stdio read error: read |0: file already closed
+stdio write ignores expired CallTool context
+stdio Close blocked behind stdin write
+FileStore preexisting temp symlink: error=<nil> victim_overwritten=true
+FileStore concurrent saves: save_errors=312 invalid_snapshots=6

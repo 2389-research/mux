@@ -1,0 +1,63 @@
+go: downloading golang.org/x/vuln v1.8.0
+go: downloading golang.org/x/tools v0.50.0
+go: downloading golang.org/x/telemetry v0.0.0-20260908163034-4bcc4b2ee518
+go: downloading golang.org/x/mod v0.41.0
+go: downloading golang.org/x/sync v0.23.0
+=== Symbol Results ===
+
+Vulnerability #1: GO-2026-6061
+    Vulnerabilities in the xDS RBAC authorization engine and the HTTP/2
+    transport server implementation in google.golang.org/grpc
+  More info: https://pkg.go.dev/vuln/GO-2026-6061
+  Module: google.golang.org/grpc
+    Found in: google.golang.org/grpc@v1.66.2
+    Fixed in: google.golang.org/grpc@v1.82.1
+    Example traces found:
+      #1: mcp/stdio.go:253:14: mcp.stdioClient.Close calls fmt.Fprintf, which eventually calls transport.controlBuffer.executeAndPut
+      #2: mcp/stdio.go:253:14: mcp.stdioClient.Close calls fmt.Fprintf, which eventually calls transport.controlBuffer.getOnceLocked
+      #3: mcp/stdio.go:253:14: mcp.stdioClient.Close calls fmt.Fprintf, which eventually calls transport.http2Client.Close
+      #4: mcp/http.go:207:28: mcp.httpClient.notify calls http.Client.Do, which eventually calls transport.http2Client.GracefulClose
+      #5: mcp/stdio.go:253:14: mcp.stdioClient.Close calls fmt.Fprintf, which eventually calls transport.http2Client.NewStream
+      #6: mcp/stdio.go:253:14: mcp.stdioClient.Close calls fmt.Fprintf, which eventually calls transport.transportReader.Read
+
+Vulnerability #2: GO-2026-5970
+    Infinite loop on invalid input in golang.org/x/text
+  More info: https://pkg.go.dev/vuln/GO-2026-5970
+  Module: golang.org/x/text
+    Found in: golang.org/x/text@v0.27.0
+    Fixed in: golang.org/x/text@v0.39.0
+    Example traces found:
+      #1: mcp/http.go:207:28: mcp.httpClient.notify calls http.Client.Do, which eventually calls norm.Form.Bytes
+      #2: mcp/http.go:207:28: mcp.httpClient.notify calls http.Client.Do, which eventually calls norm.Form.IsNormalString
+      #3: mcp/http.go:207:28: mcp.httpClient.notify calls http.Client.Do, which eventually calls norm.Form.QuickSpan
+      #4: mcp/http.go:207:28: mcp.httpClient.notify calls http.Client.Do, which eventually calls norm.Form.String
+
+Vulnerability #3: GO-2026-5026
+    Invoking failure to reject ASCII-only Punycode-encoded labels in
+    golang.org/x/net/idna
+  More info: https://pkg.go.dev/vuln/GO-2026-5026
+  Module: golang.org/x/net
+    Found in: golang.org/x/net@v0.41.0
+    Fixed in: golang.org/x/net@v0.55.0
+    Example traces found:
+      #1: mcp/http.go:207:28: mcp.httpClient.notify calls http.Client.Do, which eventually calls idna.ToASCII
+
+Vulnerability #4: GO-2026-4918
+    Infinite loop in HTTP/2 transport when given bad SETTINGS_MAX_FRAME_SIZE in
+    net/http/internal/http2 in golang.org/x/net
+  More info: https://pkg.go.dev/vuln/GO-2026-4918
+  Module: golang.org/x/net
+    Found in: golang.org/x/net@v0.41.0
+    Fixed in: golang.org/x/net@v0.53.0
+    Example traces found:
+      #1: mcp/http.go:207:28: mcp.httpClient.notify calls http.Client.Do, which eventually calls http2.Transport.NewClientConn
+      #2: mcp/http.go:207:28: mcp.httpClient.notify calls http.Client.Do, which eventually calls http2.Transport.RoundTrip
+      #3: mcp/http.go:207:28: mcp.httpClient.notify calls http.Client.Do, which eventually calls http2.noDialH2RoundTripper.RoundTrip
+      #4: mcp/http.go:207:28: mcp.httpClient.notify calls http.Client.Do, which eventually calls http2.unencryptedTransport.RoundTrip
+
+Your code is affected by 4 vulnerabilities from 3 modules.
+This scan also found 1 vulnerability in packages you import and 29
+vulnerabilities in modules you require, but your code doesn't appear to call
+these vulnerabilities.
+Use '-show verbose' for more details.
+exit status 3

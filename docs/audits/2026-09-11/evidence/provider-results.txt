@@ -1,0 +1,27 @@
+--- FAIL: TestAuditGeminiStreamAccumulates (0.00s)
+    provider_audit_test.go:32: deltas="Hello world" final=&{ID: Content:[{Type:text Text:world ID: Name: Input:map[] ToolUseID: IsError:false Thinking: Source:<nil> MediaType:}] StopReason:end_turn Model:gemini-test Usage:{InputTokens:5 OutputTokens:2 ThinkingTokens:0}}
+--- FAIL: TestAuditGeminiToolMetadata (0.00s)
+    provider_audit_test.go:38: function call ID lost: &{ID: Args:map[p:a] Name:read PartialArgs:[] WillContinue:<nil>}
+    provider_audit_test.go:39: thought signature lost: ""
+    provider_audit_test.go:41: result ID lost: &{WillContinue:<nil> Scheduling: Parts:[] ID: Name:read Response:map[output:ok]}
+--- FAIL: TestAuditAnthropicThinkingRoundTrip (0.00s)
+    provider_audit_test.go:49: thinking lost from request: {"max_tokens":0,"messages":[{"content":[{"id":"t1","input":{},"name":"read","type":"tool_use"}],"role":"assistant"}]}
+--- FAIL: TestAuditAnthropicBudget (0.00s)
+    provider_audit_test.go:53: invalid max_tokens=8192 budget_tokens=8192
+--- FAIL: TestAuditAnthropicTemperature (0.00s)
+    provider_audit_test.go:57: temperature absent: {"max_tokens":0,"messages":[]}
+--- FAIL: TestAuditOpenAIIncomplete (0.00s)
+    provider_audit_test.go:62: incomplete reported as "end_turn"
+--- FAIL: TestAuditOpenAIStreamingURLPDF (0.00s)
+    provider_audit_test.go:68: Responses-compatible PDF rejected: openai does not support source kind "url" for media type "pdf"
+--- FAIL: TestAuditRetryInitialHTTPFailure (0.00s)
+    provider_audit_test.go:76: requests=1 expected 2 on initial 503; synchronous err=<nil>
+--- FAIL: TestAuditCancellationFullStream (0.03s)
+    provider_audit_test.go:88: producer remains blocked on full channel after cancellation
+--- FAIL: TestAuditNilRequest (0.00s)
+    provider_audit_test.go:92: nil request panics before validation: runtime error: invalid memory address or nil pointer dereference
+--- FAIL: TestAuditChatAssistantText (0.00s)
+    provider_audit_test.go:98: assistant text lost: {"content":"three","role":"assistant"}
+FAIL
+FAIL	github.com/2389-research/mux/llm	0.052s
+FAIL

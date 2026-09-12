@@ -1,0 +1,130 @@
+package audit_test
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"github.com/2389-research/mux/agent"
+	"github.com/2389-research/mux/coordinator"
+	"github.com/2389-research/mux/llm"
+	"github.com/2389-research/mux/orchestrator"
+	"github.com/2389-research/mux/tool"
+	"strings"
+	"testing"
+)
+
+type localClient struct {
+	fn func(*llm.Request) (*llm.Response, error)
+}
+
+func (c localClient) CreateMessage(_ context.Context, r *llm.Request) (*llm.Response, error) {
+	return c.fn(r)
+}
+func (c localClient) CreateMessageStream(context.Context, *llm.Request) (<-chan llm.StreamEvent, error) {
+	panic("unused")
+}
+func (c localClient) Capabilities() llm.Capabilities { return llm.Capabilities{} }
+func finalResponse() *llm.Response {
+	return &llm.Response{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}}}
+}
+
+type failStore struct{}
+
+func (failStore) Save(context.Context, *orchestrator.Snapshot) error { return errors.New("disk full") }
+func (failStore) Load(context.Context, string) (*orchestrator.Snapshot, error) {
+	return nil, errors.New("unused")
+}
+func (failStore) List(context.Context) ([]string, error) { return nil, nil }
+func (failStore) Delete(context.Context, string) error   { return nil }
+func TestTranscriptPreservesTextConstructors(t *testing.T) {
+	tr := agent.FromMessages("a", []llm.Message{llm.NewUserMessage("critical user instruction")})
+	var b bytes.Buffer
+	if err := tr.SaveJSON(&b); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := agent.LoadJSON(&b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := loaded.ToMessages()[0]
+	if got.Content != "critical user instruction" && (len(got.Blocks) == 0 || got.Blocks[0].Text != "critical user instruction") {
+		t.Fatalf("user text lost: %#v", got)
+	}
+}
+func TestTranscriptLargeJSONLRoundTrip(t *testing.T) {
+	tr := agent.FromMessages("a", []llm.Message{llm.NewUserMessageWithBlocks(llm.ContentBlock{Type: llm.ContentTypeText, Text: strings.Repeat("x", 70000)})})
+	var b bytes.Buffer
+	if err := tr.SaveJSONL(&b); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.LoadJSONL(&b); err != nil {
+		t.Fatalf("cannot load own saved output: %v", err)
+	}
+}
+func TestEventBusCloseReset(t *testing.T) {
+	eb := orchestrator.NewEventBus()
+	eb.Subscribe()
+	eb.Close()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("reset after close panicked: %v", r)
+		}
+	}()
+	eb.Reset()
+}
+func TestCheckpointFailureDoesNotAnnounceSuccess(t *testing.T) {
+	cfg := orchestrator.DefaultConfig()
+	cfg.SessionStore = failStore{}
+	o := orchestrator.NewWithConfig(localClient{fn: func(*llm.Request) (*llm.Response, error) { return finalResponse(), nil }}, tool.NewExecutor(tool.NewRegistry()), cfg)
+	ch := o.Subscribe()
+	err := o.Run(context.Background(), "hi")
+	if err == nil {
+		t.Fatal("expected disk error")
+	}
+	if o.State() != orchestrator.StateError {
+		t.Errorf("Run error %v but state %s", err, o.State())
+	}
+	for e := range ch {
+		if e.Type == orchestrator.EventComplete {
+			t.Errorf("success event on persistence failure: %#v", e)
+		}
+	}
+}
+func TestMixedUserToolResultCompaction(t *testing.T) {
+	cfg := orchestrator.DefaultConfig()
+	cfg.ContextBudget = 1000
+	seenMain := false
+	client := localClient{fn: func(req *llm.Request) (*llm.Response, error) {
+		if req.System == orchestrator.SummarizationPrompt {
+			return finalResponse(), nil
+		}
+		seenMain = true
+		known := map[string]bool{}
+		for _, m := range req.Messages {
+			for _, b := range m.Blocks {
+				if b.Type == llm.ContentTypeToolUse {
+					known[b.ID] = true
+				}
+				if b.Type == llm.ContentTypeToolResult && !known[b.ToolUseID] {
+					t.Errorf("orphan result retained after compaction: %s", b.ToolUseID)
+				}
+			}
+		}
+		return finalResponse(), nil
+	}}
+	o := orchestrator.NewWithConfig(client, tool.NewExecutor(tool.NewRegistry()), cfg)
+	o.SetMessages([]llm.Message{llm.NewUserMessage(strings.Repeat("old ", 6000)), {Role: llm.RoleAssistant, Blocks: []llm.ContentBlock{{Type: llm.ContentTypeToolUse, ID: "call1", Name: "tool"}}}, {Role: llm.RoleUser, Blocks: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "read tool result"}, {Type: llm.ContentTypeToolResult, ToolUseID: "call1", Text: "output"}}}})
+	if err := o.Continue(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if !seenMain {
+		t.Fatal("main request not observed")
+	}
+}
+func TestRateLimiterHonorsAlreadyCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := coordinator.NewRateLimiter(10, 1).Take(ctx, 1); !errors.Is(err, context.Canceled) {
+		t.Errorf("Take returned %v for cancelled context", err)
+	}
+}

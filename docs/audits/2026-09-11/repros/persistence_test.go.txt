@@ -1,0 +1,73 @@
+package audit_test
+
+import (
+	"context"
+	"github.com/2389-research/mux/agent"
+	"github.com/2389-research/mux/llm"
+	"github.com/2389-research/mux/orchestrator"
+	"github.com/2389-research/mux/tool"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+)
+
+func TestTranscriptSaveFailurePreservesExistingFile(t *testing.T) {
+	for _, jsonl := range []bool{false, true} {
+		t.Run(map[bool]string{false: "json", true: "jsonl"}[jsonl], func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "transcript")
+			tr := agent.FromMessages("a", []llm.Message{llm.NewUserMessageWithBlocks(llm.ContentBlock{Type: llm.ContentTypeText, Text: "only durable history"})})
+			save := tr.SaveToFile
+			if jsonl {
+				save = tr.SaveToFileJSONL
+			}
+			if err := save(path); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tr.Entries[0].Content = append(tr.Entries[0].Content, llm.ContentBlock{Type: llm.ContentTypeToolUse, Input: map[string]any{"bad": make(chan int)}})
+			if err := save(path); err == nil {
+				t.Fatal("expected encode error")
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(before) != string(after) {
+				t.Fatalf("failed save destroyed existing file: before=%d bytes after=%d bytes", len(before), len(after))
+			}
+		})
+	}
+}
+
+type restoreStore struct{}
+
+func (restoreStore) Save(context.Context, *orchestrator.Snapshot) error { return nil }
+func (restoreStore) Load(context.Context, string) (*orchestrator.Snapshot, error) {
+	return &orchestrator.Snapshot{SessionID: "saved-session", Status: orchestrator.StatusSuspended, Suspension: &orchestrator.Suspension{Reason: orchestrator.ReasonApprovalRequired, Pending: []orchestrator.PendingToolCall{{ID: "call", Name: "missing", NeedsApproval: true}}}, Messages: []llm.Message{llm.NewUserMessage("test"), {Role: llm.RoleAssistant, Blocks: []llm.ContentBlock{{Type: llm.ContentTypeToolUse, ID: "call", Name: "missing"}}}}}, nil
+}
+func (restoreStore) List(context.Context) ([]string, error) { return nil, nil }
+func (restoreStore) Delete(context.Context, string) error   { return nil }
+func TestSessionIDConcurrentWithResume(t *testing.T) {
+	cfg := orchestrator.DefaultConfig()
+	cfg.SessionStore = restoreStore{}
+	o := orchestrator.NewWithConfig(localClient{fn: func(*llm.Request) (*llm.Response, error) { return finalResponse(), nil }}, tool.NewExecutor(tool.NewRegistry()), cfg)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			_ = o.SessionID()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			_ = o.Resume(context.Background(), "saved-session", orchestrator.Approve(false))
+		}
+	}()
+	wg.Wait()
+}

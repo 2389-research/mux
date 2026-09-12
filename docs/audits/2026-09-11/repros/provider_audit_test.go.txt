@@ -1,0 +1,241 @@
+package llm
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	anthropic "github.com/anthropics/anthropic-sdk-go"
+	openai "github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/responses"
+	"google.golang.org/genai"
+	"net/http"
+	"net/http/httptest"
+	"runtime"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func TestAuditGeminiStreamAccumulates(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hello \"}]}}]}\n\n")
+		fmt.Fprint(w, "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"world\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":2}}\n\n")
+	}))
+	defer s.Close()
+	c, err := NewGeminiClientWithBaseURL(context.Background(), "key", "gemini-test", s.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch, err := c.CreateMessageStream(context.Background(), &Request{Messages: []Message{NewUserMessage("hi")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var delta string
+	var final *Response
+	for e := range ch {
+		if e.Error != nil {
+			t.Fatal(e.Error)
+		}
+		delta += e.Text
+		if e.Type == EventMessageStop {
+			final = e.Response
+		}
+	}
+	if final == nil || final.TextContent() != delta {
+		t.Fatalf("deltas=%q final=%+v", delta, final)
+	}
+}
+func TestAuditGeminiToolMetadata(t *testing.T) {
+	original := &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{ThoughtSignature: []byte("opaque"), FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "read", Args: map[string]any{"p": "a"}}}}}}}}
+	blocks := convertGeminiResponse(original, "gemini-test").Content
+	replay := convertMessage(Message{Role: RoleAssistant, Blocks: blocks}).Parts[0]
+	if replay.FunctionCall.ID != "call_1" {
+		t.Errorf("function call ID lost: %+v", replay.FunctionCall)
+	}
+	if string(replay.ThoughtSignature) != "opaque" {
+		t.Errorf("thought signature lost: %q", replay.ThoughtSignature)
+	}
+	result := convertMessage(Message{Role: RoleUser, Blocks: []ContentBlock{{Type: ContentTypeToolResult, Name: "read", ToolUseID: "call_1", Text: "ok"}}}).Parts[0]
+	if result.FunctionResponse.ID != "call_1" {
+		t.Errorf("result ID lost: %+v", result.FunctionResponse)
+	}
+}
+func TestAuditAnthropicThinkingRoundTrip(t *testing.T) {
+	var a anthropic.Message
+	if err := json.Unmarshal([]byte(`{"content":[{"type":"thinking","thinking":"reason","signature":"sig"},{"type":"tool_use","id":"t1","name":"read","input":{}}]}`), &a); err != nil {
+		t.Fatal(err)
+	}
+	blocks := convertResponse(&a).Content
+	p := convertRequest(&Request{Messages: []Message{{Role: RoleAssistant, Blocks: blocks}}})
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"signature":"sig"`) {
+		t.Fatalf("thinking lost from request: %s", b)
+	}
+}
+func TestAuditAnthropicBudget(t *testing.T) {
+	p := convertRequest(&Request{MaxTokens: 4096, Thinking: &ThinkingConfig{Enabled: true, Budget: 8192}})
+	if p.MaxTokens <= p.Thinking.OfEnabled.BudgetTokens {
+		t.Fatalf("invalid max_tokens=%d budget_tokens=%d", p.MaxTokens, p.Thinking.OfEnabled.BudgetTokens)
+	}
+}
+func TestAuditAnthropicTemperature(t *testing.T) {
+	v := 0.2
+	p := convertRequest(&Request{Temperature: &v})
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"temperature":0.2`) {
+		t.Fatalf("temperature absent: %s", b)
+	}
+}
+func TestAuditOpenAIIncomplete(t *testing.T) {
+	var r responses.Response
+	if err := json.Unmarshal([]byte(`{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","content":[{"type":"output_text","text":"partial"}]}]}`), &r); err != nil {
+		t.Fatal(err)
+	}
+	got := convertOpenAIResponsesResponse(&r)
+	if got.StopReason != StopReasonMaxTokens {
+		t.Fatalf("incomplete reported as %q", got.StopReason)
+	}
+}
+func TestAuditOpenAIStreamingURLPDF(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"output\":[]}}\n\n")
+	}))
+	defer s.Close()
+	c := NewOpenAIClientWithBaseURL("key", "model", s.URL)
+	ch, err := c.CreateMessageStream(context.Background(), &Request{Messages: []Message{NewUserMessageWithBlocks(NewPDFFromURL("https://example.org/file.pdf"))}})
+	if err != nil {
+		t.Fatalf("Responses-compatible PDF rejected: %v", err)
+	}
+	for range ch {
+	}
+}
+func TestAuditRetryInitialHTTPFailure(t *testing.T) {
+	var count atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(503)
+		fmt.Fprint(w, `{"error":{"message":"unavailable","type":"server_error"}}`)
+	}))
+	defer s.Close()
+	c := &OpenAIClient{client: openai.NewClient(option.WithAPIKey("key"), option.WithBaseURL(s.URL), option.WithMaxRetries(0)), model: "model"}
+	retry := NewRetryClient(c, &RetryConfig{MaxRetries: 1})
+	ch, err := retry.CreateMessageStream(context.Background(), &Request{Messages: []Message{NewUserMessage("hi")}})
+	if err == nil {
+		for range ch {
+		}
+	}
+	if count.Load() != 2 {
+		t.Fatalf("requests=%d expected 2 on initial 503; synchronous err=%v", count.Load(), err)
+	}
+}
+func TestAuditCancellationFullStream(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for i := 0; i < 250; i++ {
+			fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n\n")
+		}
+	}))
+	defer s.Close()
+	c := NewOpenAIClientWithBaseURL("key", "model", s.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := c.CreateMessageStream(ctx, &Request{Messages: []Message{NewUserMessage("hi")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for len(ch) < 100 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	time.Sleep(30 * time.Millisecond)
+	b := make([]byte, 1<<20)
+	n := runtime.Stack(b, true)
+	leaked := strings.Contains(string(b[:n]), "(*OpenAIClient).CreateMessageStream.func1")
+	for range ch {
+	} // cleanup producer after collecting evidence
+	if leaked {
+		t.Fatal("producer remains blocked on full channel after cancellation")
+	}
+}
+func TestAuditChatAssistantText(t *testing.T) {
+	p := convertAssistantMessage(Message{Role: RoleAssistant, Content: "one", Blocks: []ContentBlock{{Type: ContentTypeText, Text: "two"}, {Type: ContentTypeText, Text: "three"}}})
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "onetwothree") {
+		t.Fatalf("assistant text lost: %s", b)
+	}
+}
+func TestAuditPDFWireEncoding(t *testing.T) {
+	pdf, err := NewPDFFromBytes([]byte("%PDF-1.4"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, p := range map[string]any{"responses": convertResponsesPDF(pdf), "chat": convertOpenAIPDF(pdf)} {
+		b, err := json.Marshal(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(b), "data:application/pdf;base64,") {
+			t.Errorf("%s PDF lacks required data URL prefix: %s", name, b)
+		}
+	}
+}
+func TestAuditOllamaMaxTokens(t *testing.T) {
+	var received struct {
+		MaxTokens int `json:"max_tokens"`
+	}
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Error(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer s.Close()
+	c := NewOllamaClient(s.URL, "model")
+	if _, err := c.CreateMessage(context.Background(), &Request{MaxTokens: 17, Messages: []Message{NewUserMessage("hi")}}); err != nil {
+		t.Fatal(err)
+	}
+	if received.MaxTokens != 17 {
+		t.Fatalf("Ollama-compatible max_tokens=%d, want 17", received.MaxTokens)
+	}
+}
+func TestAuditOllamaStreamRequestsUsage(t *testing.T) {
+	var received struct {
+		StreamOptions *struct {
+			IncludeUsage bool `json:"include_usage"`
+		} `json:"stream_options"`
+	}
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Error(err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer s.Close()
+	c := NewOllamaClient(s.URL, "model")
+	ch, err := c.CreateMessageStream(context.Background(), &Request{Messages: []Message{NewUserMessage("hi")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range ch {
+	}
+	if received.StreamOptions == nil || !received.StreamOptions.IncludeUsage {
+		t.Fatalf("stream_options=%+v; Ollama requires include_usage", received.StreamOptions)
+	}
+}

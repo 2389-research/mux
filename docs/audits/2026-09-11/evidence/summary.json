@@ -1,0 +1,198 @@
+{
+  "commit": "6f7305ecbcb2ab6d4ebe7ea87ba39ab019dbd5c0",
+  "issues": [
+    {
+      "ref": "mux#frc3",
+      "priority": 1,
+      "title": "Update dependencies flagged by govulncheck and add a vulnerability gate"
+    },
+    {
+      "ref": "mux#t0qf",
+      "priority": 1,
+      "title": "Bind resumed approval decisions to tool call IDs instead of callback order"
+    },
+    {
+      "ref": "mux#bq4e",
+      "priority": 1,
+      "title": "Preserve Message.Content when creating and appending transcripts"
+    },
+    {
+      "ref": "mux#jh1c",
+      "priority": 1,
+      "title": "Preserve the previous transcript when file serialization or writes fail"
+    },
+    {
+      "ref": "mux#ac2b",
+      "priority": 1,
+      "title": "Accumulate every Gemini chunk into the final streamed response"
+    },
+    {
+      "ref": "mux#w9xj",
+      "priority": 1,
+      "title": "Preserve Anthropic thinking blocks and signatures through tool turns"
+    },
+    {
+      "ref": "mux#62ba",
+      "priority": 1,
+      "title": "Retain Gemini thought signatures on replayed function calls"
+    },
+    {
+      "ref": "mux#vfwt",
+      "priority": 1,
+      "title": "Make stdio request writes cancellable without blocking Close"
+    },
+    {
+      "ref": "mux#5n3p",
+      "priority": 1,
+      "title": "Preserve non-streaming OpenAI incomplete and failed response status"
+    },
+    {
+      "ref": "mux#64sw",
+      "priority": 1,
+      "title": "Fail pending stdio calls when the response reader exits"
+    },
+    {
+      "ref": "mux#s53f",
+      "priority": 1,
+      "title": "Reject or correctly reset stdio clients before restarting a closed transport"
+    },
+    {
+      "ref": "mux#mgpj",
+      "priority": 1,
+      "title": "Make provider event sends cancellable when consumers stop reading"
+    },
+    {
+      "ref": "mux#b2cn",
+      "priority": 1,
+      "title": "Encode inline PDF file_data as a MIME-qualified data URL"
+    },
+    {
+      "ref": "mux#sask",
+      "priority": 2,
+      "title": "Run the integration-tagged suite in CI and replace the skipped MCP agent test"
+    },
+    {
+      "ref": "mux#x39z",
+      "priority": 2,
+      "title": "Wait for event output before the simple example exits"
+    },
+    {
+      "ref": "mux#tp9k",
+      "priority": 2,
+      "title": "Allow JSONL loader to read large records emitted by its own writer"
+    },
+    {
+      "ref": "mux#t0av",
+      "priority": 2,
+      "title": "Publish completion only after the final session checkpoint succeeds"
+    },
+    {
+      "ref": "mux#1wwm",
+      "priority": 2,
+      "title": "Make EventBus.Reset safe after EventBus.Close"
+    },
+    {
+      "ref": "mux#jc2v",
+      "priority": 2,
+      "title": "Synchronize SessionID reads with Resume state restoration"
+    },
+    {
+      "ref": "mux#m886",
+      "priority": 2,
+      "title": "Strip tool-result blocks from mixed user turns retained by compaction"
+    },
+    {
+      "ref": "mux#p52w",
+      "priority": 2,
+      "title": "Check cancellation before consuming immediately available rate-limit tokens"
+    },
+    {
+      "ref": "mux#2jw4",
+      "priority": 2,
+      "title": "Return Gemini function results with the matching call ID"
+    },
+    {
+      "ref": "mux#dz9z",
+      "priority": 2,
+      "title": "Keep Anthropic max_tokens strictly above the thinking budget"
+    },
+    {
+      "ref": "mux#29jh",
+      "priority": 2,
+      "title": "Forward Request.Temperature to Anthropic message parameters"
+    },
+    {
+      "ref": "mux#drm8",
+      "priority": 2,
+      "title": "Allow URL PDFs on the OpenAI Responses streaming path"
+    },
+    {
+      "ref": "mux#a825",
+      "priority": 2,
+      "title": "Make initial provider streaming failures reach RetryClient retry logic"
+    },
+    {
+      "ref": "mux#xat1",
+      "priority": 2,
+      "title": "Send protocol-valid initialized notifications on both MCP transports"
+    },
+    {
+      "ref": "mux#xxrt",
+      "priority": 2,
+      "title": "Keep HTTP client state and active requests consistent across failure and Close"
+    },
+    {
+      "ref": "mux#k0s2",
+      "priority": 2,
+      "title": "Preserve all assistant text blocks in Chat Completions history"
+    },
+    {
+      "ref": "mux#whef",
+      "priority": 2,
+      "title": "Accept default SSE message events and tool responses larger than 64 KiB"
+    },
+    {
+      "ref": "mux#wr5j",
+      "priority": 2,
+      "title": "Honor MaxResponseBytes when it is below the initial scanner buffer"
+    },
+    {
+      "ref": "mux#k5mx",
+      "priority": 2,
+      "title": "Send Ollama's supported max_tokens field"
+    },
+    {
+      "ref": "mux#xe1p",
+      "priority": 2,
+      "title": "Follow tools/list pagination instead of silently dropping later tools"
+    },
+    {
+      "ref": "mux#3zpg",
+      "priority": 2,
+      "title": "Request the usage trailer when streaming from Ollama"
+    },
+    {
+      "ref": "mux#ns1f",
+      "priority": 2,
+      "title": "Validate JSON HTTP response IDs before accepting tool results"
+    },
+    {
+      "ref": "mux#93yp",
+      "priority": 2,
+      "title": "Create session snapshot temporary files exclusively instead of following a predictable symlink"
+    },
+    {
+      "ref": "mux#6ybc",
+      "priority": 3,
+      "title": "Capture and assert expected warnings and recovered panic logs in tests"
+    },
+    {
+      "ref": "mux#3ctg",
+      "priority": 3,
+      "title": "Correct the README claim that mux implements an MCP server"
+    }
+  ],
+  "test_records": 718,
+  "integration_test_records": 724,
+  "coverage_percent": 80.5
+}
