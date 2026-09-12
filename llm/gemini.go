@@ -169,30 +169,6 @@ func convertMessage(msg Message) *genai.Content {
 	}
 }
 
-// mapGeminiStopReason maps a Gemini finish reason to our StopReason. STOP with
-// actual function calls indicates tool use; safety-class reasons become
-// StopReasonContentFilter; malformed, OTHER, and unknown values (including
-// empty) become StopReasonOther.
-func mapGeminiStopReason(reason string, hasTools bool) StopReason {
-	switch genai.FinishReason(reason) {
-	case genai.FinishReasonStop:
-		if hasTools {
-			return StopReasonToolUse
-		}
-		return StopReasonEndTurn
-	case genai.FinishReasonMaxTokens:
-		return StopReasonMaxTokens
-	case genai.FinishReasonSafety,
-		genai.FinishReasonRecitation,
-		genai.FinishReasonBlocklist,
-		genai.FinishReasonProhibitedContent,
-		genai.FinishReasonSPII:
-		return StopReasonContentFilter
-	default:
-		return StopReasonOther
-	}
-}
-
 // convertGeminiResponse converts Gemini's GenerateContentResponse to our Response.
 func convertGeminiResponse(resp *genai.GenerateContentResponse, model string) *Response {
 	result := &Response{

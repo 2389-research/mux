@@ -145,31 +145,6 @@ func convertRequest(req *Request) anthropic.MessageNewParams {
 	return params
 }
 
-// mapAnthropicStopReason maps an Anthropic stop reason to our StopReason using
-// the SDK's named constants. An empty reason means "not finished yet"
-// (message_start snapshots, usage-only message_deltas) and stays empty;
-// anything else unrecognized maps to StopReasonOther.
-func mapAnthropicStopReason(reason anthropic.StopReason) StopReason {
-	switch reason {
-	case "":
-		return ""
-	case anthropic.StopReasonEndTurn:
-		return StopReasonEndTurn
-	case anthropic.StopReasonToolUse:
-		return StopReasonToolUse
-	case anthropic.StopReasonMaxTokens:
-		return StopReasonMaxTokens
-	case anthropic.StopReasonStopSequence:
-		return StopReasonStopSequence
-	case anthropic.StopReasonRefusal:
-		return StopReasonRefusal
-	case anthropic.StopReasonPauseTurn:
-		return StopReasonPauseTurn
-	default:
-		return StopReasonOther
-	}
-}
-
 // convertResponse converts Anthropic's Message to our Response.
 func convertResponse(msg *anthropic.Message) *Response {
 	resp := &Response{

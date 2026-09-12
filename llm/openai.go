@@ -532,24 +532,6 @@ func convertAssistantMessage(msg Message) openai.ChatCompletionMessageParamUnion
 	return openai.AssistantMessage(textContent)
 }
 
-// mapChatStopReason maps an OpenAI-compatible finish reason to our StopReason.
-// The v3 SDK carries finish reasons as plain strings; anything unrecognized
-// (including empty) maps to StopReasonOther.
-func mapChatStopReason(reason string) StopReason {
-	switch reason {
-	case "stop":
-		return StopReasonEndTurn
-	case "tool_calls", "function_call":
-		return StopReasonToolUse
-	case "length":
-		return StopReasonMaxTokens
-	case "content_filter":
-		return StopReasonContentFilter
-	default:
-		return StopReasonOther
-	}
-}
-
 // convertOpenAIResponse converts OpenAI's ChatCompletion to our Response.
 func convertOpenAIResponse(resp *openai.ChatCompletion) *Response {
 	result := &Response{
