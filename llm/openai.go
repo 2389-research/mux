@@ -545,22 +545,15 @@ func convertOpenAIResponse(resp *openai.ChatCompletion) *Response {
 	}
 
 	if len(resp.Choices) == 0 {
+		// An empty choice list carries no finish reason; report a definite
+		// StopReasonOther instead of leaving the field empty.
+		result.StopReason = StopReasonOther
 		return result
 	}
 
 	choice := resp.Choices[0]
 
-	// Map stop reason
-	switch choice.FinishReason {
-	case "stop":
-		result.StopReason = StopReasonEndTurn
-	case "tool_calls":
-		result.StopReason = StopReasonToolUse
-	case "length":
-		result.StopReason = StopReasonMaxTokens
-	default:
-		result.StopReason = StopReasonEndTurn
-	}
+	result.StopReason = mapChatStopReason(choice.FinishReason)
 
 	// Text content
 	if choice.Message.Content != "" {
@@ -598,9 +591,10 @@ func convertOpenAIResponsesResponse(resp *responses.Response) *Response {
 			OutputTokens:   int(resp.Usage.OutputTokens),
 			ThinkingTokens: int(resp.Usage.OutputTokensDetails.ReasoningTokens),
 		},
-		StopReason: StopReasonEndTurn,
 	}
 
+	hasTools := false
+	hasRefusal := false
 	for _, item := range resp.Output {
 		switch item.Type {
 		case "message":
@@ -610,6 +604,9 @@ func convertOpenAIResponsesResponse(resp *responses.Response) *Response {
 						Type: ContentTypeText,
 						Text: content.Text,
 					})
+				}
+				if content.Type == "refusal" {
+					hasRefusal = true
 				}
 			}
 		case "function_call":
@@ -626,8 +623,13 @@ func convertOpenAIResponsesResponse(resp *responses.Response) *Response {
 				Name:  item.Name,
 				Input: input,
 			})
-			result.StopReason = StopReasonToolUse
+			hasTools = true
 		}
+	}
+
+	result.StopReason = mapResponsesStopReason(string(resp.Status), resp.IncompleteDetails.Reason, hasTools)
+	if resp.Status == responses.ResponseStatusCompleted && hasRefusal {
+		result.StopReason = StopReasonRefusal
 	}
 
 	return result

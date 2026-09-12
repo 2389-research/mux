@@ -32,13 +32,31 @@ const (
 	ContentTypeVideo      ContentType = "video"
 )
 
-// StopReason indicates why the model stopped generating.
+// StopReason indicates why the model stopped generating. Values group into
+// normal completions (end_turn, tool_use), limit hits (max_tokens), and
+// abnormal terminations (stop_sequence, refusal, content_filter, pause_turn,
+// other). The empty string is still reachable at runtime: Anthropic
+// message_start stream snapshots carry no stop reason yet, and that
+// "not finished yet" state is deliberately preserved.
 type StopReason string
 
 const (
-	StopReasonEndTurn   StopReason = "end_turn"
-	StopReasonToolUse   StopReason = "tool_use"
+	// StopReasonEndTurn is a normal completion: the model ended its turn.
+	StopReasonEndTurn StopReason = "end_turn"
+	// StopReasonToolUse is a normal completion: the model requested tool calls.
+	StopReasonToolUse StopReason = "tool_use"
+	// StopReasonMaxTokens indicates the output token limit was reached.
 	StopReasonMaxTokens StopReason = "max_tokens"
+	// StopReasonStopSequence indicates a stop sequence halted generation.
+	StopReasonStopSequence StopReason = "stop_sequence"
+	// StopReasonRefusal indicates the model declined to answer.
+	StopReasonRefusal StopReason = "refusal"
+	// StopReasonContentFilter indicates safety or content filtering halted generation.
+	StopReasonContentFilter StopReason = "content_filter"
+	// StopReasonPauseTurn indicates the model paused mid-turn (Anthropic).
+	StopReasonPauseTurn StopReason = "pause_turn"
+	// StopReasonOther indicates any other or unrecognized termination.
+	StopReasonOther StopReason = "other"
 )
 
 // DefaultMaxTokens is the max output tokens used when a request does not

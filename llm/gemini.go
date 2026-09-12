@@ -188,26 +188,17 @@ func convertGeminiResponse(resp *genai.GenerateContentResponse, model string) *R
 		}
 	}
 
+	reason := ""
+	if len(resp.Candidates) > 0 {
+		reason = string(resp.Candidates[0].FinishReason)
+	}
+	result.StopReason = mapGeminiStopReason(reason, len(resp.FunctionCalls()) > 0)
+
 	if len(resp.Candidates) == 0 {
 		return result
 	}
 
 	candidate := resp.Candidates[0]
-
-	// Map finish reason
-	switch candidate.FinishReason {
-	case genai.FinishReasonStop:
-		result.StopReason = StopReasonEndTurn
-	case genai.FinishReasonMaxTokens:
-		result.StopReason = StopReasonMaxTokens
-	default:
-		// Check if we have function calls - that indicates tool use
-		if resp.FunctionCalls() != nil && len(resp.FunctionCalls()) > 0 {
-			result.StopReason = StopReasonToolUse
-		} else {
-			result.StopReason = StopReasonEndTurn
-		}
-	}
 
 	// Extract content from candidate
 	if candidate.Content != nil {

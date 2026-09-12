@@ -150,7 +150,7 @@ func convertResponse(msg *anthropic.Message) *Response {
 	resp := &Response{
 		ID:         msg.ID,
 		Model:      string(msg.Model),
-		StopReason: StopReason(msg.StopReason),
+		StopReason: mapAnthropicStopReason(msg.StopReason),
 		Usage: Usage{
 			InputTokens:  int(msg.Usage.InputTokens),
 			OutputTokens: int(msg.Usage.OutputTokens),
@@ -407,7 +407,7 @@ func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request)
 				}
 				// Carry stop_reason and usage from the final message_delta
 				if event.Delta.StopReason != "" || event.Usage.OutputTokens > 0 {
-					se.Response = acc.mergeDelta(StopReason(event.Delta.StopReason), Usage{OutputTokens: int(event.Usage.OutputTokens)})
+					se.Response = acc.mergeDelta(mapAnthropicStopReason(event.Delta.StopReason), Usage{OutputTokens: int(event.Usage.OutputTokens)})
 				}
 				eventChan <- se
 			case "message_stop":
