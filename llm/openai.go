@@ -636,13 +636,15 @@ func convertOpenAIResponsesResponse(resp *responses.Response) *Response {
 }
 
 // openAIResponseError reports an error for any Responses API result whose
-// status is not "completed", matching the streaming path's policy that
-// incomplete and failed results are errors — including max_output_tokens
-// truncation. Checked after the SDK call returns and before conversion, so
-// partial output (e.g. a parsable function_call) can never surface as a
-// successful turn. Conversion of incomplete responses via
-// convertOpenAIResponsesResponse still exposes StopReasonMaxTokens for direct
-// unit conversion.
+// status is not "completed", including max_output_tokens truncation. It is the
+// single status policy for both call shapes: CreateMessage checks it after the
+// SDK call returns and before conversion, and CreateMessageStream applies it
+// to terminal status events — response.failed, response.incomplete, and
+// response.completed events whose payload carries a non-completed status
+// (defense against wire inconsistency) — so partial output (e.g. a parsable
+// function_call) can never surface as a successful turn on either path.
+// Conversion of incomplete responses via convertOpenAIResponsesResponse still
+// exposes StopReasonMaxTokens for direct unit conversion.
 func openAIResponseError(resp *responses.Response) error {
 	switch resp.Status {
 	case responses.ResponseStatusCompleted:
@@ -764,6 +766,10 @@ func (o *OpenAIClient) CreateMessageStream(ctx context.Context, req *Request) (<
 					Block: block,
 				}
 			case "response.completed":
+				if err := openAIResponseError(&event.Response); err != nil {
+					eventChan <- StreamEvent{Type: EventError, Error: err}
+					return
+				}
 				if !messageStarted {
 					eventChan <- StreamEvent{Type: EventMessageStart}
 				}
@@ -778,16 +784,10 @@ func (o *OpenAIClient) CreateMessageStream(ctx context.Context, req *Request) (<
 					Error: fmt.Errorf("openai stream error: %s", event.Message),
 				}
 				return
-			case "response.failed":
+			case "response.failed", "response.incomplete":
 				eventChan <- StreamEvent{
 					Type:  EventError,
-					Error: fmt.Errorf("openai stream failed: %s", event.Response.Error.Message),
-				}
-				return
-			case "response.incomplete":
-				eventChan <- StreamEvent{
-					Type:  EventError,
-					Error: fmt.Errorf("openai stream incomplete: %s", event.Response.IncompleteDetails.Reason),
+					Error: openAIResponseError(&event.Response),
 				}
 				return
 			}

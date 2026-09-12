@@ -1390,13 +1390,17 @@ func TestOpenAIClient_StreamResponsesErrorEvent(t *testing.T) {
 	}
 }
 
+// TestOpenAIClient_StreamResponsesFailedEvent checks the SSE equivalent of
+// CreateMessage's failed fixture: the response.failed event must surface the
+// same typed *ErrProviderResponse with the same Reason as the non-streaming
+// call, and no converted response may escape as a successful turn.
 func TestOpenAIClient_StreamResponsesFailedEvent(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/responses" {
 			t.Errorf("expected /responses request, got %s", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		writeOpenAIResponseSSE(t, w, "response.failed", `{"type":"response.failed","response":{"id":"resp_failed","status":"failed","model":"gpt-5.2","error":{"message":"model failed","type":"server_error"}}}`)
+		writeOpenAIResponseSSE(t, w, "response.failed", `{"type":"response.failed","response":{"id":"r1","status":"failed","error":{"code":"server_error","message":"failed"},"output":[]}}`)
 	}))
 	defer server.Close()
 
@@ -1416,16 +1420,21 @@ func TestOpenAIClient_StreamResponsesFailedEvent(t *testing.T) {
 		t.Fatalf("unexpected error creating stream: %v", err)
 	}
 
-	assertOpenAIStreamErrorContains(t, eventChan, "model failed")
+	assertOpenAIStreamStatusError(t, eventChan, "failed: failed")
 }
 
+// TestOpenAIClient_StreamResponsesIncompleteEvent checks the SSE equivalent
+// of CreateMessage's incomplete fixture — including the parsable function_call
+// in the partial output: the response.incomplete event must surface the same
+// typed *ErrProviderResponse with the same Reason as the non-streaming call,
+// and the partial result must not convert into a successful turn.
 func TestOpenAIClient_StreamResponsesIncompleteEvent(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/responses" {
 			t.Errorf("expected /responses request, got %s", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		writeOpenAIResponseSSE(t, w, "response.incomplete", `{"type":"response.incomplete","response":{"id":"resp_incomplete","status":"incomplete","model":"gpt-5.2","incomplete_details":{"reason":"max_output_tokens"}}}`)
+		writeOpenAIResponseSSE(t, w, "response.incomplete", `{"type":"response.incomplete","response":{"id":"r1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","content":[{"type":"output_text","text":"partial"}]},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"get_weather","arguments":"{\"location\":\"New York\"}"}]}}`)
 	}))
 	defer server.Close()
 
@@ -1445,22 +1454,92 @@ func TestOpenAIClient_StreamResponsesIncompleteEvent(t *testing.T) {
 		t.Fatalf("unexpected error creating stream: %v", err)
 	}
 
-	assertOpenAIStreamErrorContains(t, eventChan, "max_output_tokens")
+	assertOpenAIStreamStatusError(t, eventChan, "incomplete: max_output_tokens")
 }
 
-func assertOpenAIStreamErrorContains(t *testing.T, eventChan <-chan StreamEvent, want string) {
-	t.Helper()
-	var gotError bool
-	for event := range eventChan {
-		if event.Type == EventError {
-			gotError = true
-			if !strings.Contains(event.Error.Error(), want) {
-				t.Errorf("expected error containing %q, got %v", want, event.Error)
+// TestOpenAIClient_StreamCompletedEventWithNonCompletedStatus defends against
+// wire inconsistency: a response.completed event whose payload carries a
+// non-completed status must error with the typed *ErrProviderResponse instead
+// of converting the partial payload into EventMessageStop.
+func TestOpenAIClient_StreamCompletedEventWithNonCompletedStatus(t *testing.T) {
+	fixtures := []struct {
+		name    string
+		data    string
+		wantErr string
+	}{
+		{
+			name:    "completed event with incomplete status",
+			data:    `{"type":"response.completed","response":{"id":"r1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","content":[{"type":"output_text","text":"partial"}]}]}}`,
+			wantErr: "incomplete: max_output_tokens",
+		},
+		{
+			name:    "completed event with failed status",
+			data:    `{"type":"response.completed","response":{"id":"r1","status":"failed","error":{"code":"server_error","message":"failed"},"output":[]}}`,
+			wantErr: "failed: failed",
+		},
+	}
+
+	for _, tc := range fixtures {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/responses" {
+					t.Errorf("expected /responses request, got %s", r.URL.Path)
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				writeOpenAIResponseSSE(t, w, "response.completed", tc.data)
+			}))
+			defer server.Close()
+
+			client := &OpenAIClient{
+				client: openai.NewClient(
+					option.WithAPIKey("test-key"),
+					option.WithBaseURL(server.URL),
+					option.WithMaxRetries(0),
+				),
+				model: "gpt-5.2",
 			}
+
+			eventChan, err := client.CreateMessageStream(context.Background(), &Request{
+				Messages: []Message{NewUserMessage("Hello")},
+			})
+			if err != nil {
+				t.Fatalf("unexpected error creating stream: %v", err)
+			}
+
+			assertOpenAIStreamStatusError(t, eventChan, tc.wantErr)
+		})
+	}
+}
+
+// assertOpenAIStreamStatusError consumes a stream that must fail with a typed
+// *ErrProviderResponse carrying exactly wantReason, and asserts no converted
+// response escapes as EventMessageStop.
+func assertOpenAIStreamStatusError(t *testing.T, eventChan <-chan StreamEvent, wantReason string) {
+	t.Helper()
+	var gotError, gotStop bool
+	for event := range eventChan {
+		switch event.Type {
+		case EventError:
+			gotError = true
+			var pe *ErrProviderResponse
+			if !errors.As(event.Error, &pe) {
+				t.Fatalf("expected *ErrProviderResponse, got %T: %v", event.Error, event.Error)
+			}
+			if pe.Provider != "openai" {
+				t.Errorf("expected provider openai, got %q", pe.Provider)
+			}
+			if pe.Reason != wantReason {
+				t.Errorf("expected reason %q, got %q", wantReason, pe.Reason)
+			}
+		case EventMessageStop:
+			gotStop = true
 		}
 	}
 	if !gotError {
 		t.Fatal("expected error event")
+	}
+	if gotStop {
+		t.Fatal("no converted response may escape a non-completed status")
 	}
 }
 
