@@ -258,6 +258,7 @@ func TestOpenAIClient_CreateMessageUsesResponsesAPIWithToolsAndReasoning(t *test
 			"object":     "response",
 			"created_at": 0,
 			"model":      "gpt-5.5",
+			"status":     "completed",
 			"output": []map[string]any{
 				{
 					"type":   "message",
@@ -332,6 +333,7 @@ func TestOpenAIClient_CreateMessageSendsFunctionCallOutputsToResponsesAPI(t *tes
 			"object":     "response",
 			"created_at": 0,
 			"model":      "gpt-5.5",
+			"status":     "completed",
 			"output": []map[string]any{
 				{
 					"type":   "message",
@@ -390,6 +392,82 @@ func TestOpenAIClient_CreateMessageSendsFunctionCallOutputsToResponsesAPI(t *tes
 	}
 	if input[2].(map[string]any)["call_id"] != "call_123" {
 		t.Fatalf("expected function output call_id call_123, got %#v", input[2])
+	}
+}
+
+// TestOpenAIClient_CreateMessageRejectsIncompleteAndFailedStatus tables real
+// HTTP-200 Responses API bodies whose status is not "completed". CreateMessage
+// must return an *ErrProviderResponse and no Response — even when the partial
+// output carries a function_call whose arguments parse cleanly, so no tool
+// call escapes as a successful turn. A completed body remains successful.
+func TestOpenAIClient_CreateMessageRejectsIncompleteAndFailedStatus(t *testing.T) {
+	fixtures := []struct {
+		name    string
+		body    string
+		wantErr string // exact Reason of *ErrProviderResponse; empty means success expected
+	}{
+		{
+			name:    "incomplete max_output_tokens",
+			body:    `{"id":"r1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","content":[{"type":"output_text","text":"partial"}]},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"get_weather","arguments":"{\"location\":\"New York\"}"}]}`,
+			wantErr: "incomplete: max_output_tokens",
+		},
+		{
+			name:    "failed",
+			body:    `{"id":"r1","status":"failed","error":{"code":"server_error","message":"failed"},"output":[]}`,
+			wantErr: "failed: failed",
+		},
+		{
+			name: "completed",
+			body: `{"id":"r1","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}]}`,
+		},
+	}
+
+	for _, tc := range fixtures {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, tc.body)
+			}))
+			defer server.Close()
+
+			client := NewOpenAIClientWithBaseURL("test-key", "gpt-5.2", server.URL)
+			resp, err := client.CreateMessage(context.Background(), &Request{
+				Messages: []Message{NewUserMessage("Hello")},
+				Tools: []ToolDefinition{
+					{Name: "get_weather", Description: "Get weather", InputSchema: map[string]any{"type": "object"}},
+				},
+			})
+
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected completed response to succeed, got error: %v", err)
+				}
+				if resp == nil || resp.TextContent() != "done" {
+					t.Fatalf("expected completed response with text %q, got %+v", "done", resp)
+				}
+				if resp.StopReason != StopReasonEndTurn {
+					t.Errorf("expected stop reason %q, got %q", StopReasonEndTurn, resp.StopReason)
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatal("expected error for non-completed status, got nil")
+			}
+			if resp != nil {
+				t.Fatalf("no success response may escape a non-completed status, got %+v", resp)
+			}
+			var pe *ErrProviderResponse
+			if !errors.As(err, &pe) {
+				t.Fatalf("expected *ErrProviderResponse, got %T: %v", err, err)
+			}
+			if pe.Provider != "openai" {
+				t.Errorf("expected provider openai, got %q", pe.Provider)
+			}
+			if pe.Reason != tc.wantErr {
+				t.Errorf("expected reason %q, got %q", tc.wantErr, pe.Reason)
+			}
+		})
 	}
 }
 

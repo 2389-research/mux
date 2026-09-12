@@ -635,6 +635,27 @@ func convertOpenAIResponsesResponse(resp *responses.Response) *Response {
 	return result
 }
 
+// openAIResponseError reports an error for any Responses API result whose
+// status is not "completed", matching the streaming path's policy that
+// incomplete and failed results are errors — including max_output_tokens
+// truncation. Checked after the SDK call returns and before conversion, so
+// partial output (e.g. a parsable function_call) can never surface as a
+// successful turn. Conversion of incomplete responses via
+// convertOpenAIResponsesResponse still exposes StopReasonMaxTokens for direct
+// unit conversion.
+func openAIResponseError(resp *responses.Response) error {
+	switch resp.Status {
+	case responses.ResponseStatusCompleted:
+		return nil
+	case responses.ResponseStatusIncomplete:
+		return &ErrProviderResponse{Provider: "openai", Reason: "incomplete: " + resp.IncompleteDetails.Reason}
+	case responses.ResponseStatusFailed:
+		return &ErrProviderResponse{Provider: "openai", Reason: "failed: " + resp.Error.Message}
+	default:
+		return &ErrProviderResponse{Provider: "openai", Reason: "unexpected status: " + string(resp.Status)}
+	}
+}
+
 // CreateMessage sends a message and returns the complete response.
 func (o *OpenAIClient) CreateMessage(ctx context.Context, req *Request) (*Response, error) {
 	if req.Model == "" {
@@ -656,6 +677,9 @@ func (o *OpenAIClient) CreateMessage(ctx context.Context, req *Request) (*Respon
 	params := convertOpenAIResponsesRequest(req)
 	resp, err := o.client.Responses.New(ctx, params)
 	if err != nil {
+		return nil, err
+	}
+	if err := openAIResponseError(resp); err != nil {
 		return nil, err
 	}
 

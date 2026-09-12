@@ -249,6 +249,20 @@ func (e *ErrMalformedMedia) Error() string {
 	return fmt.Sprintf("%s received malformed %s block: %s", e.Provider, e.Media, e.Reason)
 }
 
+// ErrProviderResponse indicates a provider returned an HTTP-200 response whose
+// status field reports failure or incompleteness rather than a completed
+// result (e.g. the OpenAI Responses API "failed" or "incomplete" statuses).
+// Reason carries the provider's own explanation, prefixed with the status
+// category (e.g. "incomplete: max_output_tokens").
+type ErrProviderResponse struct {
+	Provider string
+	Reason   string
+}
+
+func (e *ErrProviderResponse) Error() string {
+	return fmt.Sprintf("%s response error: %s", e.Provider, e.Reason)
+}
+
 // NewImageFromURL constructs an image content block backed by a remote URL.
 // MediaType is left empty; the remote server's Content-Type is authoritative.
 func NewImageFromURL(url string) ContentBlock {
