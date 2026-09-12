@@ -1,6 +1,5 @@
 // ABOUTME: Provider stop-reason mapping helpers - one exhaustive mapping per
 // ABOUTME: provider family from native finish reasons to mux StopReason values.
-
 package llm
 
 import (

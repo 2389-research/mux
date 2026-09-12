@@ -34,6 +34,7 @@ func TestAnthropicStopReasons(t *testing.T) {
 		anthropic.StopReasonStopSequence: StopReasonStopSequence,
 		anthropic.StopReasonRefusal:      StopReasonRefusal,
 		anthropic.StopReasonPauseTurn:    StopReasonPauseTurn,
+		"":                               "",
 		"future":                         StopReasonOther,
 	} {
 		if got := mapAnthropicStopReason(native); got != want {

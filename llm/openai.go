@@ -605,7 +605,7 @@ func convertOpenAIResponsesResponse(resp *responses.Response) *Response {
 						Text: content.Text,
 					})
 				}
-				if content.Type == "refusal" && content.Refusal != "" {
+				if content.Type == "refusal" {
 					hasRefusal = true
 				}
 			}
