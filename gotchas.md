@@ -11,3 +11,19 @@ Passing unit/race tests do not establish live provider compatibility.
 Approved contracts permit only one writer per session ID and require separate
 tool registries for agents with different skill catalogs. Keep those constraints
 in view when testing persistence or agent isolation.
+
+## Relevance audit (2026-09-11)
+
+See `docs/audits/2026-09-11/relevance.md` and Kata label
+`relevance-2026-09-11` for 11 additional issues. Recommendation: retain the
+embeddable Go core; repair provider replay, controls and consumer integration
+before expanding orchestration. This is an audit recommendation, not an
+approved architecture change.
+
+Local consumer pins differ and Elves uses a local replace. Source imports are
+evidence of reuse, not live compatibility. Local Jeff uses mux-rs; the old
+DEPENDENTS.md must not be treated as a current Go adoption inventory.
+
+Protocol/API status is date-sensitive: this audit checked MCP 2026-07-28 and
+Gemini Interactions GA documentation. Recheck primary sources before changing
+support policy; GenerateContent remains supported in the reviewed docs.
