@@ -27,3 +27,15 @@ DEPENDENTS.md must not be treated as a current Go adoption inventory.
 Protocol/API status is date-sensitive: this audit checked MCP 2026-07-28 and
 Gemini Interactions GA documentation. Recheck primary sources before changing
 support policy; GenerateContent remains supported in the reviewed docs.
+
+## Evener comparison (2026-09-11)
+
+`docs/audits/2026-09-11/evener.md` maps Evener 96973838a implementations to mux
+issues. Prefer small adaptations of replay state, provider resolution, stream
+settlement and persistence tests. Added Kata r6tc (recoverable bounded tool
+output) and d1dj (invariant corpus checks); architecture remains a proposal.
+
+Evener is a reference, not a correctness oracle: it silently changes some
+request controls/schema guarantees, its temporary artifact handles expire,
+and its Go 1.27 agent module imports app code despite older boundary docs.
+Check current code and preserve mux's explicit contracts when porting.
