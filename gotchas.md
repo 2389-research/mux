@@ -39,3 +39,19 @@ Evener is a reference, not a correctness oracle: it silently changes some
 request controls/schema guarantees, its temporary artifact handles expire,
 and its Go 1.27 agent module imports app code despite older boundary docs.
 Check current code and preserve mux's explicit contracts when porting.
+
+## SIFT audit pass 2 (2026-09-12)
+
+`docs/audits/2026-09-11/sift-pass2.md` is the second-pass audit of `9a94996`:
+79 Kata issues under `audit-2026-09-11-pass2` (P1: a2j0, nrhn, 5ez6, yhen)
+and 19 comments on first-pass issues. Read-only: nothing was run or fixed.
+Four breaking changes (865b, j6kd, 2zdv, conditionally aag7) belong in one
+release with one CHANGELOG entry.
+
+Run `kata` from the repo root. `.kata.toml` binds the project; from another
+directory `kata show` finds nothing and looks like lost data. `kata show
+<ref> --json` carries a `comments` array.
+
+DEPENDENTS.md is stale. The corrected local-consumer inventory is appendix
+B.2 of the pass-2 report: eight unlisted Go consumers, and
+`agent-class/agents/mux` is a copy of mux, not a consumer.

@@ -55,3 +55,4 @@ output.txt
 # Generated diagram outputs (regenerate from .dot files)
 architecture.png
 architecture.svg
+.kata.local.toml
