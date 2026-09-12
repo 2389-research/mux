@@ -5,6 +5,7 @@ package llm
 
 import (
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/openai/openai-go/v3/responses"
 	"google.golang.org/genai"
 )
 
@@ -70,6 +71,35 @@ func mapGeminiStopReason(reason string, hasTools bool) StopReason {
 		genai.FinishReasonProhibitedContent,
 		genai.FinishReasonSPII:
 		return StopReasonContentFilter
+	default:
+		return StopReasonOther
+	}
+}
+
+// mapResponsesStopReason maps an OpenAI Responses API status (plus the
+// incomplete_details reason when the status is "incomplete") to our
+// StopReason. completed means ToolUse when the response carries tool output,
+// else EndTurn. The v3 SDK defines no named constants for the
+// incomplete_details reasons, so they are matched as plain strings.
+// failed, in-flight, and unknown statuses map to StopReasonOther. Refusal
+// output content is detected by the converter and overrides a completed
+// normal reason to StopReasonRefusal.
+func mapResponsesStopReason(status, reason string, hasTools bool) StopReason {
+	switch responses.ResponseStatus(status) {
+	case responses.ResponseStatusCompleted:
+		if hasTools {
+			return StopReasonToolUse
+		}
+		return StopReasonEndTurn
+	case responses.ResponseStatusIncomplete:
+		switch reason {
+		case "max_output_tokens":
+			return StopReasonMaxTokens
+		case "content_filter":
+			return StopReasonContentFilter
+		default:
+			return StopReasonOther
+		}
 	default:
 		return StopReasonOther
 	}

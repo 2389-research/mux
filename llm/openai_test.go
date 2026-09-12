@@ -15,6 +15,7 @@ import (
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/responses"
 	"github.com/tidwall/gjson"
 )
 
@@ -727,6 +728,9 @@ func TestConvertOpenAIResponse_EmptyChoices(t *testing.T) {
 	if len(result.Content) != 0 {
 		t.Errorf("expected 0 content blocks, got %d", len(result.Content))
 	}
+	if result.StopReason != StopReasonOther {
+		t.Errorf("expected stop reason other for empty choices, got %q", result.StopReason)
+	}
 }
 
 func TestConvertOpenAIResponse_InvalidToolCallArguments(t *testing.T) {
@@ -757,6 +761,84 @@ func TestConvertOpenAIResponse_InvalidToolCallArguments(t *testing.T) {
 	}
 	if result.Content[0].Input == nil {
 		t.Error("expected non-nil input map")
+	}
+}
+
+func TestConvertOpenAIResponsesResponse_StopReason(t *testing.T) {
+	textOutput := func(text string) []responses.ResponseOutputItemUnion {
+		return []responses.ResponseOutputItemUnion{
+			{
+				Type: "message",
+				Content: []responses.ResponseOutputMessageContentUnion{
+					{Type: "output_text", Text: text},
+				},
+			},
+		}
+	}
+	toolCallOutput := func() []responses.ResponseOutputItemUnion {
+		return []responses.ResponseOutputItemUnion{
+			{
+				Type:      "function_call",
+				CallID:    "call_1",
+				Name:      "read_file",
+				Arguments: responses.ResponseOutputItemUnionArguments{OfString: `{"path":"a.go"}`},
+			},
+		}
+	}
+
+	cases := []struct {
+		name string
+		resp *responses.Response
+		want StopReason
+	}{
+		{
+			name: "completed text",
+			resp: &responses.Response{Status: responses.ResponseStatusCompleted, Output: textOutput("ok")},
+			want: StopReasonEndTurn,
+		},
+		{
+			name: "completed with function call",
+			resp: &responses.Response{Status: responses.ResponseStatusCompleted, Output: toolCallOutput()},
+			want: StopReasonToolUse,
+		},
+		{
+			name: "incomplete max output tokens",
+			resp: &responses.Response{Status: responses.ResponseStatusIncomplete, IncompleteDetails: responses.ResponseIncompleteDetails{Reason: "max_output_tokens"}},
+			want: StopReasonMaxTokens,
+		},
+		{
+			name: "incomplete content filter",
+			resp: &responses.Response{Status: responses.ResponseStatusIncomplete, IncompleteDetails: responses.ResponseIncompleteDetails{Reason: "content_filter"}},
+			want: StopReasonContentFilter,
+		},
+		{
+			name: "failed",
+			resp: &responses.Response{Status: responses.ResponseStatusFailed},
+			want: StopReasonOther,
+		},
+		{
+			name: "refusal overrides completed",
+			resp: &responses.Response{
+				Status: responses.ResponseStatusCompleted,
+				Output: []responses.ResponseOutputItemUnion{
+					{
+						Type: "message",
+						Content: []responses.ResponseOutputMessageContentUnion{
+							{Type: "refusal", Refusal: "I cannot help with that."},
+						},
+					},
+				},
+			},
+			want: StopReasonRefusal,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := convertOpenAIResponsesResponse(tc.resp).StopReason; got != tc.want {
+				t.Errorf("expected stop reason %q, got %q", tc.want, got)
+			}
+		})
 	}
 }
 

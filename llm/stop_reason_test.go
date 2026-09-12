@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/openai/openai-go/v3/responses"
 	"google.golang.org/genai"
 )
 
@@ -63,6 +64,32 @@ func TestGeminiStopReasons(t *testing.T) {
 	for _, tc := range cases {
 		if got := mapGeminiStopReason(tc.reason, tc.hasTools); got != tc.want {
 			t.Fatalf("%q hasTools=%v=%q", tc.reason, tc.hasTools, got)
+		}
+	}
+}
+
+func TestResponsesStopReasons(t *testing.T) {
+	cases := []struct {
+		status   string
+		reason   string
+		hasTools bool
+		want     StopReason
+	}{
+		{status: string(responses.ResponseStatusCompleted), want: StopReasonEndTurn},
+		{status: string(responses.ResponseStatusCompleted), hasTools: true, want: StopReasonToolUse},
+		{status: string(responses.ResponseStatusIncomplete), reason: "max_output_tokens", want: StopReasonMaxTokens},
+		{status: string(responses.ResponseStatusIncomplete), reason: "content_filter", want: StopReasonContentFilter},
+		{status: string(responses.ResponseStatusIncomplete), reason: "", want: StopReasonOther},
+		{status: string(responses.ResponseStatusFailed), want: StopReasonOther},
+		{status: string(responses.ResponseStatusInProgress), want: StopReasonOther},
+		{status: string(responses.ResponseStatusCancelled), want: StopReasonOther},
+		{status: string(responses.ResponseStatusQueued), want: StopReasonOther},
+		{status: "", want: StopReasonOther},
+		{status: "future_status", want: StopReasonOther},
+	}
+	for _, tc := range cases {
+		if got := mapResponsesStopReason(tc.status, tc.reason, tc.hasTools); got != tc.want {
+			t.Fatalf("status=%q reason=%q hasTools=%v=%q", tc.status, tc.reason, tc.hasTools, got)
 		}
 	}
 }

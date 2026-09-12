@@ -514,6 +514,15 @@ func TestConvertGeminiResponse_ThinkingTokens(t *testing.T) {
 	}
 }
 
+func TestConvertGeminiResponse_EmptyCandidatesStopReason(t *testing.T) {
+	resp := &genai.GenerateContentResponse{}
+
+	result := convertGeminiResponse(resp, "gemini-2.5-pro")
+	if result.StopReason != StopReasonOther {
+		t.Errorf("expected stop reason other for empty candidates, got %q", result.StopReason)
+	}
+}
+
 func TestGeminiCapabilities(t *testing.T) {
 	c, err := NewGeminiClient(context.Background(), "fake-key", "")
 	if err != nil {
