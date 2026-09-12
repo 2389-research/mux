@@ -36,9 +36,14 @@ const (
 type StopReason string
 
 const (
-	StopReasonEndTurn   StopReason = "end_turn"
-	StopReasonToolUse   StopReason = "tool_use"
-	StopReasonMaxTokens StopReason = "max_tokens"
+	StopReasonEndTurn       StopReason = "end_turn"
+	StopReasonToolUse       StopReason = "tool_use"
+	StopReasonMaxTokens     StopReason = "max_tokens"
+	StopReasonStopSequence  StopReason = "stop_sequence"
+	StopReasonRefusal       StopReason = "refusal"
+	StopReasonContentFilter StopReason = "content_filter"
+	StopReasonPauseTurn     StopReason = "pause_turn"
+	StopReasonOther         StopReason = "other"
 )
 
 // DefaultMaxTokens is the max output tokens used when a request does not
