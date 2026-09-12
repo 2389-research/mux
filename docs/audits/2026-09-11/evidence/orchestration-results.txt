@@ -1,0 +1,66 @@
+=== RUN   TestTranscriptPreservesTextConstructors
+    findings_test.go:30: user text lost: llm.Message{Role:"user", Content:"", Blocks:[]llm.ContentBlock(nil)}
+--- FAIL: TestTranscriptPreservesTextConstructors (0.00s)
+=== RUN   TestTranscriptLargeJSONLRoundTrip
+    findings_test.go:36: cannot load own saved output: read lines: bufio.Scanner: token too long
+--- FAIL: TestTranscriptLargeJSONLRoundTrip (0.00s)
+=== RUN   TestEventBusCloseReset
+    findings_test.go:40: reset after close panicked: close of closed channel
+--- FAIL: TestEventBusCloseReset (0.00s)
+=== RUN   TestCheckpointFailureDoesNotAnnounceSuccess
+    findings_test.go:48: Run error checkpoint failed: disk full but state complete
+    findings_test.go:49: success event on persistence failure: orchestrator.Event{Type:"complete", Text:"", Thinking:"", ToolID:"", ToolName:"", ToolParams:map[string]interface {}(nil), Result:(*tool.Result)(nil), FromState:"", ToState:"", Error:error(nil), FinalText:"done"}
+--- FAIL: TestCheckpointFailureDoesNotAnnounceSuccess (0.00s)
+=== RUN   TestMixedUserToolResultCompaction
+    findings_test.go:58: orphan result retained after compaction: call1
+--- FAIL: TestMixedUserToolResultCompaction (0.00s)
+=== RUN   TestRateLimiterHonorsAlreadyCancelledContext
+    findings_test.go:68: Take returned <nil> for cancelled context
+--- FAIL: TestRateLimiterHonorsAlreadyCancelledContext (0.00s)
+=== RUN   TestTranscriptSaveFailurePreservesExistingFile
+=== RUN   TestTranscriptSaveFailurePreservesExistingFile/json
+    persistence_test.go:13: failed save destroyed existing file: before=349 bytes after=0 bytes
+=== RUN   TestTranscriptSaveFailurePreservesExistingFile/jsonl
+    persistence_test.go:13: failed save destroyed existing file: before=278 bytes after=140 bytes
+--- FAIL: TestTranscriptSaveFailurePreservesExistingFile (0.00s)
+    --- FAIL: TestTranscriptSaveFailurePreservesExistingFile/json (0.00s)
+    --- FAIL: TestTranscriptSaveFailurePreservesExistingFile/jsonl (0.00s)
+=== RUN   TestSessionIDConcurrentWithResume
+==================
+WARNING: DATA RACE
+Write at 0x00c000363bd0 by goroutine 19:
+  github.com/2389-research/mux/orchestrator.(*Orchestrator).Resume()
+      /Users/harper/Public/src/2389/mux/orchestrator/orchestrator.go:678 +0x3f8
+  command-line-arguments_test.TestSessionIDConcurrentWithResume.func3()
+      /tmp/mux-orchestration-audit/persistence_test.go:26 +0xb0
+
+Previous read at 0x00c000363bd0 by goroutine 18:
+  github.com/2389-research/mux/orchestrator.(*Orchestrator).SessionID()
+      /Users/harper/Public/src/2389/mux/orchestrator/orchestrator.go:145 +0x90
+  command-line-arguments_test.TestSessionIDConcurrentWithResume.func2()
+      /tmp/mux-orchestration-audit/persistence_test.go:25 +0x18
+
+Goroutine 19 (running) created at:
+  command-line-arguments_test.TestSessionIDConcurrentWithResume()
+      /tmp/mux-orchestration-audit/persistence_test.go:26 +0x370
+  testing.tRunner()
+      /Users/harper/.local/share/mise/installs/go/1.26.6/src/testing/testing.go:2036 +0x164
+  testing.(*T).Run.gowrap1()
+      /Users/harper/.local/share/mise/installs/go/1.26.6/src/testing/testing.go:2101 +0x34
+
+Goroutine 18 (finished) created at:
+  command-line-arguments_test.TestSessionIDConcurrentWithResume()
+      /tmp/mux-orchestration-audit/persistence_test.go:25 +0x2d8
+  testing.tRunner()
+      /Users/harper/.local/share/mise/installs/go/1.26.6/src/testing/testing.go:2036 +0x164
+  testing.(*T).Run.gowrap1()
+      /Users/harper/.local/share/mise/installs/go/1.26.6/src/testing/testing.go:2101 +0x34
+==================
+    testing.go:1712: race detected during execution of test
+--- FAIL: TestSessionIDConcurrentWithResume (0.01s)
+=== RUN   TestResumeApprovalRemainsBoundToToolCallID
+    approval_test.go:26: explicitly denied tool executed after an earlier approved tool disappeared from registry
+--- FAIL: TestResumeApprovalRemainsBoundToToolCallID (0.00s)
+FAIL
+FAIL	command-line-arguments	0.036s
+FAIL

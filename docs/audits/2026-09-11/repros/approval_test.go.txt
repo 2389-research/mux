@@ -1,0 +1,68 @@
+package audit_test
+
+import (
+	"context"
+	"errors"
+	"github.com/2389-research/mux/llm"
+	"github.com/2389-research/mux/orchestrator"
+	"github.com/2389-research/mux/tool"
+	"testing"
+)
+
+type actionTool struct {
+	name     string
+	approval bool
+	fn       func()
+}
+
+func (a actionTool) Name() string                         { return a.name }
+func (a actionTool) Description() string                  { return a.name }
+func (a actionTool) InputSchema() map[string]any          { return map[string]any{"type": "object"} }
+func (a actionTool) RequiresApproval(map[string]any) bool { return a.approval }
+func (a actionTool) Execute(context.Context, map[string]any) (*tool.Result, error) {
+	if a.fn != nil {
+		a.fn()
+	}
+	return &tool.Result{Success: true}, nil
+}
+
+type memoryStore struct{ snap *orchestrator.Snapshot }
+
+func (s *memoryStore) Save(_ context.Context, snap *orchestrator.Snapshot) error {
+	s.snap = snap
+	return nil
+}
+func (s *memoryStore) Load(context.Context, string) (*orchestrator.Snapshot, error) {
+	return s.snap, nil
+}
+func (s *memoryStore) List(context.Context) ([]string, error) { return nil, nil }
+func (s *memoryStore) Delete(context.Context, string) error   { return nil }
+func TestResumeApprovalRemainsBoundToToolCallID(t *testing.T) {
+	reg := tool.NewRegistry()
+	deniedRan := false
+	reg.Register(actionTool{name: "refresh", fn: func() { reg.Unregister("approved") }})
+	reg.Register(actionTool{name: "approved", approval: true})
+	reg.Register(actionTool{name: "denied", approval: true, fn: func() { deniedRan = true }})
+	calls := 0
+	client := localClient{fn: func(*llm.Request) (*llm.Response, error) {
+		calls++
+		if calls == 1 {
+			return &llm.Response{Content: []llm.ContentBlock{{Type: llm.ContentTypeToolUse, ID: "refresh-id", Name: "refresh"}, {Type: llm.ContentTypeToolUse, ID: "approved-id", Name: "approved"}, {Type: llm.ContentTypeToolUse, ID: "denied-id", Name: "denied"}}}, nil
+		}
+		return finalResponse(), nil
+	}}
+	cfg := orchestrator.DefaultConfig()
+	cfg.SessionStore = &memoryStore{}
+	cfg.ApprovalMode = orchestrator.ApprovalSuspend
+	o := orchestrator.NewWithConfig(client, tool.NewExecutor(reg), cfg)
+	var susp *orchestrator.Suspended
+	if err := o.Run(context.Background(), "run batch"); !errors.As(err, &susp) {
+		t.Fatalf("expected suspension: %v", err)
+	}
+	if err := o.Resume(context.Background(), susp.SessionID, orchestrator.Decision{Approvals: map[string]bool{"approved-id": true, "denied-id": false}}); err != nil {
+		t.Fatal(err)
+	}
+	if deniedRan {
+		t.Fatal("explicitly denied tool executed after an earlier approved tool disappeared from registry")
+	}
+}

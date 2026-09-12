@@ -1,0 +1,12 @@
+--- FAIL: TestTranscriptPreservesTextConstructors (0.00s)
+    findings_test.go:30: user text lost: llm.Message{Role:"user", Content:"", Blocks:[]llm.ContentBlock(nil)}
+--- FAIL: TestTranscriptSaveFailurePreservesExistingFile (0.00s)
+    --- FAIL: TestTranscriptSaveFailurePreservesExistingFile/json (0.00s)
+        persistence_test.go:13: failed save destroyed existing file: before=349 bytes after=0 bytes
+    --- FAIL: TestTranscriptSaveFailurePreservesExistingFile/jsonl (0.00s)
+        persistence_test.go:13: failed save destroyed existing file: before=278 bytes after=140 bytes
+--- FAIL: TestResumeApprovalRemainsBoundToToolCallID (0.00s)
+    approval_test.go:26: explicitly denied tool executed after an earlier approved tool disappeared from registry
+FAIL
+FAIL	command-line-arguments	0.023s
+FAIL

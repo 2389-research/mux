@@ -1,0 +1,63 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"github.com/2389-research/mux/mcp"
+	"net/http"
+	"net/http/httptest"
+	"os"
+)
+
+func main() {
+	if len(os.Args) > 1 {
+		c, _ := mcp.NewClient(mcp.ServerConfig{Command: "/tmp/mux-boundary-audit/helper", Args: []string{"child", "quota"}})
+		fmt.Println("first start", c.Start(context.Background()))
+		fmt.Println("close", c.Close())
+		fmt.Println("restart", c.Start(context.Background()))
+		return
+	}
+	for _, mode := range []string{"failed-start", "restart-http", "pagination", "mismatched-id"} {
+		toolsRequests := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req map[string]any
+			json.NewDecoder(r.Body).Decode(&req)
+			method := req["method"]
+			if method == "notifications/initialized" {
+				if mode == "failed-start" {
+					w.WriteHeader(503)
+				} else {
+					w.WriteHeader(202)
+				}
+				return
+			}
+			result := map[string]any{"protocolVersion": "2025-06-18", "capabilities": map[string]any{}, "serverInfo": map[string]any{"name": "audit", "version": "1"}}
+			if method == "tools/list" {
+				toolsRequests++
+				result = map[string]any{"tools": []map[string]any{{"name": "first", "inputSchema": map[string]any{"type": "object"}}}, "nextCursor": "second-page"}
+			}
+			id := req["id"]
+			if mode == "mismatched-id" {
+				id = float64(999999)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
+		}))
+		c, _ := mcp.NewClient(mcp.ServerConfig{Transport: "http", URL: srv.URL})
+		err := c.Start(context.Background())
+		fmt.Printf("%s Start=%v\n", mode, err)
+		if mode == "failed-start" {
+			fmt.Printf("retry Start=%v\n", c.Start(context.Background()))
+		}
+		if mode == "restart-http" {
+			c.Close()
+			fmt.Printf("Restart=%v\n", c.Start(context.Background()))
+			c.Close()
+		}
+		infos, err := c.ListTools(context.Background())
+		fmt.Printf("%s ListTools len=%d err=%v request_count=%d\n", mode, len(infos), err, toolsRequests)
+		c.Close()
+		srv.Close()
+	}
+}

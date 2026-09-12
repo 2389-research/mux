@@ -1,0 +1,15 @@
+go: downloading go1.24.11 (darwin/arm64)
+ok  	github.com/2389-research/mux	1.234s
+ok  	github.com/2389-research/mux/agent	1.616s
+ok  	github.com/2389-research/mux/coordinator	2.834s
+?   	github.com/2389-research/mux/examples/full	[no test files]
+?   	github.com/2389-research/mux/examples/minimal	[no test files]
+?   	github.com/2389-research/mux/examples/simple	[no test files]
+ok  	github.com/2389-research/mux/hooks	1.012s
+ok  	github.com/2389-research/mux/llm	12.773s
+ok  	github.com/2389-research/mux/mcp	14.622s
+ok  	github.com/2389-research/mux/orchestrator	1.049s
+ok  	github.com/2389-research/mux/permission	1.010s
+ok  	github.com/2389-research/mux/session	1.027s
+ok  	github.com/2389-research/mux/skill	1.018s
+ok  	github.com/2389-research/mux/tool	1.127s

@@ -1,0 +1,193 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"github.com/2389-research/mux/llm"
+	"github.com/2389-research/mux/mcp"
+	"github.com/2389-research/mux/orchestrator"
+	"github.com/2389-research/mux/session"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+)
+
+func child(mode string) {
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		var req map[string]any
+		json.Unmarshal(scanner.Bytes(), &req)
+		switch req["method"] {
+		case "initialize":
+			json.NewEncoder(os.Stdout).Encode(map[string]any{"jsonrpc": "2.0", "id": req["id"], "result": map[string]any{"protocolVersion": "2024-11-05", "capabilities": map[string]any{}, "serverInfo": map[string]any{"name": "audit", "version": "1"}}})
+		case "notifications/initialized":
+			if mode == "blocked" {
+				time.Sleep(20 * time.Second)
+				return
+			}
+		default:
+			if mode == "eof" {
+				return
+			}
+			json.NewEncoder(os.Stdout).Encode(map[string]any{"jsonrpc": "2.0", "id": req["id"], "result": map[string]any{"content": []map[string]any{{"type": "text", "text": strings.Repeat("x", 8192)}}}})
+		}
+	}
+}
+
+func stdio(mode string, max int) (mcp.Client, context.CancelFunc) {
+	exe, _ := os.Executable()
+	c, _ := mcp.NewClient(mcp.ServerConfig{Command: exe, Args: []string{"child", mode}, MaxResponseBytes: max})
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := c.Start(ctx); err != nil {
+		panic(err)
+	}
+	return c, cancel
+}
+
+func main() {
+	if len(os.Args) > 1 {
+		child(os.Args[2])
+		return
+	}
+	for _, mode := range []string{"strict-id", "strict-accept", "sse-default", "sse-large", "close"} {
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		var once sync.Once
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req map[string]any
+			json.NewDecoder(r.Body).Decode(&req)
+			if req["method"] == "notifications/initialized" {
+				if mode == "strict-id" && req["id"] != nil {
+					http.Error(w, "notification has id", 400)
+					return
+				}
+				if mode == "strict-accept" && !strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
+					http.Error(w, "missing Accept", 406)
+					return
+				}
+				w.WriteHeader(202)
+				return
+			}
+			result := map[string]any{"protocolVersion": "2025-06-18", "capabilities": map[string]any{}, "serverInfo": map[string]any{"name": "audit", "version": "1"}}
+			if req["method"] != "initialize" {
+				result = map[string]any{"content": []map[string]any{{"type": "text", "text": "ok"}}}
+			}
+			if mode == "close" && req["method"] != "initialize" {
+				once.Do(func() { close(entered) })
+				<-release
+			}
+			if (mode == "sse-default" || mode == "sse-large") && req["method"] != "initialize" {
+				w.Header().Set("Content-Type", "text/event-stream")
+				if mode == "sse-large" {
+					result["content"] = []map[string]any{{"type": "text", "text": strings.Repeat("x", 100000)}}
+					fmt.Fprint(w, "event: message\n")
+				}
+				b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": req["id"], "result": result})
+				fmt.Fprintf(w, "data: %s\n\n", b)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req["id"], "result": result})
+		}))
+		c, _ := mcp.NewClient(mcp.ServerConfig{Transport: "http", URL: server.URL})
+		err := c.Start(context.Background())
+		if err != nil {
+			fmt.Printf("HTTP %s Start: %v\n", mode, err)
+		} else if mode == "close" {
+			done := make(chan error, 1)
+			go func() { _, err := c.CallTool(context.Background(), "test", nil); done <- err }()
+			<-entered
+			c.Close()
+			select {
+			case err := <-done:
+				fmt.Printf("HTTP close pending returned: %v\n", err)
+			case <-time.After(150 * time.Millisecond):
+				fmt.Println("HTTP Close returned but pending request still blocked")
+			}
+			close(release)
+			<-done
+		} else {
+			_, err = c.CallTool(context.Background(), "test", nil)
+			fmt.Printf("HTTP %s CallTool: %v\n", mode, err)
+		}
+		c.Close()
+		server.Close()
+	}
+	c, cancel := stdio("eof", 0)
+	ctx, stop := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	_, err := c.CallTool(ctx, "test", nil)
+	fmt.Printf("stdio EOF CallTool: %v\n", err)
+	stop()
+	cancel()
+	c.Close()
+	c, cancel = stdio("quota", 4096)
+	res, err := c.CallTool(context.Background(), "test", nil)
+	fmt.Printf("stdio quota4096 accepted length=%d error=%v\n", len(res.Content[0].Text), err)
+	cancel()
+	c.Close()
+	c, cancel = stdio("blocked", 0)
+	ctx, stop = context.WithTimeout(context.Background(), 50*time.Millisecond)
+	done := make(chan error, 1)
+	go func() {
+		_, e := c.CallTool(ctx, "test", map[string]any{"payload": strings.Repeat("x", 4*1024*1024)})
+		done <- e
+	}()
+	time.Sleep(150 * time.Millisecond)
+	closeDone := make(chan struct{})
+	go func() { c.Close(); close(closeDone) }()
+	select {
+	case e := <-done:
+		fmt.Println("stdio blocked returned", e)
+	case <-time.After(100 * time.Millisecond):
+		fmt.Println("stdio write ignores expired CallTool context")
+	}
+	select {
+	case <-closeDone:
+		fmt.Println("stdio Close returned")
+	default:
+		fmt.Println("stdio Close blocked behind stdin write")
+	}
+	cancel()
+	stop()
+	<-closeDone
+	dir, _ := os.MkdirTemp("", "mux-audit-store-")
+	defer os.RemoveAll(dir)
+	store := session.NewFileStore(filepath.Join(dir, "store"))
+	os.MkdirAll(filepath.Join(dir, "store"), 0700)
+	victim := filepath.Join(dir, "victim")
+	os.WriteFile(victim, []byte("keep me"), 0600)
+	os.Symlink(victim, filepath.Join(dir, "store", "s.json.tmp"))
+	err = store.Save(context.Background(), &orchestrator.Snapshot{SessionID: "s"})
+	b, _ := os.ReadFile(victim)
+	fmt.Printf("FileStore preexisting temp symlink: error=%v victim_overwritten=%v\n", err, string(b) != "keep me")
+	var wg sync.WaitGroup
+	errorsN := 0
+	invalidN := 0
+	var mu sync.Mutex
+	for batch := 0; batch < 20; batch++ {
+		for n := 0; n < 20; n++ {
+			wg.Add(1)
+			go func(n int) {
+				defer wg.Done()
+				snap := &orchestrator.Snapshot{SessionID: "shared", Messages: []llm.Message{llm.NewUserMessage(strings.Repeat(fmt.Sprint(n%10), 100000+n*1000))}}
+				e := store.Save(context.Background(), snap)
+				mu.Lock()
+				if e != nil {
+					errorsN++
+				}
+				mu.Unlock()
+			}(n)
+		}
+		wg.Wait()
+		if _, e := store.Load(context.Background(), "shared"); e != nil {
+			invalidN++
+		}
+	}
+	fmt.Printf("FileStore concurrent saves: save_errors=%d invalid_snapshots=%d\n", errorsN, invalidN)
+}

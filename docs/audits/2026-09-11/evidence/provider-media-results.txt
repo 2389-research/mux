@@ -1,0 +1,10 @@
+--- FAIL: TestAuditPDFWireEncoding (0.00s)
+    provider_audit_test.go:104: responses PDF lacks required data URL prefix: {"file_data":"JVBERi0xLjQ=","filename":"file.pdf","type":"input_file"}
+    provider_audit_test.go:104: chat PDF lacks required data URL prefix: {"file":{"file_data":"JVBERi0xLjQ=","filename":"file.pdf"},"type":"file"}
+--- FAIL: TestAuditOllamaMaxTokens (0.00s)
+    provider_audit_test.go:111: Ollama-compatible max_tokens=0, want 17
+--- FAIL: TestAuditOllamaStreamRequestsUsage (0.00s)
+    provider_audit_test.go:117: stream_options=<nil>; Ollama requires include_usage
+FAIL
+FAIL	github.com/2389-research/mux/llm	0.017s
+FAIL
