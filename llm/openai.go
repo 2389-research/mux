@@ -129,10 +129,14 @@ func convertOpenAIResponsesRequest(req *Request) (responses.ResponseNewParams, e
 		Input: responses.ResponseNewParamsInputUnion{
 			OfInputItemList: input,
 		},
-		// Retain opaque reasoning items (encrypted_content) so stateless
-		// clients can replay them back on the next request. Store stays at
-		// its default: no hosted conversation storage is required.
-		Include: []responses.ResponseIncludable{responses.ResponseIncludableReasoningEncryptedContent},
+	}
+	// Retain opaque reasoning items (encrypted_content) so stateless
+	// clients can replay them back on the next request. OpenAI rejects the
+	// include with a hard 400 on non-reasoning models, so it is gated on the
+	// model family. Store stays at its default: no hosted conversation
+	// storage is required.
+	if supportsEncryptedReasoning(req.Model) {
+		params.Include = []responses.ResponseIncludable{responses.ResponseIncludableReasoningEncryptedContent}
 	}
 
 	if req.System != "" {
@@ -168,6 +172,23 @@ func convertOpenAIResponsesRequest(req *Request) (responses.ResponseNewParams, e
 	return params, nil
 }
 
+// supportsEncryptedReasoning reports whether the model family supports the
+// reasoning.encrypted_content include: reasoning model families o1, o3, o4,
+// gpt-5, and codex, matched by documented case-insensitive prefixes
+// ("gpt-5.1", "o3-mini", and "codex-mini" match; "gpt-4o", "gpt-4.1", and
+// "gpt-3.5-turbo" do not). The check is default-deny: omitting the include
+// degrades gracefully (the response simply carries no encrypted_content),
+// while sending it to a non-reasoning model is a hard 400.
+func supportsEncryptedReasoning(model string) bool {
+	m := strings.ToLower(model)
+	for _, prefix := range []string{"o1", "o3", "o4", "gpt-5", "codex"} {
+		if strings.HasPrefix(m, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func reasoningEffort(budget int) openai.ReasoningEffort {
 	switch {
 	case budget <= 4096:
@@ -192,16 +213,19 @@ func convertResponsesInput(messages []Message) (responses.ResponseInputParam, er
 		// Responses API accepts for multimodal). Otherwise preserve the
 		// pre-multimodal behavior of emitting each text block as its own item.
 		hasMedia := false
+		hasReplay := false
 		for _, block := range msg.Blocks {
 			if block.Type == ContentTypeImage || block.Type == ContentTypePDF {
 				hasMedia = true
-				break
+			}
+			if block.Replay != nil {
+				hasReplay = true
 			}
 		}
 
 		if hasMedia {
-			items = append(items, buildResponsesMultipartMessage(role, msg))
-		} else if msg.Content != "" {
+			items = append(items, buildResponsesMultipartMessage(role, msg, hasReplay))
+		} else if msg.Content != "" && !hasReplay {
 			items = append(items, responseMessage(role, msg.Content))
 		}
 
@@ -237,9 +261,13 @@ func convertResponsesInput(messages []Message) (responses.ResponseInputParam, er
 // buildResponsesMultipartMessage emits one EasyInputMessage with list-form
 // content (text + image + file parts) for a message that has at least one
 // image or PDF block. validateRequest has already gated unsupported media.
-func buildResponsesMultipartMessage(role responses.EasyInputMessageRole, msg Message) responses.ResponseInputItemUnionParam {
+// When any block carries a Replay envelope (hasReplay), the raw replay items
+// are authoritative, so the normalized msg.Content text part is skipped to
+// avoid duplicating the replayed message text on the wire; media parts and
+// independent text blocks still emit.
+func buildResponsesMultipartMessage(role responses.EasyInputMessageRole, msg Message, hasReplay bool) responses.ResponseInputItemUnionParam {
 	var content responses.ResponseInputMessageContentListParam
-	if msg.Content != "" {
+	if msg.Content != "" && !hasReplay {
 		content = append(content, responses.ResponseInputContentUnionParam{
 			OfInputText: &responses.ResponseInputTextParam{Text: msg.Content},
 		})

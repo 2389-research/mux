@@ -295,6 +295,160 @@ func TestConvertResponsesInput_OpenAIReplayMalformed(t *testing.T) {
 	}
 }
 
+// The encrypted_content include is gated on reasoning-capable model
+// families. Reasoning models keep it; non-reasoning models and unknown
+// future models omit it — OpenAI hard-400s the include on non-reasoning
+// models, while omitting it degrades gracefully.
+func TestConvertOpenAIResponsesRequest_EncryptedReasoningIncludeGatedByModel(t *testing.T) {
+	tests := []struct {
+		model string
+		want  bool
+	}{
+		{"gpt-5.1", true},
+		{"gpt-5.2", true},
+		{"o3-mini", true},
+		{"o4-mini", true},
+		{"codex-mini", true},
+		{"O3-MINI", true}, // prefix match is case-insensitive
+		{"gpt-4o", false},
+		{"gpt-4.1", false},
+		{"gpt-3.5-turbo", false},
+		{"gpt-7-chat", false}, // unknown future model: default-deny
+		{"", false},
+	}
+	for _, tt := range tests {
+		params, err := convertOpenAIResponsesRequest(&Request{
+			Model:    tt.model,
+			Messages: []Message{NewUserMessage("hi")},
+		})
+		if err != nil {
+			t.Fatalf("convertOpenAIResponsesRequest(%q): %v", tt.model, err)
+		}
+		got := len(params.Include) == 1
+		if got != tt.want {
+			t.Errorf("model %q: include present = %v, want %v", tt.model, got, tt.want)
+		}
+	}
+}
+
+// When a message carries a replay block, the raw replay item is
+// authoritative: the normalized msg.Content must not be emitted alongside
+// it, or the replayed text would appear twice on the wire.
+func TestConvertResponsesInput_ReplaySkipsNormalizedContent(t *testing.T) {
+	msg := Message{
+		Role:    RoleAssistant,
+		Content: "Checking the test output first.",
+		Blocks: []ContentBlock{{
+			Type: ContentTypeReplay,
+			Replay: &ProviderReplay{
+				Provider: "openai",
+				Model:    "gpt-5.2",
+				Data:     json.RawMessage(`{"type":"message","id":"msg1","role":"assistant","status":"completed","phase":"commentary","content":[{"type":"output_text","text":"Checking the test output first.","annotations":[]}]}`),
+			},
+		}},
+	}
+
+	items, err := convertResponsesInput([]Message{msg})
+	if err != nil {
+		t.Fatalf("convertResponsesInput: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected only the raw replay item, got %d: %#v", len(items), items)
+	}
+	gotJSON, err := json.Marshal(items[0])
+	if err != nil {
+		t.Fatalf("marshal item: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(gotJSON, &got); err != nil {
+		t.Fatalf("decode item: %v", err)
+	}
+	if got["id"] != "msg1" {
+		t.Errorf("item must be the raw replay item (id msg1): %s", gotJSON)
+	}
+	if _, ok := got["content"].([]any); !ok {
+		t.Errorf("raw item content must stay list-form, got %T: %s", got["content"], gotJSON)
+	}
+}
+
+// A message with content and no replay blocks emits its normalized content
+// item as before.
+func TestConvertResponsesInput_NoReplayEmitsNormalizedContent(t *testing.T) {
+	items, err := convertResponsesInput([]Message{NewUserMessage("hello")})
+	if err != nil {
+		t.Fatalf("convertResponsesInput: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 normalized content item, got %d: %#v", len(items), items)
+	}
+	gotJSON, err := json.Marshal(items[0])
+	if err != nil {
+		t.Fatalf("marshal item: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(gotJSON, &got); err != nil {
+		t.Fatalf("decode item: %v", err)
+	}
+	if got["role"] != "user" || got["content"] != "hello" {
+		t.Errorf("normalized content item: %s", gotJSON)
+	}
+}
+
+// Media blocks are independent content: alongside replay blocks they still
+// emit their normalized parts, while the message-level msg.Content text is
+// skipped in favor of the raw replay items.
+func TestConvertResponsesInput_ReplayWithMediaKeepsMediaPart(t *testing.T) {
+	img := NewImageFromURL("https://example.com/cat.png")
+	msg := Message{
+		Role:    RoleUser,
+		Content: "look at this",
+		Blocks: []ContentBlock{
+			img,
+			{
+				Type:   ContentTypeReplay,
+				Replay: &ProviderReplay{Provider: "openai", Model: "gpt-5.2", Data: json.RawMessage(`{"type":"reasoning","id":"rs1","encrypted_content":"opaque"}`)},
+			},
+		},
+	}
+
+	items, err := convertResponsesInput([]Message{msg})
+	if err != nil {
+		t.Fatalf("convertResponsesInput: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items (multipart message + raw replay item), got %d: %#v", len(items), items)
+	}
+
+	multiJSON, err := json.Marshal(items[0])
+	if err != nil {
+		t.Fatalf("marshal multipart item: %v", err)
+	}
+	var multi map[string]any
+	if err := json.Unmarshal(multiJSON, &multi); err != nil {
+		t.Fatalf("decode multipart item: %v", err)
+	}
+	parts, ok := multi["content"].([]any)
+	if !ok || len(parts) != 1 {
+		t.Fatalf("multipart content must be a single media part (msg.Content skipped): %s", multiJSON)
+	}
+	part, ok := parts[0].(map[string]any)
+	if !ok || part["type"] != "input_image" {
+		t.Errorf("media part must still be emitted: %s", multiJSON)
+	}
+
+	replayJSON, err := json.Marshal(items[1])
+	if err != nil {
+		t.Fatalf("marshal replay item: %v", err)
+	}
+	var replay map[string]any
+	if err := json.Unmarshal(replayJSON, &replay); err != nil {
+		t.Fatalf("decode replay item: %v", err)
+	}
+	if replay["id"] != "rs1" {
+		t.Errorf("second item must be the raw replay item: %s", replayJSON)
+	}
+}
+
 // Provider/model switches reject with ErrReplayMismatch before any HTTP
 // request is made.
 func TestOpenAIClient_CreateMessageOpenAIReplayPreflight(t *testing.T) {
@@ -348,7 +502,9 @@ func TestOpenAIClient_CreateMessageOpenAIReplaySecondRequest(t *testing.T) {
 		requests++
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatalf("decode request body: %v", err)
+			t.Errorf("decode request body: %v", err)
+			http.Error(w, "bad request body", http.StatusBadRequest)
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if requests == 1 {
@@ -483,7 +639,9 @@ func TestOpenAIClient_CreateMessageStreamOpenAIReplayParity(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			t.Fatal("expected http.Flusher")
+			t.Error("expected http.Flusher")
+			w.WriteHeader(http.StatusInternalServerError)
+			return
 		}
 
 		writeOpenAIResponseSSE(t, w, "response.created", `{"type":"response.created","response":{"id":"resp_replay_1","status":"in_progress","model":"gpt-5.2"}}`)
@@ -631,7 +789,9 @@ func TestOpenAIClient_OpenAIReplaySurvivesToolTurnAndJSONPersistence(t *testing.
 		requests++
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatalf("decode request body: %v", err)
+			t.Errorf("decode request body: %v", err)
+			http.Error(w, "bad request body", http.StatusBadRequest)
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if requests == 1 {
