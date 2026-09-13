@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -118,12 +119,20 @@ func convertOpenAIRequest(req *Request) openai.ChatCompletionNewParams {
 }
 
 // convertOpenAIResponsesRequest converts our Request to the Responses API shape.
-func convertOpenAIResponsesRequest(req *Request) responses.ResponseNewParams {
+func convertOpenAIResponsesRequest(req *Request) (responses.ResponseNewParams, error) {
+	input, err := convertResponsesInput(req.Messages)
+	if err != nil {
+		return responses.ResponseNewParams{}, err
+	}
 	params := responses.ResponseNewParams{
 		Model: req.Model,
 		Input: responses.ResponseNewParamsInputUnion{
-			OfInputItemList: convertResponsesInput(req.Messages),
+			OfInputItemList: input,
 		},
+		// Retain opaque reasoning items (encrypted_content) so stateless
+		// clients can replay them back on the next request. Store stays at
+		// its default: no hosted conversation storage is required.
+		Include: []responses.ResponseIncludable{responses.ResponseIncludableReasoningEncryptedContent},
 	}
 
 	if req.System != "" {
@@ -156,7 +165,7 @@ func convertOpenAIResponsesRequest(req *Request) responses.ResponseNewParams {
 		}
 	}
 
-	return params
+	return params, nil
 }
 
 func reasoningEffort(budget int) openai.ReasoningEffort {
@@ -170,7 +179,7 @@ func reasoningEffort(budget int) openai.ReasoningEffort {
 	}
 }
 
-func convertResponsesInput(messages []Message) responses.ResponseInputParam {
+func convertResponsesInput(messages []Message) (responses.ResponseInputParam, error) {
 	items := make(responses.ResponseInputParam, 0, len(messages))
 	for _, msg := range messages {
 		role := responses.EasyInputMessageRoleUser
@@ -197,6 +206,18 @@ func convertResponsesInput(messages []Message) responses.ResponseInputParam {
 		}
 
 		for _, block := range msg.Blocks {
+			// Replay envelopes carry the provider's raw item and are
+			// authoritative: decode and emit the item verbatim (preserving
+			// id, phase, and encrypted bytes via the SDK's raw-JSON
+			// override) instead of re-deriving it from normalized fields.
+			if block.Replay != nil {
+				var item responses.ResponseInputItemUnion
+				if err := json.Unmarshal(block.Replay.Data, &item); err != nil {
+					return nil, fmt.Errorf("decode replay item: %w", err)
+				}
+				items = append(items, item.ToParam())
+				continue
+			}
 			switch block.Type {
 			case ContentTypeText:
 				if !hasMedia && block.Text != "" {
@@ -210,7 +231,7 @@ func convertResponsesInput(messages []Message) responses.ResponseInputParam {
 			}
 		}
 	}
-	return items
+	return items, nil
 }
 
 // buildResponsesMultipartMessage emits one EasyInputMessage with list-form
@@ -582,7 +603,15 @@ func convertOpenAIResponse(resp *openai.ChatCompletion) *Response {
 	return result
 }
 
-func convertOpenAIResponsesResponse(resp *responses.Response) *Response {
+// convertOpenAIResponsesResponse converts a Responses API result to our
+// Response. Every output item yields exactly one mux block, in order, and
+// carries a Replay envelope with the item's raw JSON pinned to the effective
+// requested model (requestModel), so reasoning items, message phase, and
+// item IDs survive to the next request byte-for-byte. Reasoning items are
+// replay-only; message output_text joins into one text block (empty text is
+// still emitted so the envelope has a block to ride on); function_call keeps
+// its normalized parse keyed by call_id, with the item ID staying raw-only.
+func convertOpenAIResponsesResponse(resp *responses.Response, requestModel string) *Response {
 	result := &Response{
 		ID:    resp.ID,
 		Model: resp.Model,
@@ -596,19 +625,35 @@ func convertOpenAIResponsesResponse(resp *responses.Response) *Response {
 	hasTools := false
 	hasRefusal := false
 	for _, item := range resp.Output {
+		replay := &ProviderReplay{
+			Provider: "openai",
+			Model:    requestModel,
+			Data:     json.RawMessage(item.RawJSON()),
+		}
 		switch item.Type {
 		case "message":
+			var text strings.Builder
 			for _, content := range item.Content {
-				if content.Type == "output_text" && content.Text != "" {
-					result.Content = append(result.Content, ContentBlock{
-						Type: ContentTypeText,
-						Text: content.Text,
-					})
+				if content.Type == "output_text" {
+					if text.Len() > 0 {
+						text.WriteString("\n")
+					}
+					text.WriteString(content.Text)
 				}
 				if content.Type == "refusal" {
 					hasRefusal = true
 				}
 			}
+			result.Content = append(result.Content, ContentBlock{
+				Type:   ContentTypeText,
+				Text:   text.String(),
+				Replay: replay,
+			})
+		case "reasoning":
+			result.Content = append(result.Content, ContentBlock{
+				Type:   ContentTypeReplay,
+				Replay: replay,
+			})
 		case "function_call":
 			// v3 made item.Arguments a tagged union (OfString / OfResponseToolSearchCallArguments).
 			// For function_call items the arguments are a JSON-encoded string in OfString.
@@ -618,10 +663,11 @@ func convertOpenAIResponsesResponse(resp *responses.Response) *Response {
 				input = make(map[string]any)
 			}
 			result.Content = append(result.Content, ContentBlock{
-				Type:  ContentTypeToolUse,
-				ID:    item.CallID,
-				Name:  item.Name,
-				Input: input,
+				Type:   ContentTypeToolUse,
+				ID:     item.CallID,
+				Name:   item.Name,
+				Input:  input,
+				Replay: replay,
 			})
 			hasTools = true
 		}
@@ -675,8 +721,14 @@ func (o *OpenAIClient) CreateMessage(ctx context.Context, req *Request) (*Respon
 	if err := validateOpenAISources("openai", true, req); err != nil {
 		return nil, err
 	}
+	if err := validateReplay("openai", req.Model, req.Messages); err != nil {
+		return nil, err
+	}
 
-	params := convertOpenAIResponsesRequest(req)
+	params, err := convertOpenAIResponsesRequest(req)
+	if err != nil {
+		return nil, err
+	}
 	resp, err := o.client.Responses.New(ctx, params)
 	if err != nil {
 		return nil, err
@@ -685,7 +737,7 @@ func (o *OpenAIClient) CreateMessage(ctx context.Context, req *Request) (*Respon
 		return nil, err
 	}
 
-	return convertOpenAIResponsesResponse(resp), nil
+	return convertOpenAIResponsesResponse(resp, req.Model), nil
 }
 
 // CreateMessageStream sends a message and returns a channel of streaming events.
@@ -705,8 +757,14 @@ func (o *OpenAIClient) CreateMessageStream(ctx context.Context, req *Request) (<
 	if err := validateOpenAISources("openai", false, req); err != nil {
 		return nil, err
 	}
+	if err := validateReplay("openai", req.Model, req.Messages); err != nil {
+		return nil, err
+	}
 
-	params := convertOpenAIResponsesRequest(req)
+	params, err := convertOpenAIResponsesRequest(req)
+	if err != nil {
+		return nil, err
+	}
 	stream := o.client.Responses.NewStreaming(ctx, params)
 
 	eventChan := make(chan StreamEvent, 100)
@@ -773,7 +831,7 @@ func (o *OpenAIClient) CreateMessageStream(ctx context.Context, req *Request) (<
 				if !messageStarted {
 					eventChan <- StreamEvent{Type: EventMessageStart}
 				}
-				resp := convertOpenAIResponsesResponse(&event.Response)
+				resp := convertOpenAIResponsesResponse(&event.Response, req.Model)
 				eventChan <- StreamEvent{
 					Type:     EventMessageStop,
 					Response: resp,
