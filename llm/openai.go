@@ -607,6 +607,12 @@ func convertOpenAIResponsesResponse(resp *responses.Response) *Response {
 				}
 				if content.Type == "refusal" {
 					hasRefusal = true
+					if content.Refusal != "" {
+						result.Content = append(result.Content, ContentBlock{
+							Type: ContentTypeText,
+							Text: content.Refusal,
+						})
+					}
 				}
 			}
 		case "function_call":

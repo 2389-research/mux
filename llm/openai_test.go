@@ -934,6 +934,65 @@ func TestConvertOpenAIResponsesResponse_StopReason(t *testing.T) {
 	}
 }
 
+// TestConvertOpenAIResponsesResponse_RefusalContent pins the refusal branch:
+// the refusal text must surface as a text content block, alone and alongside
+// output_text, while hasRefusal keeps driving StopReasonRefusal.
+func TestConvertOpenAIResponsesResponse_RefusalContent(t *testing.T) {
+	t.Run("refusal only", func(t *testing.T) {
+		resp := &responses.Response{
+			Status: responses.ResponseStatusCompleted,
+			Output: []responses.ResponseOutputItemUnion{
+				{
+					Type: "message",
+					Content: []responses.ResponseOutputMessageContentUnion{
+						{Type: "refusal", Refusal: "I cannot help with that."},
+					},
+				},
+			},
+		}
+
+		result := convertOpenAIResponsesResponse(resp)
+		if result.StopReason != StopReasonRefusal {
+			t.Errorf("expected stop reason %q, got %q", StopReasonRefusal, result.StopReason)
+		}
+		if len(result.Content) != 1 {
+			t.Fatalf("expected 1 content block, got %d", len(result.Content))
+		}
+		if result.Content[0].Type != ContentTypeText || result.Content[0].Text != "I cannot help with that." {
+			t.Errorf("expected text block carrying the refusal text, got %+v", result.Content[0])
+		}
+	})
+
+	t.Run("refusal alongside output text", func(t *testing.T) {
+		resp := &responses.Response{
+			Status: responses.ResponseStatusCompleted,
+			Output: []responses.ResponseOutputItemUnion{
+				{
+					Type: "message",
+					Content: []responses.ResponseOutputMessageContentUnion{
+						{Type: "output_text", Text: "Here is what I can say."},
+						{Type: "refusal", Refusal: "I cannot help with the rest."},
+					},
+				},
+			},
+		}
+
+		result := convertOpenAIResponsesResponse(resp)
+		if result.StopReason != StopReasonRefusal {
+			t.Errorf("expected stop reason %q, got %q", StopReasonRefusal, result.StopReason)
+		}
+		if len(result.Content) != 2 {
+			t.Fatalf("expected 2 content blocks, got %d", len(result.Content))
+		}
+		if result.Content[0].Type != ContentTypeText || result.Content[0].Text != "Here is what I can say." {
+			t.Errorf("expected first block to be the output_text, got %+v", result.Content[0])
+		}
+		if result.Content[1].Type != ContentTypeText || result.Content[1].Text != "I cannot help with the rest." {
+			t.Errorf("expected second block to carry the refusal text, got %+v", result.Content[1])
+		}
+	})
+}
+
 // Usage Tracking Tests
 
 func TestConvertOpenAIResponse_UsageTracking(t *testing.T) {
