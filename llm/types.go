@@ -255,10 +255,13 @@ func (e *ErrMalformedMedia) Error() string {
 }
 
 // ErrProviderResponse indicates a provider returned an HTTP-200 response whose
-// status field reports failure or incompleteness rather than a completed
-// result (e.g. the OpenAI Responses API "failed" or "incomplete" statuses).
-// Reason carries the provider's own explanation, prefixed with the status
-// category (e.g. "incomplete: max_output_tokens").
+// status field reports a genuine failure rather than a completed or truncated
+// result (e.g. the OpenAI Responses API "failed" status, or a status the
+// provider added that mux does not recognize). Truncation and content
+// filtering are NOT errors: they surface as successful Responses carrying the
+// named StopReason with partial output preserved. Reason carries the
+// provider's own explanation, prefixed with the status category (e.g.
+// "failed: server_error", "unexpected status: queued").
 type ErrProviderResponse struct {
 	Provider string
 	Reason   string
