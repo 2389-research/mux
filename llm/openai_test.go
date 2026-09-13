@@ -399,21 +399,43 @@ func TestOpenAIClient_CreateMessageSendsFunctionCallOutputsToResponsesAPI(t *tes
 	}
 }
 
-// TestOpenAIClient_CreateMessageRejectsIncompleteAndFailedStatus tables real
-// HTTP-200 Responses API bodies whose status is not "completed". CreateMessage
-// must return an *ErrProviderResponse and no Response — even when the partial
-// output carries a function_call whose arguments parse cleanly, so no tool
-// call escapes as a successful turn. A completed body remains successful.
-func TestOpenAIClient_CreateMessageRejectsIncompleteAndFailedStatus(t *testing.T) {
+// TestOpenAIClient_CreateMessageStatusPolicy tables real HTTP-200 Responses
+// API bodies by status. Truncation (incomplete, including max_output_tokens)
+// and content filtering (incomplete with reason content_filter) are successful
+// partial Responses carrying the named StopReason, with partial output
+// preserved — the same contract the other four providers satisfy. Only failed
+// and unrecognized statuses are errors (typed *ErrProviderResponse, no
+// Response), even when the partial output carries a function_call whose
+// arguments parse cleanly.
+func TestOpenAIClient_CreateMessageStatusPolicy(t *testing.T) {
 	fixtures := []struct {
-		name    string
-		body    string
-		wantErr string // exact Reason of *ErrProviderResponse; empty means success expected
+		name      string
+		body      string
+		wantErr   string // exact Reason of *ErrProviderResponse; empty means success expected
+		wantStop  StopReason
+		wantText  string
+		wantTools bool // whether a tool_use block survives conversion
 	}{
 		{
-			name:    "incomplete max_output_tokens",
-			body:    `{"id":"r1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","content":[{"type":"output_text","text":"partial"}]},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"get_weather","arguments":"{\"location\":\"New York\"}"}]}`,
-			wantErr: "incomplete: max_output_tokens",
+			name:      "incomplete max_output_tokens",
+			body:      `{"id":"r1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","content":[{"type":"output_text","text":"partial"}]},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"get_weather","arguments":"{\"location\":\"New York\"}"}]}`,
+			wantStop:  StopReasonMaxTokens,
+			wantText:  "partial",
+			wantTools: true, // parsable arguments keep the tool block executable
+		},
+		{
+			name:     "incomplete max_output_tokens truncated tool arguments",
+			body:     `{"id":"r1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","content":[{"type":"output_text","text":"partial"}]},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"get_weather","arguments":"{\"location\":\"New Yor"}]}`,
+			wantStop: StopReasonMaxTokens,
+			wantText: "partial",
+			// Arguments cut mid-JSON: the tool block must be dropped, or the
+			// orchestrator would execute a partial call with empty input.
+		},
+		{
+			name:     "incomplete content_filter",
+			body:     `{"id":"r1","status":"incomplete","incomplete_details":{"reason":"content_filter"},"output":[{"type":"message","content":[{"type":"output_text","text":"partial"}]}]}`,
+			wantStop: StopReasonContentFilter,
+			wantText: "partial",
 		},
 		{
 			name:    "failed",
@@ -431,8 +453,10 @@ func TestOpenAIClient_CreateMessageRejectsIncompleteAndFailedStatus(t *testing.T
 			wantErr: "unexpected status: future_status",
 		},
 		{
-			name: "completed",
-			body: `{"id":"r1","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}]}`,
+			name:     "completed",
+			body:     `{"id":"r1","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}]}`,
+			wantStop: StopReasonEndTurn,
+			wantText: "done",
 		},
 	}
 
@@ -452,34 +476,40 @@ func TestOpenAIClient_CreateMessageRejectsIncompleteAndFailedStatus(t *testing.T
 				},
 			})
 
-			if tc.wantErr == "" {
-				if err != nil {
-					t.Fatalf("expected completed response to succeed, got error: %v", err)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatal("expected error for failed or unexpected status, got nil")
 				}
-				if resp == nil || resp.TextContent() != "done" {
-					t.Fatalf("expected completed response with text %q, got %+v", "done", resp)
+				if resp != nil {
+					t.Fatalf("no success response may escape a failed or unexpected status, got %+v", resp)
 				}
-				if resp.StopReason != StopReasonEndTurn {
-					t.Errorf("expected stop reason %q, got %q", StopReasonEndTurn, resp.StopReason)
+				var pe *ErrProviderResponse
+				if !errors.As(err, &pe) {
+					t.Fatalf("expected *ErrProviderResponse, got %T: %v", err, err)
+				}
+				if pe.Provider != "openai" {
+					t.Errorf("expected provider openai, got %q", pe.Provider)
+				}
+				if pe.Reason != tc.wantErr {
+					t.Errorf("expected reason %q, got %q", tc.wantErr, pe.Reason)
 				}
 				return
 			}
 
-			if err == nil {
-				t.Fatal("expected error for non-completed status, got nil")
+			if err != nil {
+				t.Fatalf("expected successful %s response, got error: %v", tc.name, err)
 			}
-			if resp != nil {
-				t.Fatalf("no success response may escape a non-completed status, got %+v", resp)
+			if resp == nil {
+				t.Fatal("expected non-nil response")
 			}
-			var pe *ErrProviderResponse
-			if !errors.As(err, &pe) {
-				t.Fatalf("expected *ErrProviderResponse, got %T: %v", err, err)
+			if resp.TextContent() != tc.wantText {
+				t.Errorf("expected partial text %q, got %q", tc.wantText, resp.TextContent())
 			}
-			if pe.Provider != "openai" {
-				t.Errorf("expected provider openai, got %q", pe.Provider)
+			if resp.StopReason != tc.wantStop {
+				t.Errorf("expected stop reason %q, got %q", tc.wantStop, resp.StopReason)
 			}
-			if pe.Reason != tc.wantErr {
-				t.Errorf("expected reason %q, got %q", tc.wantErr, pe.Reason)
+			if resp.HasToolUse() != tc.wantTools {
+				t.Errorf("expected HasToolUse() %v, got %v (content: %+v)", tc.wantTools, resp.HasToolUse(), resp.Content)
 			}
 		})
 	}
@@ -847,12 +877,14 @@ func TestConvertOpenAIResponse_InvalidToolCallArguments(t *testing.T) {
 	}
 
 	result := convertOpenAIResponse(resp)
-	// Should handle gracefully with empty input
-	if len(result.Content) != 1 {
-		t.Fatalf("expected 1 content block, got %d", len(result.Content))
+	// Graceful handling means dropping the block, not substituting empty
+	// input: the orchestrator would otherwise execute a partial call as if
+	// it were complete.
+	if len(result.Content) != 0 {
+		t.Fatalf("expected unparseable tool call to be dropped, got %d content blocks: %+v", len(result.Content), result.Content)
 	}
-	if result.Content[0].Input == nil {
-		t.Error("expected non-nil input map")
+	if result.HasToolUse() {
+		t.Error("expected no tool block for unparseable arguments")
 	}
 }
 
@@ -951,7 +983,7 @@ func TestConvertOpenAIResponsesResponse_RefusalContent(t *testing.T) {
 			},
 		}
 
-		result := convertOpenAIResponsesResponse(resp)
+		result := convertOpenAIResponsesResponse(resp, "gpt-5.2")
 		if result.StopReason != StopReasonRefusal {
 			t.Errorf("expected stop reason %q, got %q", StopReasonRefusal, result.StopReason)
 		}
@@ -977,7 +1009,7 @@ func TestConvertOpenAIResponsesResponse_RefusalContent(t *testing.T) {
 			},
 		}
 
-		result := convertOpenAIResponsesResponse(resp)
+		result := convertOpenAIResponsesResponse(resp, "gpt-5.2")
 		if result.StopReason != StopReasonRefusal {
 			t.Errorf("expected stop reason %q, got %q", StopReasonRefusal, result.StopReason)
 		}
@@ -1018,6 +1050,53 @@ func TestConvertOpenAIResponse_UsageTracking(t *testing.T) {
 	}
 	if result.Usage.OutputTokens != 50 {
 		t.Errorf("expected 50 output tokens, got %d", result.Usage.OutputTokens)
+	}
+}
+
+// TestConvertOpenAIResponseTruncatedToolCall: a Chat Completions result
+// stopped at the token limit (finish_reason "length" — the Ollama/OpenRouter
+// truncation shape) whose tool_call arguments were cut mid-JSON must convert
+// WITHOUT the tool block. The orchestrator executes whatever tool blocks the
+// Response carries, so emitting one with empty substituted input would run a
+// partial call as if it were complete. Partial text and the max_tokens stop
+// reason are preserved. Ollama and OpenRouter share this converter.
+func TestConvertOpenAIResponseTruncatedToolCall(t *testing.T) {
+	resp := convertOpenAIResponse(&openai.ChatCompletion{
+		ID:    "chatcmpl-1",
+		Model: "llama3.2",
+		Choices: []openai.ChatCompletionChoice{
+			{
+				Message: openai.ChatCompletionMessage{
+					Role:    "assistant",
+					Content: "partial",
+					ToolCalls: []openai.ChatCompletionMessageToolCallUnion{
+						{
+							ID: "call_1",
+							Function: openai.ChatCompletionMessageFunctionToolCallFunction{
+								Name:      "read_file",
+								Arguments: `{"path": "/tmp/x`, // truncated mid-JSON
+							},
+						},
+					},
+				},
+				FinishReason: "length",
+			},
+		},
+		Usage: openai.CompletionUsage{
+			PromptTokens:     10,
+			CompletionTokens: 5,
+			TotalTokens:      15,
+		},
+	})
+
+	if resp.StopReason != StopReasonMaxTokens {
+		t.Errorf("expected stop reason %q, got %q", StopReasonMaxTokens, resp.StopReason)
+	}
+	if resp.TextContent() != "partial" {
+		t.Errorf("expected partial text preserved, got %q", resp.TextContent())
+	}
+	if resp.HasToolUse() {
+		t.Fatalf("truncated tool call must not produce a tool block, got %+v", resp.Content)
 	}
 }
 
@@ -1472,91 +1551,170 @@ func TestOpenAIClient_StreamResponsesErrorEvent(t *testing.T) {
 }
 
 // TestOpenAIClient_StreamResponsesFailedEvent checks the SSE equivalent of
-// CreateMessage's failed fixture: the response.failed event must surface the
-// same typed *ErrProviderResponse with the same Reason as the non-streaming
-// call, and no converted response may escape as a successful turn.
+// CreateMessage's failed fixture: a response.failed event whose payload
+// carries a failed status must surface the same typed *ErrProviderResponse
+// with the same Reason as the non-streaming call, and no converted response
+// may escape as a successful turn. A contradictory payload whose status is
+// not failed (openAIResponseError no longer rejects those) must still error
+// with a descriptive non-nil error, never EventError carrying a nil Error.
 func TestOpenAIClient_StreamResponsesFailedEvent(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/responses" {
-			t.Errorf("expected /responses request, got %s", r.URL.Path)
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		writeOpenAIResponseSSE(t, w, "response.failed", `{"type":"response.failed","response":{"id":"r1","status":"failed","error":{"code":"server_error","message":"failed"},"output":[]}}`)
-	}))
-	defer server.Close()
-
-	client := &OpenAIClient{
-		client: openai.NewClient(
-			option.WithAPIKey("test-key"),
-			option.WithBaseURL(server.URL),
-			option.WithMaxRetries(0),
-		),
-		model: "gpt-5.2",
+	fixtures := []struct {
+		name        string
+		data        string
+		wantReason  string // exact Reason of a typed *ErrProviderResponse
+		wantDescrip bool   // substituted descriptive error, not a typed one
+	}{
+		{
+			name:       "failed payload",
+			data:       `{"type":"response.failed","response":{"id":"r1","status":"failed","error":{"code":"server_error","message":"failed"},"output":[]}}`,
+			wantReason: "failed: failed",
+		},
+		{
+			name:        "completed payload",
+			data:        `{"type":"response.failed","response":{"id":"r1","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}]}}`,
+			wantDescrip: true,
+		},
 	}
 
-	eventChan, err := client.CreateMessageStream(context.Background(), &Request{
-		Messages: []Message{NewUserMessage("Hello")},
-	})
-	if err != nil {
-		t.Fatalf("unexpected error creating stream: %v", err)
-	}
+	for _, tc := range fixtures {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/responses" {
+					t.Errorf("expected /responses request, got %s", r.URL.Path)
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				writeOpenAIResponseSSE(t, w, "response.failed", tc.data)
+			}))
+			defer server.Close()
 
-	assertOpenAIStreamStatusError(t, eventChan, "failed: failed")
+			client := &OpenAIClient{
+				client: openai.NewClient(
+					option.WithAPIKey("test-key"),
+					option.WithBaseURL(server.URL),
+					option.WithMaxRetries(0),
+				),
+				model: "gpt-5.2",
+			}
+
+			eventChan, err := client.CreateMessageStream(context.Background(), &Request{
+				Messages: []Message{NewUserMessage("Hello")},
+			})
+			if err != nil {
+				t.Fatalf("unexpected error creating stream: %v", err)
+			}
+
+			if tc.wantReason != "" {
+				assertOpenAIStreamStatusError(t, eventChan, tc.wantReason)
+				return
+			}
+			assertOpenAIStreamDescriptiveError(t, eventChan)
+		})
+	}
 }
 
 // TestOpenAIClient_StreamResponsesIncompleteEvent checks the SSE equivalent
-// of CreateMessage's incomplete fixture — including the parsable function_call
-// in the partial output: the response.incomplete event must surface the same
-// typed *ErrProviderResponse with the same Reason as the non-streaming call,
-// and the partial result must not convert into a successful turn.
+// of CreateMessage's incomplete fixtures: a genuine incomplete event delivers
+// a successful partial final response carrying the named StopReason
+// (max_tokens for max_output_tokens, content_filter for filtering) with the
+// partial text preserved — mirroring how the other providers' streams deliver
+// truncated results. Contradictory payloads (failed or completed status under
+// the incomplete event name) must still error.
 func TestOpenAIClient_StreamResponsesIncompleteEvent(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/responses" {
-			t.Errorf("expected /responses request, got %s", r.URL.Path)
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		writeOpenAIResponseSSE(t, w, "response.incomplete", `{"type":"response.incomplete","response":{"id":"r1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","content":[{"type":"output_text","text":"partial"}]},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"get_weather","arguments":"{\"location\":\"New York\"}"}]}}`)
-	}))
-	defer server.Close()
-
-	client := &OpenAIClient{
-		client: openai.NewClient(
-			option.WithAPIKey("test-key"),
-			option.WithBaseURL(server.URL),
-			option.WithMaxRetries(0),
-		),
-		model: "gpt-5.2",
-	}
-
-	eventChan, err := client.CreateMessageStream(context.Background(), &Request{
-		Messages: []Message{NewUserMessage("Hello")},
-	})
-	if err != nil {
-		t.Fatalf("unexpected error creating stream: %v", err)
-	}
-
-	assertOpenAIStreamStatusError(t, eventChan, "incomplete: max_output_tokens")
-}
-
-// TestOpenAIClient_StreamCompletedEventWithNonCompletedStatus defends against
-// wire inconsistency: a response.completed event whose payload carries a
-// non-completed status must error with the typed *ErrProviderResponse instead
-// of converting the partial payload into EventMessageStop.
-func TestOpenAIClient_StreamCompletedEventWithNonCompletedStatus(t *testing.T) {
 	fixtures := []struct {
-		name    string
-		data    string
-		wantErr string
+		name        string
+		data        string
+		wantStop    StopReason // expected StopReason of the final response
+		wantText    string     // expected partial text of the final response
+		wantReason  string     // exact Reason of a typed *ErrProviderResponse
+		wantDescrip bool       // substituted descriptive error, not a typed one
 	}{
 		{
-			name:    "completed event with incomplete status",
-			data:    `{"type":"response.completed","response":{"id":"r1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","content":[{"type":"output_text","text":"partial"}]}]}}`,
-			wantErr: "incomplete: max_output_tokens",
+			name:     "incomplete max_output_tokens",
+			data:     `{"type":"response.incomplete","response":{"id":"r1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","content":[{"type":"output_text","text":"partial"}]},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"get_weather","arguments":"{\"location\":\"New York\"}"}]}}`,
+			wantStop: StopReasonMaxTokens,
+			wantText: "partial",
 		},
+		{
+			name:     "incomplete content_filter",
+			data:     `{"type":"response.incomplete","response":{"id":"r1","status":"incomplete","incomplete_details":{"reason":"content_filter"},"output":[{"type":"message","content":[{"type":"output_text","text":"partial"}]}]}}`,
+			wantStop: StopReasonContentFilter,
+			wantText: "partial",
+		},
+		{
+			name:       "failed payload",
+			data:       `{"type":"response.incomplete","response":{"id":"r1","status":"failed","error":{"code":"server_error","message":"failed"},"output":[]}}`,
+			wantReason: "failed: failed",
+		},
+		{
+			name:        "completed payload",
+			data:        `{"type":"response.incomplete","response":{"id":"r1","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}]}}`,
+			wantDescrip: true,
+		},
+	}
+
+	for _, tc := range fixtures {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/responses" {
+					t.Errorf("expected /responses request, got %s", r.URL.Path)
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				writeOpenAIResponseSSE(t, w, "response.incomplete", tc.data)
+			}))
+			defer server.Close()
+
+			client := &OpenAIClient{
+				client: openai.NewClient(
+					option.WithAPIKey("test-key"),
+					option.WithBaseURL(server.URL),
+					option.WithMaxRetries(0),
+				),
+				model: "gpt-5.2",
+			}
+
+			eventChan, err := client.CreateMessageStream(context.Background(), &Request{
+				Messages: []Message{NewUserMessage("Hello")},
+			})
+			if err != nil {
+				t.Fatalf("unexpected error creating stream: %v", err)
+			}
+
+			switch {
+			case tc.wantReason != "":
+				assertOpenAIStreamStatusError(t, eventChan, tc.wantReason)
+			case tc.wantDescrip:
+				assertOpenAIStreamDescriptiveError(t, eventChan)
+			default:
+				assertOpenAIStreamPartialResponse(t, eventChan, tc.wantStop, tc.wantText)
+			}
+		})
+	}
+}
+
+// TestOpenAIClient_StreamCompletedEventWithNonCompletedStatus pins the
+// completed-event path to the payload status, matching the non-streaming
+// policy: a failed payload stays a typed *ErrProviderResponse error, while an
+// incomplete payload converts into a successful partial final response
+// (StopReasonMaxTokens, partial text preserved) — the payload, not the event
+// name, carries the status.
+func TestOpenAIClient_StreamCompletedEventWithNonCompletedStatus(t *testing.T) {
+	fixtures := []struct {
+		name     string
+		data     string
+		wantErr  string // exact Reason of *ErrProviderResponse; empty means success expected
+		wantStop StopReason
+		wantText string
+	}{
 		{
 			name:    "completed event with failed status",
 			data:    `{"type":"response.completed","response":{"id":"r1","status":"failed","error":{"code":"server_error","message":"failed"},"output":[]}}`,
 			wantErr: "failed: failed",
+		},
+		{
+			name:     "completed event with incomplete status",
+			data:     `{"type":"response.completed","response":{"id":"r1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","content":[{"type":"output_text","text":"partial"}]}]}}`,
+			wantStop: StopReasonMaxTokens,
+			wantText: "partial",
 		},
 	}
 
@@ -1587,7 +1745,11 @@ func TestOpenAIClient_StreamCompletedEventWithNonCompletedStatus(t *testing.T) {
 				t.Fatalf("unexpected error creating stream: %v", err)
 			}
 
-			assertOpenAIStreamStatusError(t, eventChan, tc.wantErr)
+			if tc.wantErr != "" {
+				assertOpenAIStreamStatusError(t, eventChan, tc.wantErr)
+				return
+			}
+			assertOpenAIStreamPartialResponse(t, eventChan, tc.wantStop, tc.wantText)
 		})
 	}
 }
@@ -1639,6 +1801,68 @@ func TestOpenAIClient_StreamFailedEventWithCompletedStatus(t *testing.T) {
 	}
 	if !gotError {
 		t.Fatal("expected error event")
+	}
+}
+
+// assertOpenAIStreamPartialResponse consumes a stream whose terminal event
+// must deliver a successful partial final response, and asserts no error
+// event escapes.
+func assertOpenAIStreamPartialResponse(t *testing.T, eventChan <-chan StreamEvent, wantStop StopReason, wantText string) {
+	t.Helper()
+	var gotStop, gotError bool
+	for event := range eventChan {
+		switch event.Type {
+		case EventError:
+			gotError = true
+			t.Errorf("unexpected error event: %v", event.Error)
+		case EventMessageStop:
+			gotStop = true
+			if event.Response == nil {
+				t.Fatal("expected non-nil final response")
+			}
+			if event.Response.StopReason != wantStop {
+				t.Errorf("expected stop reason %q, got %q", wantStop, event.Response.StopReason)
+			}
+			if event.Response.TextContent() != wantText {
+				t.Errorf("expected partial text %q, got %q", wantText, event.Response.TextContent())
+			}
+		}
+	}
+	if !gotStop {
+		t.Fatal("expected final response event")
+	}
+	if gotError {
+		t.Fatal("no error event may escape a successful partial response")
+	}
+}
+
+// assertOpenAIStreamDescriptiveError consumes a stream whose terminal event
+// must be an EventError with a non-nil error that is not a typed
+// *ErrProviderResponse (the substituted descriptive error for contradictory
+// wire shapes), and asserts no converted response escapes as EventMessageStop.
+func assertOpenAIStreamDescriptiveError(t *testing.T, eventChan <-chan StreamEvent) {
+	t.Helper()
+	var gotError, gotStop bool
+	for event := range eventChan {
+		switch event.Type {
+		case EventError:
+			gotError = true
+			if event.Error == nil {
+				t.Fatal("expected non-nil error, got nil")
+			}
+			var pe *ErrProviderResponse
+			if errors.As(event.Error, &pe) {
+				t.Errorf("expected descriptive error, got typed *ErrProviderResponse: %v", event.Error)
+			}
+		case EventMessageStop:
+			gotStop = true
+		}
+	}
+	if !gotError {
+		t.Fatal("expected error event")
+	}
+	if gotStop {
+		t.Fatal("no converted response may escape a contradictory terminal event")
 	}
 }
 

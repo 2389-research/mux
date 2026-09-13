@@ -161,6 +161,18 @@ type Request struct {
 }
 
 // Response is the output from CreateMessage.
+//
+// Status policy (all five providers, both call shapes): token-limit
+// truncation and content filtering are successful Responses, never errors.
+// They carry StopReasonMaxTokens or StopReasonContentFilter with the partial
+// output preserved in Content — from CreateMessage and as the final stream
+// event. Only genuine failures are errors: a provider-reported failed status
+// (typed *ErrProviderResponse, detected with errors.As), transport failure,
+// or request validation. Callers that handle truncation gracefully should
+// branch on StopReason, not on err != nil. On streams the payload status
+// always governs: a response.completed SSE event carrying an incomplete
+// payload delivers partial success, while an incomplete event name with a
+// completed payload errors.
 type Response struct {
 	ID         string         `json:"id"`
 	Content    []ContentBlock `json:"content"`
@@ -255,10 +267,13 @@ func (e *ErrMalformedMedia) Error() string {
 }
 
 // ErrProviderResponse indicates a provider returned an HTTP-200 response whose
-// status field reports failure or incompleteness rather than a completed
-// result (e.g. the OpenAI Responses API "failed" or "incomplete" statuses).
-// Reason carries the provider's own explanation, prefixed with the status
-// category (e.g. "incomplete: max_output_tokens").
+// status field reports a genuine failure rather than a completed or truncated
+// result (e.g. the OpenAI Responses API "failed" status, or a status the
+// provider added that mux does not recognize). Truncation and content
+// filtering are NOT errors: they surface as successful Responses carrying the
+// named StopReason with partial output preserved. Reason carries the
+// provider's own explanation, prefixed with the status category (e.g.
+// "failed: server_error", "unexpected status: queued").
 type ErrProviderResponse struct {
 	Provider string
 	Reason   string

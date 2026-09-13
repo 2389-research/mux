@@ -657,10 +657,12 @@ func TestOrchestratorStreamingModeAnthropicToolUseDeltaStream(t *testing.T) {
 }
 
 // TestOrchestratorStreamingModeOpenAIIncompleteToolTurn runs a real
-// OpenAIClient against an httptest server whose first Responses result is
-// incomplete (max_output_tokens) yet carries a parsable function_call. The
-// orchestrator must surface the typed *ErrProviderResponse, execute zero
-// tools, and record no successful assistant completion in history.
+// OpenAIClient against an httptest server whose first Responses stream result
+// is incomplete (max_output_tokens) yet carries a parsable function_call.
+// Under the cross-provider truncation policy the truncated turn is a
+// successful partial Response: the tool call executes exactly as it would for
+// an Anthropic/Gemini/Ollama/OpenRouter truncated stream, the loop continues,
+// and the follow-up completed response finishes the run.
 func TestOrchestratorStreamingModeOpenAIIncompleteToolTurn(t *testing.T) {
 	var mu sync.Mutex
 	requestCount := 0
@@ -673,14 +675,20 @@ func TestOrchestratorStreamingModeOpenAIIncompleteToolTurn(t *testing.T) {
 		requestCount++
 		currentRequest := requestCount
 		mu.Unlock()
-		if currentRequest != 1 {
-			t.Errorf("expected exactly one provider request, got request %d", currentRequest)
+		if currentRequest > 2 {
+			t.Errorf("expected at most two provider requests, got request %d", currentRequest)
 		}
 
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			t.Fatal("expected http.ResponseWriter to be an http.Flusher")
+		}
+
+		if currentRequest == 2 {
+			w.Write([]byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r2\",\"status\":\"completed\",\"model\":\"gpt-5.2\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"It is sunny in New York.\"}]}]}}\n\n"))
+			flusher.Flush()
+			return
 		}
 
 		w.Write([]byte("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\",\"status\":\"in_progress\",\"model\":\"gpt-5.2\"}}\n\n"))
@@ -707,19 +715,12 @@ func TestOrchestratorStreamingModeOpenAIIncompleteToolTurn(t *testing.T) {
 	events := orch.Subscribe()
 
 	err := orch.Run(context.Background(), "What's the weather in New York?")
-	if err == nil {
-		t.Fatal("expected typed provider error, got nil")
-	}
-	var pe *llm.ErrProviderResponse
-	if !errors.As(err, &pe) {
-		t.Fatalf("expected *llm.ErrProviderResponse, got %T: %v", err, err)
-	}
-	if pe.Reason != "incomplete: max_output_tokens" {
-		t.Errorf("expected reason %q, got %q", "incomplete: max_output_tokens", pe.Reason)
+	if err != nil {
+		t.Fatalf("expected truncated stream to complete via follow-up turn, got: %v", err)
 	}
 
-	if toolCalls != 0 {
-		t.Fatalf("expected zero tool executions, got %d", toolCalls)
+	if toolCalls != 1 {
+		t.Fatalf("expected the partial tool call to execute once, got %d", toolCalls)
 	}
 
 	var gotComplete bool
@@ -728,14 +729,18 @@ func TestOrchestratorStreamingModeOpenAIIncompleteToolTurn(t *testing.T) {
 			gotComplete = true
 		}
 	}
-	if gotComplete {
-		t.Error("expected no complete event for a non-completed status")
+	if !gotComplete {
+		t.Error("expected complete event for the follow-up turn")
 	}
 
+	var assistantTurns int
 	for _, msg := range orch.Messages() {
 		if msg.Role == llm.RoleAssistant {
-			t.Fatalf("no successful assistant completion may be recorded, got %+v", msg)
+			assistantTurns++
 		}
+	}
+	if assistantTurns != 2 {
+		t.Errorf("expected two recorded assistant turns (partial + completed), got %d", assistantTurns)
 	}
 }
 

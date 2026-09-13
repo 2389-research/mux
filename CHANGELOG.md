@@ -11,10 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `llm.ProviderReplay` envelope (`ContentBlock.Replay`) preserving raw provider items — OpenAI reasoning items, message `phase`, and item IDs survive response → tool history → persistence → the next Responses request byte-for-byte; replayed items are emitted verbatim via raw-JSON overrides. Requests carrying a replay envelope for a different provider/model are rejected pre-flight with `*llm.ErrReplayMismatch`. OpenAI Responses calls now request `reasoning.encrypted_content` on reasoning-capable models (the o1/o3/o4/gpt-5/codex families) so reasoning items remain replayable across turns.
 - New `llm.StopReason` values `stop_sequence`, `refusal`, `content_filter`, `pause_turn`, and `other`, covering provider-native finish reasons outside the existing `end_turn`/`tool_use`/`max_tokens` set. `pause_turn` is surfaced as-is and does not trigger automatic continuation; callers decide how to handle it.
 
+### Breaking
+
+- OpenAI Responses status policy, batched into this release's single breaking entry with 865b, j6kd, 2zdv, and aag7 per gotchas.md:
+  - A Responses result whose status is `failed` — or any status mux does not recognize, such as `queued` — is now a typed `*llm.ErrProviderResponse` error carrying no `Response`, on both the non-streaming and streaming paths. Previously it converted to a successful `Response` with empty content and `StopReason` `other`.
+  - Token-limit truncation (`incomplete`, including `max_output_tokens`) and content filtering (`incomplete` with `content_filter`) are now successful `Response`s carrying `StopReason` `max_tokens` / `content_filter` with the partial output preserved in `Content`, on both call shapes (the streaming path delivers them as the final stream response instead of an error). They are never an error path. They briefly returned an error in the unreleased PR #30 change; that was corrected before release, and the `Fixed` entry describing it has been replaced by this one.
+  - Callers should branch on `Response.StopReason` to handle truncation and filtering gracefully (e.g. show the partial answer, offer to continue), and use `errors.As` with `*llm.ErrProviderResponse` to detect genuine provider failures. The partial output of a `failed` result remains discarded with the error.
+
 ### Fixed
 - OpenAI non-streaming responses now derive `StopReason` from the Responses API `status` and `incomplete_details.reason` (previously every response defaulted to `end_turn`); refusal output content overrides a completed response to `refusal`.
 - Chat Completions and Gemini responses with an empty choice/candidate list now report `StopReason` `other` instead of an empty string.
-- OpenAI Responses calls whose status is `incomplete` (including `max_output_tokens` truncation) or `failed` now return a typed `*llm.ErrProviderResponse` error on both the non-streaming and streaming paths, instead of a fake-success `Response`; stream `EventError` message text for those status events changed accordingly (e.g. `openai response error: failed: …`).
 
 ## [0.9.0] - 2026-06-26
 

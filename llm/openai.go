@@ -616,8 +616,12 @@ func convertOpenAIResponse(resp *openai.ChatCompletion) *Response {
 	for _, tc := range choice.Message.ToolCalls {
 		var input map[string]any
 		if err := json.Unmarshal([]byte(tc.Function.Arguments), &input); err != nil {
+			// Truncated or malformed arguments (e.g. finish_reason "length"
+			// mid-JSON): drop the tool block entirely. Emitting it would let
+			// the orchestrator execute a partial call with empty input as if
+			// it were complete.
 			fmt.Fprintf(os.Stderr, "Warning: failed to parse tool call arguments for %s: %v\n", tc.Function.Name, err)
-			input = make(map[string]any)
+			continue
 		}
 
 		result.Content = append(result.Content, ContentBlock{
@@ -637,8 +641,10 @@ func convertOpenAIResponse(resp *openai.ChatCompletion) *Response {
 // requested model (requestModel), so reasoning items, message phase, and
 // item IDs survive to the next request byte-for-byte. Reasoning items are
 // replay-only; message output_text joins into one text block (empty text is
-// still emitted so the envelope has a block to ride on); function_call keeps
-// its normalized parse keyed by call_id, with the item ID staying raw-only.
+// still emitted so the envelope has a block to ride on, unless the item is
+// refusal-only — then the refusal block carries the envelope); function_call
+// keeps its normalized parse keyed by call_id, with the item ID staying
+// raw-only.
 func convertOpenAIResponsesResponse(resp *responses.Response, requestModel string) *Response {
 	result := &Response{
 		ID:    resp.ID,
@@ -661,6 +667,7 @@ func convertOpenAIResponsesResponse(resp *responses.Response, requestModel strin
 		switch item.Type {
 		case "message":
 			var text strings.Builder
+			var refusalBlocks []ContentBlock
 			for _, content := range item.Content {
 				if content.Type == "output_text" {
 					if text.Len() > 0 {
@@ -671,18 +678,26 @@ func convertOpenAIResponsesResponse(resp *responses.Response, requestModel strin
 				if content.Type == "refusal" {
 					hasRefusal = true
 					if content.Refusal != "" {
-						result.Content = append(result.Content, ContentBlock{
+						refusalBlocks = append(refusalBlocks, ContentBlock{
 							Type: ContentTypeText,
 							Text: content.Refusal,
 						})
 					}
 				}
 			}
-			result.Content = append(result.Content, ContentBlock{
-				Type:   ContentTypeText,
-				Text:   text.String(),
-				Replay: replay,
-			})
+			// One joined text block per message item keeps the replay
+			// envelope anchored; refusal-only items skip the empty join
+			// and let the refusal block carry the envelope instead.
+			var itemBlocks []ContentBlock
+			if text.Len() > 0 || len(refusalBlocks) == 0 {
+				itemBlocks = append(itemBlocks, ContentBlock{
+					Type: ContentTypeText,
+					Text: text.String(),
+				})
+			}
+			itemBlocks = append(itemBlocks, refusalBlocks...)
+			itemBlocks[len(itemBlocks)-1].Replay = replay
+			result.Content = append(result.Content, itemBlocks...)
 		case "reasoning":
 			result.Content = append(result.Content, ContentBlock{
 				Type:   ContentTypeReplay,
@@ -693,8 +708,12 @@ func convertOpenAIResponsesResponse(resp *responses.Response, requestModel strin
 			// For function_call items the arguments are a JSON-encoded string in OfString.
 			var input map[string]any
 			if err := json.Unmarshal([]byte(item.Arguments.OfString), &input); err != nil {
+				// Truncated or malformed arguments (e.g. output cut off by
+				// max_output_tokens mid-JSON): drop the tool block entirely.
+				// Emitting it would let the orchestrator execute a partial
+				// call with empty input as if it were complete.
 				fmt.Fprintf(os.Stderr, "Warning: failed to parse tool call arguments for %s: %v\n", item.Name, err)
-				input = make(map[string]any)
+				continue
 			}
 			result.Content = append(result.Content, ContentBlock{
 				Type:   ContentTypeToolUse,
@@ -716,21 +735,20 @@ func convertOpenAIResponsesResponse(resp *responses.Response, requestModel strin
 }
 
 // openAIResponseError reports an error for any Responses API result whose
-// status is not "completed", including max_output_tokens truncation. It is the
-// single status policy for both call shapes: CreateMessage checks it after the
-// SDK call returns and before conversion, and CreateMessageStream applies it
-// to terminal status events — response.failed, response.incomplete, and
-// response.completed events whose payload carries a non-completed status
-// (defense against wire inconsistency) — so partial output (e.g. a parsable
-// function_call) can never surface as a successful turn on either path.
-// Conversion of incomplete responses via convertOpenAIResponsesResponse still
-// exposes StopReasonMaxTokens for direct unit conversion.
+// status indicates a genuine failure. It is the single status policy for both
+// call shapes: CreateMessage checks it after the SDK call returns and before
+// conversion, and CreateMessageStream applies it to terminal status events —
+// response.failed and response.incomplete events, and response.completed
+// events whose payload carries a failed or unrecognized status (defense
+// against wire inconsistency). Truncation and content filtering (status
+// "incomplete") are not failures: they convert to successful partial
+// Responses carrying StopReasonMaxTokens / StopReasonContentFilter with
+// partial output preserved, matching the other four providers, and are
+// validated by their event handlers instead.
 func openAIResponseError(resp *responses.Response) error {
 	switch resp.Status {
-	case responses.ResponseStatusCompleted:
+	case responses.ResponseStatusCompleted, responses.ResponseStatusIncomplete:
 		return nil
-	case responses.ResponseStatusIncomplete:
-		return &ErrProviderResponse{Provider: "openai", Reason: "incomplete: " + resp.IncompleteDetails.Reason}
 	case responses.ResponseStatusFailed:
 		return &ErrProviderResponse{Provider: "openai", Reason: "failed: " + resp.Error.Message}
 	default:
@@ -876,9 +894,13 @@ func (o *OpenAIClient) CreateMessageStream(ctx context.Context, req *Request) (<
 					Error: fmt.Errorf("openai stream error: %s", event.Message),
 				}
 				return
-			case "response.failed", "response.incomplete":
+			case "response.failed":
 				err := openAIResponseError(&event.Response)
 				if err == nil {
+					// Contradictory wire shape: the event attests failure
+					// but the payload status carries no error. A failed
+					// event must never terminate the stream with a nil
+					// error (jqws) or fall through as a success.
 					err = fmt.Errorf("openai: stream reported %s with status %q", event.Type, event.Response.Status)
 				}
 				eventChan <- StreamEvent{
@@ -886,6 +908,35 @@ func (o *OpenAIClient) CreateMessageStream(ctx context.Context, req *Request) (<
 					Error: err,
 				}
 				return
+			case "response.incomplete":
+				if err := openAIResponseError(&event.Response); err != nil {
+					eventChan <- StreamEvent{Type: EventError, Error: err}
+					return
+				}
+				if event.Response.Status != responses.ResponseStatusIncomplete {
+					// Contradictory wire shape: the event attests
+					// truncation or filtering but the payload claims
+					// completion; neither can be trusted as a clean turn.
+					eventChan <- StreamEvent{
+						Type:  EventError,
+						Error: fmt.Errorf("openai: stream reported %s with status %q", event.Type, event.Response.Status),
+					}
+					return
+				}
+				// Truncation or content filtering: deliver the partial
+				// result as a successful final response, mirroring the
+				// response.completed path below — same converter, same
+				// event shape — so consumers see Response + StopReason
+				// (max_tokens / content_filter) + partial content, exactly
+				// as the other providers' streams deliver truncated turns.
+				if !messageStarted {
+					eventChan <- StreamEvent{Type: EventMessageStart}
+				}
+				resp := convertOpenAIResponsesResponse(&event.Response, req.Model)
+				eventChan <- StreamEvent{
+					Type:     EventMessageStop,
+					Response: resp,
+				}
 			}
 		}
 

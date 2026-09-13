@@ -221,9 +221,7 @@ func TestConvertOpenAIResponsesResponse_OpenAIReplayTextJoining(t *testing.T) {
 	      "id": "msg_empty",
 	      "role": "assistant",
 	      "status": "completed",
-	      "content": [
-	        {"type": "refusal", "refusal": "no"}
-	      ]
+	      "content": []
 	    }
 	  ]
 	}`

@@ -269,8 +269,13 @@ func (a *anthropicStreamAccumulator) stopBlock(index int) {
 	}
 	var input map[string]any
 	if err := json.Unmarshal([]byte(block.inputRaw), &input); err != nil {
+		// Truncated input (a max_tokens stop mid tool input leaves inputRaw
+		// as partial JSON): drop the block from the finished Response so the
+		// orchestrator never executes a partial call with empty input as if
+		// it were complete.
 		fmt.Fprintf(os.Stderr, "Warning: failed to parse streamed tool input for %s: %v\n", block.block.Name, err)
-		input = make(map[string]any)
+		delete(a.blocks, index)
+		return
 	}
 	block.block.Input = input
 }
