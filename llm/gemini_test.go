@@ -6,6 +6,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -521,6 +524,158 @@ func TestConvertGeminiResponse_EmptyCandidatesStopReason(t *testing.T) {
 	if result.StopReason != StopReasonOther {
 		t.Errorf("expected stop reason other for empty candidates, got %q", result.StopReason)
 	}
+}
+
+// geminiSSEServer serves each payload as a data: SSE event in order.
+func geminiSSEServer(t *testing.T, payloads ...string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, p := range payloads {
+			fmt.Fprintf(w, "data: %s\n\n", p)
+		}
+	}))
+}
+
+func collectGeminiStream(t *testing.T, c *GeminiClient, req *Request) (delta string, final *Response) {
+	t.Helper()
+	ch, err := c.CreateMessageStream(context.Background(), req)
+	if err != nil {
+		t.Fatalf("CreateMessageStream: %v", err)
+	}
+	for e := range ch {
+		if e.Error != nil {
+			t.Fatalf("stream error: %v", e.Error)
+		}
+		delta += e.Text
+		if e.Type == EventMessageStop {
+			final = e.Response
+		}
+	}
+	return delta, final
+}
+
+// TestAuditGeminiStreamAccumulates reproduces mux#ac2b: multi-chunk text plus a
+// usage/finish trailer must yield a final response whose text is every delta.
+func TestAuditGeminiStreamAccumulates(t *testing.T) {
+	s := geminiSSEServer(t,
+		`{"candidates":[{"content":{"role":"model","parts":[{"text":"Hello "}]}}]}`,
+		`{"candidates":[{"content":{"role":"model","parts":[{"text":"world"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2}}`,
+	)
+	defer s.Close()
+	c, err := NewGeminiClientWithBaseURL(context.Background(), "key", "gemini-test", s.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delta, final := collectGeminiStream(t, c, &Request{Messages: []Message{NewUserMessage("hi")}})
+	if final == nil {
+		t.Fatal("no EventMessageStop response")
+	}
+	if final.TextContent() != "Hello world" {
+		t.Errorf("final text %q, want %q (deltas %q)", final.TextContent(), "Hello world", delta)
+	}
+	if final.Usage.InputTokens != 5 || final.Usage.OutputTokens != 2 {
+		t.Errorf("usage = %+v, want 5/2", final.Usage)
+	}
+	if final.StopReason != StopReasonEndTurn {
+		t.Errorf("stop reason %q, want end_turn", final.StopReason)
+	}
+}
+
+func TestGeminiStreamAccumulates(t *testing.T) {
+	toolCall := `{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"get_weather","args":{"location":"Boston"}}}]}}]}`
+	t.Run("tool call survives usage-only trailer", func(t *testing.T) {
+		s := geminiSSEServer(t,
+			toolCall,
+			`{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3}}`,
+		)
+		defer s.Close()
+		c, err := NewGeminiClientWithBaseURL(context.Background(), "key", "gemini-test", s.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, final := collectGeminiStream(t, c, &Request{Messages: []Message{NewUserMessage("hi")}})
+		if final == nil {
+			t.Fatal("no EventMessageStop response")
+		}
+		uses := final.ToolUses()
+		if len(uses) != 1 {
+			t.Fatalf("final tool uses = %d, want 1; content=%+v", len(uses), final.Content)
+		}
+		if uses[0].Name != "get_weather" || uses[0].Input["location"] != "Boston" {
+			t.Errorf("tool use = %+v", uses[0])
+		}
+		if final.StopReason != StopReasonToolUse {
+			t.Errorf("stop reason %q, want tool_use", final.StopReason)
+		}
+		if final.Usage.InputTokens != 7 || final.Usage.OutputTokens != 3 {
+			t.Errorf("usage = %+v, want 7/3", final.Usage)
+		}
+		if final.TextContent() != "" {
+			t.Errorf("text %q, want empty", final.TextContent())
+		}
+	})
+	t.Run("thinking separated from text", func(t *testing.T) {
+		s := geminiSSEServer(t,
+			`{"candidates":[{"content":{"role":"model","parts":[{"text":"reasoning","thought":true}]}}]}`,
+			`{"candidates":[{"content":{"role":"model","parts":[{"text":"answer"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":6}}`,
+		)
+		defer s.Close()
+		c, err := NewGeminiClientWithBaseURL(context.Background(), "key", "gemini-test", s.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, final := collectGeminiStream(t, c, &Request{Messages: []Message{NewUserMessage("hi")}})
+		if final == nil {
+			t.Fatal("no EventMessageStop response")
+		}
+		var think, text string
+		for _, b := range final.Content {
+			switch b.Type {
+			case ContentTypeThinking:
+				think += b.Thinking
+			case ContentTypeText:
+				text += b.Text
+			}
+		}
+		if think != "reasoning" {
+			t.Errorf("thinking = %q, want %q", think, "reasoning")
+		}
+		if text != "answer" {
+			t.Errorf("text = %q, want %q", text, "answer")
+		}
+	})
+	t.Run("multi-part chunks accumulate in order", func(t *testing.T) {
+		s := geminiSSEServer(t,
+			`{"candidates":[{"content":{"role":"model","parts":[{"text":"one"},{"functionCall":{"name":"t1","args":{"a":1}}}]}}]}`,
+			`{"candidates":[{"content":{"role":"model","parts":[{"text":"two"},{"text":"three"}]},"finishReason":"STOP"}]}`,
+		)
+		defer s.Close()
+		c, err := NewGeminiClientWithBaseURL(context.Background(), "key", "gemini-test", s.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, final := collectGeminiStream(t, c, &Request{Messages: []Message{NewUserMessage("hi")}})
+		if final == nil {
+			t.Fatal("no EventMessageStop response")
+		}
+		types := make([]ContentType, 0, len(final.Content))
+		for _, b := range final.Content {
+			types = append(types, b.Type)
+		}
+		want := []ContentType{ContentTypeText, ContentTypeToolUse, ContentTypeText, ContentTypeText}
+		if len(types) != len(want) {
+			t.Fatalf("block types %v, want %v", types, want)
+		}
+		for i := range want {
+			if types[i] != want[i] {
+				t.Fatalf("block types %v, want %v", types, want)
+			}
+		}
+		if final.TextContent() != "onetwothree" {
+			t.Errorf("text = %q, want %q", final.TextContent(), "onetwothree")
+		}
+	})
 }
 
 func TestGeminiCapabilities(t *testing.T) {
