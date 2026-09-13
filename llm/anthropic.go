@@ -3,6 +3,7 @@
 package llm
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -318,6 +319,11 @@ func cloneResponse(response *Response) *Response {
 				for key, value := range block.Input {
 					clone.Content[i].Input[key] = value
 				}
+			}
+			if block.Replay != nil {
+				replay := *block.Replay
+				replay.Data = bytes.Clone(block.Replay.Data)
+				clone.Content[i].Replay = &replay
 			}
 		}
 	}
