@@ -656,6 +656,89 @@ func TestOrchestratorStreamingModeAnthropicToolUseDeltaStream(t *testing.T) {
 	}
 }
 
+// TestOrchestratorStreamingModeOpenAIIncompleteToolTurn runs a real
+// OpenAIClient against an httptest server whose first Responses result is
+// incomplete (max_output_tokens) yet carries a parsable function_call. The
+// orchestrator must surface the typed *ErrProviderResponse, execute zero
+// tools, and record no successful assistant completion in history.
+func TestOrchestratorStreamingModeOpenAIIncompleteToolTurn(t *testing.T) {
+	var mu sync.Mutex
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Errorf("expected /responses request, got %s", r.URL.Path)
+		}
+
+		mu.Lock()
+		requestCount++
+		currentRequest := requestCount
+		mu.Unlock()
+		if currentRequest != 1 {
+			t.Errorf("expected exactly one provider request, got request %d", currentRequest)
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("expected http.ResponseWriter to be an http.Flusher")
+		}
+
+		w.Write([]byte("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\",\"status\":\"in_progress\",\"model\":\"gpt-5.2\"}}\n\n"))
+		flusher.Flush()
+		w.Write([]byte("event: response.incomplete\ndata: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"r1\",\"status\":\"incomplete\",\"model\":\"gpt-5.2\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"partial\"}]},{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"get_weather\",\"arguments\":\"{\\\"location\\\":\\\"New York\\\"}\"}]}}\n\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	var toolCalls int
+	registry := tool.NewRegistry()
+	registry.Register(&mockTool{
+		name: "get_weather",
+		execFunc: func(ctx context.Context, params map[string]any) (*tool.Result, error) {
+			toolCalls++
+			return tool.NewResult("get_weather", true, "sunny", ""), nil
+		},
+	})
+
+	client := llm.NewOpenAIClientWithBaseURL("test-key", "gpt-5.2", server.URL)
+	config := orchestrator.DefaultConfig()
+	config.Stream = true
+	orch := orchestrator.NewWithConfig(client, tool.NewExecutor(registry), config)
+	events := orch.Subscribe()
+
+	err := orch.Run(context.Background(), "What's the weather in New York?")
+	if err == nil {
+		t.Fatal("expected typed provider error, got nil")
+	}
+	var pe *llm.ErrProviderResponse
+	if !errors.As(err, &pe) {
+		t.Fatalf("expected *llm.ErrProviderResponse, got %T: %v", err, err)
+	}
+	if pe.Reason != "incomplete: max_output_tokens" {
+		t.Errorf("expected reason %q, got %q", "incomplete: max_output_tokens", pe.Reason)
+	}
+
+	if toolCalls != 0 {
+		t.Fatalf("expected zero tool executions, got %d", toolCalls)
+	}
+
+	var gotComplete bool
+	for event := range events {
+		if event.Type == orchestrator.EventComplete {
+			gotComplete = true
+		}
+	}
+	if gotComplete {
+		t.Error("expected no complete event for a non-completed status")
+	}
+
+	for _, msg := range orch.Messages() {
+		if msg.Role == llm.RoleAssistant {
+			t.Fatalf("no successful assistant completion may be recorded, got %+v", msg)
+		}
+	}
+}
+
 func TestOrchestratorSimpleResponse(t *testing.T) {
 	client := &mockLLMClient{
 		responses: []*llm.Response{{

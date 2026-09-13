@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - OpenAI non-streaming responses now derive `StopReason` from the Responses API `status` and `incomplete_details.reason` (previously every response defaulted to `end_turn`); refusal output content overrides a completed response to `refusal`.
 - Chat Completions and Gemini responses with an empty choice/candidate list now report `StopReason` `other` instead of an empty string.
+- OpenAI Responses calls whose status is `incomplete` (including `max_output_tokens` truncation) or `failed` now return a typed `*llm.ErrProviderResponse` error on both the non-streaming and streaming paths, instead of a fake-success `Response`; stream `EventError` message text for those status events changed accordingly (e.g. `openai response error: failed: …`).
 
 ## [0.9.0] - 2026-06-26
 
