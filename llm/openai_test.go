@@ -250,7 +250,9 @@ func TestOpenAIClient_CreateMessageUsesResponsesAPIWithToolsAndReasoning(t *test
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestPath = r.URL.Path
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatalf("decode request body: %v", err)
+			t.Errorf("decode request body: %v", err)
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
@@ -325,7 +327,9 @@ func TestOpenAIClient_CreateMessageSendsFunctionCallOutputsToResponsesAPI(t *tes
 	var body map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatalf("decode request body: %v", err)
+			t.Errorf("decode request body: %v", err)
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
@@ -958,7 +962,9 @@ func TestOpenAIClient_StreamContextCancellation(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			t.Fatal("expected http.Flusher")
+			t.Error("expected http.Flusher")
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
 		}
 
 		writeOpenAIResponseSSE(t, w, "response.created", `{"type":"response.created","response":{"id":"resp_123","status":"in_progress","model":"gpt-5.2"}}`)
@@ -1053,7 +1059,9 @@ func TestOpenAIClient_StreamWithToolCalls(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			t.Fatal("expected http.Flusher")
+			t.Error("expected http.Flusher")
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
 		}
 
 		writeOpenAIResponseSSE(t, w, "response.created", `{"type":"response.created","response":{"id":"resp_123","status":"in_progress","model":"gpt-5.2"}}`)
@@ -1148,7 +1156,9 @@ func TestOpenAIClient_StreamWithMultipleContentDeltas(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			t.Fatal("expected http.Flusher")
+			t.Error("expected http.Flusher")
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
 		}
 
 		writeOpenAIResponseSSE(t, w, "response.created", `{"type":"response.created","response":{"id":"resp_123","status":"in_progress","model":"gpt-5.2"}}`)
@@ -1232,7 +1242,9 @@ func TestOpenAIClient_StreamJustFinishedToolCallEvent(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			t.Fatal("expected http.Flusher")
+			t.Error("expected http.Flusher")
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
 		}
 
 		writeOpenAIResponseSSE(t, w, "response.created", `{"type":"response.created","response":{"id":"resp_123","status":"in_progress","model":"gpt-5.2"}}`)
@@ -1546,7 +1558,8 @@ func assertOpenAIStreamStatusError(t *testing.T, eventChan <-chan StreamEvent, w
 func writeOpenAIResponseSSE(t *testing.T, w http.ResponseWriter, eventName string, data string) {
 	t.Helper()
 	if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventName, data); err != nil {
-		t.Fatalf("failed to write SSE event: %v", err)
+		t.Errorf("failed to write SSE event: %v", err)
+		return
 	}
 }
 

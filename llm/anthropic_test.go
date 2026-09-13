@@ -475,7 +475,9 @@ func TestAnthropicClient_StreamContextCancellation(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			t.Fatal("expected http.ResponseWriter to be an http.Flusher")
+			t.Error("expected http.ResponseWriter to be an http.Flusher")
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
 		}
 
 		// Send initial event
@@ -661,7 +663,9 @@ func TestCreateMessageStream_SuccessfulTextStream(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			t.Fatal("expected http.ResponseWriter to be an http.Flusher")
+			t.Error("expected http.ResponseWriter to be an http.Flusher")
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
 		}
 
 		// Send message_start event
@@ -800,7 +804,9 @@ func TestCreateMessageStream_WithToolUse(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			t.Fatal("expected http.ResponseWriter to be an http.Flusher")
+			t.Error("expected http.ResponseWriter to be an http.Flusher")
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
 		}
 
 		// Send message_start event
@@ -987,7 +993,9 @@ func TestCreateMessageStream_FinalResponsePreservesThinking(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			t.Fatal("expected http.ResponseWriter to be an http.Flusher")
+			t.Error("expected http.ResponseWriter to be an http.Flusher")
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
 		}
 
 		w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_thinking\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-opus-4-6-20250414\",\"stop_reason\":null,\"usage\":{\"input_tokens\":8,\"output_tokens\":0}}}\n\n"))
@@ -1055,7 +1063,9 @@ func TestCreateMessageStream_InputJSONDelta(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			t.Fatal("expected http.ResponseWriter to be an http.Flusher")
+			t.Error("expected http.ResponseWriter to be an http.Flusher")
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
 		}
 
 		// Send message_start
@@ -1228,7 +1238,9 @@ func TestCreateMessageStream_DefaultModelAndMaxTokens(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			t.Fatal("expected http.ResponseWriter to be an http.Flusher")
+			t.Error("expected http.ResponseWriter to be an http.Flusher")
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
 		}
 
 		w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_000\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-20250514\",\"stop_reason\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n"))
@@ -1304,7 +1316,9 @@ func TestCreateMessageStream_MessageDeltaOnly(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			t.Fatal("expected http.ResponseWriter to be an http.Flusher")
+			t.Error("expected http.ResponseWriter to be an http.Flusher")
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
 		}
 
 		// Send just message_delta and message_stop without content
