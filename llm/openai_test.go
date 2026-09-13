@@ -421,6 +421,16 @@ func TestOpenAIClient_CreateMessageRejectsIncompleteAndFailedStatus(t *testing.T
 			wantErr: "failed: failed",
 		},
 		{
+			name:    "queued",
+			body:    `{"id":"r1","status":"queued","output":[]}`,
+			wantErr: "unexpected status: queued",
+		},
+		{
+			name:    "future_status",
+			body:    `{"id":"r1","status":"future_status","output":[]}`,
+			wantErr: "unexpected status: future_status",
+		},
+		{
 			name: "completed",
 			body: `{"id":"r1","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}]}`,
 		},
