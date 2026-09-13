@@ -161,6 +161,15 @@ type Request struct {
 }
 
 // Response is the output from CreateMessage.
+//
+// Status policy (all five providers, both call shapes): token-limit
+// truncation and content filtering are successful Responses, never errors.
+// They carry StopReasonMaxTokens or StopReasonContentFilter with the partial
+// output preserved in Content — from CreateMessage and as the final stream
+// event. Only genuine failures are errors: a provider-reported failed status
+// (typed *ErrProviderResponse, detected with errors.As), transport failure,
+// or request validation. Callers that handle truncation gracefully should
+// branch on StopReason, not on err != nil.
 type Response struct {
 	ID         string         `json:"id"`
 	Content    []ContentBlock `json:"content"`
