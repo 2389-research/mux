@@ -983,7 +983,7 @@ func TestConvertOpenAIResponsesResponse_RefusalContent(t *testing.T) {
 			},
 		}
 
-		result := convertOpenAIResponsesResponse(resp)
+		result := convertOpenAIResponsesResponse(resp, "gpt-5.2")
 		if result.StopReason != StopReasonRefusal {
 			t.Errorf("expected stop reason %q, got %q", StopReasonRefusal, result.StopReason)
 		}
@@ -1009,7 +1009,7 @@ func TestConvertOpenAIResponsesResponse_RefusalContent(t *testing.T) {
 			},
 		}
 
-		result := convertOpenAIResponsesResponse(resp)
+		result := convertOpenAIResponsesResponse(resp, "gpt-5.2")
 		if result.StopReason != StopReasonRefusal {
 			t.Errorf("expected stop reason %q, got %q", StopReasonRefusal, result.StopReason)
 		}

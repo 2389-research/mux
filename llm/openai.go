@@ -641,8 +641,10 @@ func convertOpenAIResponse(resp *openai.ChatCompletion) *Response {
 // requested model (requestModel), so reasoning items, message phase, and
 // item IDs survive to the next request byte-for-byte. Reasoning items are
 // replay-only; message output_text joins into one text block (empty text is
-// still emitted so the envelope has a block to ride on); function_call keeps
-// its normalized parse keyed by call_id, with the item ID staying raw-only.
+// still emitted so the envelope has a block to ride on, unless the item is
+// refusal-only — then the refusal block carries the envelope); function_call
+// keeps its normalized parse keyed by call_id, with the item ID staying
+// raw-only.
 func convertOpenAIResponsesResponse(resp *responses.Response, requestModel string) *Response {
 	result := &Response{
 		ID:    resp.ID,
@@ -665,6 +667,7 @@ func convertOpenAIResponsesResponse(resp *responses.Response, requestModel strin
 		switch item.Type {
 		case "message":
 			var text strings.Builder
+			var refusalBlocks []ContentBlock
 			for _, content := range item.Content {
 				if content.Type == "output_text" {
 					if text.Len() > 0 {
@@ -675,18 +678,26 @@ func convertOpenAIResponsesResponse(resp *responses.Response, requestModel strin
 				if content.Type == "refusal" {
 					hasRefusal = true
 					if content.Refusal != "" {
-						result.Content = append(result.Content, ContentBlock{
+						refusalBlocks = append(refusalBlocks, ContentBlock{
 							Type: ContentTypeText,
 							Text: content.Refusal,
 						})
 					}
 				}
 			}
-			result.Content = append(result.Content, ContentBlock{
-				Type:   ContentTypeText,
-				Text:   text.String(),
-				Replay: replay,
-			})
+			// One joined text block per message item keeps the replay
+			// envelope anchored; refusal-only items skip the empty join
+			// and let the refusal block carry the envelope instead.
+			var itemBlocks []ContentBlock
+			if text.Len() > 0 || len(refusalBlocks) == 0 {
+				itemBlocks = append(itemBlocks, ContentBlock{
+					Type: ContentTypeText,
+					Text: text.String(),
+				})
+			}
+			itemBlocks = append(itemBlocks, refusalBlocks...)
+			itemBlocks[len(itemBlocks)-1].Replay = replay
+			result.Content = append(result.Content, itemBlocks...)
 		case "reasoning":
 			result.Content = append(result.Content, ContentBlock{
 				Type:   ContentTypeReplay,
