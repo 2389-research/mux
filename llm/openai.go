@@ -616,8 +616,12 @@ func convertOpenAIResponse(resp *openai.ChatCompletion) *Response {
 	for _, tc := range choice.Message.ToolCalls {
 		var input map[string]any
 		if err := json.Unmarshal([]byte(tc.Function.Arguments), &input); err != nil {
+			// Truncated or malformed arguments (e.g. finish_reason "length"
+			// mid-JSON): drop the tool block entirely. Emitting it would let
+			// the orchestrator execute a partial call with empty input as if
+			// it were complete.
 			fmt.Fprintf(os.Stderr, "Warning: failed to parse tool call arguments for %s: %v\n", tc.Function.Name, err)
-			input = make(map[string]any)
+			continue
 		}
 
 		result.Content = append(result.Content, ContentBlock{
@@ -693,8 +697,12 @@ func convertOpenAIResponsesResponse(resp *responses.Response, requestModel strin
 			// For function_call items the arguments are a JSON-encoded string in OfString.
 			var input map[string]any
 			if err := json.Unmarshal([]byte(item.Arguments.OfString), &input); err != nil {
+				// Truncated or malformed arguments (e.g. output cut off by
+				// max_output_tokens mid-JSON): drop the tool block entirely.
+				// Emitting it would let the orchestrator execute a partial
+				// call with empty input as if it were complete.
 				fmt.Fprintf(os.Stderr, "Warning: failed to parse tool call arguments for %s: %v\n", item.Name, err)
-				input = make(map[string]any)
+				continue
 			}
 			result.Content = append(result.Content, ContentBlock{
 				Type:   ContentTypeToolUse,

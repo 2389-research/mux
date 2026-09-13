@@ -409,17 +409,27 @@ func TestOpenAIClient_CreateMessageSendsFunctionCallOutputsToResponsesAPI(t *tes
 // arguments parse cleanly.
 func TestOpenAIClient_CreateMessageStatusPolicy(t *testing.T) {
 	fixtures := []struct {
-		name     string
-		body     string
-		wantErr  string // exact Reason of *ErrProviderResponse; empty means success expected
-		wantStop StopReason
-		wantText string
+		name      string
+		body      string
+		wantErr   string // exact Reason of *ErrProviderResponse; empty means success expected
+		wantStop  StopReason
+		wantText  string
+		wantTools bool // whether a tool_use block survives conversion
 	}{
 		{
-			name:     "incomplete max_output_tokens",
-			body:     `{"id":"r1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","content":[{"type":"output_text","text":"partial"}]},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"get_weather","arguments":"{\"location\":\"New York\"}"}]}`,
+			name:      "incomplete max_output_tokens",
+			body:      `{"id":"r1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","content":[{"type":"output_text","text":"partial"}]},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"get_weather","arguments":"{\"location\":\"New York\"}"}]}`,
+			wantStop:  StopReasonMaxTokens,
+			wantText:  "partial",
+			wantTools: true, // parsable arguments keep the tool block executable
+		},
+		{
+			name:     "incomplete max_output_tokens truncated tool arguments",
+			body:     `{"id":"r1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","content":[{"type":"output_text","text":"partial"}]},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"get_weather","arguments":"{\"location\":\"New Yor"}]}`,
 			wantStop: StopReasonMaxTokens,
 			wantText: "partial",
+			// Arguments cut mid-JSON: the tool block must be dropped, or the
+			// orchestrator would execute a partial call with empty input.
 		},
 		{
 			name:     "incomplete content_filter",
@@ -497,6 +507,9 @@ func TestOpenAIClient_CreateMessageStatusPolicy(t *testing.T) {
 			}
 			if resp.StopReason != tc.wantStop {
 				t.Errorf("expected stop reason %q, got %q", tc.wantStop, resp.StopReason)
+			}
+			if resp.HasToolUse() != tc.wantTools {
+				t.Errorf("expected HasToolUse() %v, got %v (content: %+v)", tc.wantTools, resp.HasToolUse(), resp.Content)
 			}
 		})
 	}
@@ -864,12 +877,14 @@ func TestConvertOpenAIResponse_InvalidToolCallArguments(t *testing.T) {
 	}
 
 	result := convertOpenAIResponse(resp)
-	// Should handle gracefully with empty input
-	if len(result.Content) != 1 {
-		t.Fatalf("expected 1 content block, got %d", len(result.Content))
+	// Graceful handling means dropping the block, not substituting empty
+	// input: the orchestrator would otherwise execute a partial call as if
+	// it were complete.
+	if len(result.Content) != 0 {
+		t.Fatalf("expected unparseable tool call to be dropped, got %d content blocks: %+v", len(result.Content), result.Content)
 	}
-	if result.Content[0].Input == nil {
-		t.Error("expected non-nil input map")
+	if result.HasToolUse() {
+		t.Error("expected no tool block for unparseable arguments")
 	}
 }
 
@@ -1035,6 +1050,53 @@ func TestConvertOpenAIResponse_UsageTracking(t *testing.T) {
 	}
 	if result.Usage.OutputTokens != 50 {
 		t.Errorf("expected 50 output tokens, got %d", result.Usage.OutputTokens)
+	}
+}
+
+// TestConvertOpenAIResponseTruncatedToolCall: a Chat Completions result
+// stopped at the token limit (finish_reason "length" — the Ollama/OpenRouter
+// truncation shape) whose tool_call arguments were cut mid-JSON must convert
+// WITHOUT the tool block. The orchestrator executes whatever tool blocks the
+// Response carries, so emitting one with empty substituted input would run a
+// partial call as if it were complete. Partial text and the max_tokens stop
+// reason are preserved. Ollama and OpenRouter share this converter.
+func TestConvertOpenAIResponseTruncatedToolCall(t *testing.T) {
+	resp := convertOpenAIResponse(&openai.ChatCompletion{
+		ID:    "chatcmpl-1",
+		Model: "llama3.2",
+		Choices: []openai.ChatCompletionChoice{
+			{
+				Message: openai.ChatCompletionMessage{
+					Role:    "assistant",
+					Content: "partial",
+					ToolCalls: []openai.ChatCompletionMessageToolCallUnion{
+						{
+							ID: "call_1",
+							Function: openai.ChatCompletionMessageFunctionToolCallFunction{
+								Name:      "read_file",
+								Arguments: `{"path": "/tmp/x`, // truncated mid-JSON
+							},
+						},
+					},
+				},
+				FinishReason: "length",
+			},
+		},
+		Usage: openai.CompletionUsage{
+			PromptTokens:     10,
+			CompletionTokens: 5,
+			TotalTokens:      15,
+		},
+	})
+
+	if resp.StopReason != StopReasonMaxTokens {
+		t.Errorf("expected stop reason %q, got %q", StopReasonMaxTokens, resp.StopReason)
+	}
+	if resp.TextContent() != "partial" {
+		t.Errorf("expected partial text preserved, got %q", resp.TextContent())
+	}
+	if resp.HasToolUse() {
+		t.Fatalf("truncated tool call must not produce a tool block, got %+v", resp.Content)
 	}
 }
 

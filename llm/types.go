@@ -169,7 +169,10 @@ type Request struct {
 // event. Only genuine failures are errors: a provider-reported failed status
 // (typed *ErrProviderResponse, detected with errors.As), transport failure,
 // or request validation. Callers that handle truncation gracefully should
-// branch on StopReason, not on err != nil.
+// branch on StopReason, not on err != nil. On streams the payload status
+// always governs: a response.completed SSE event carrying an incomplete
+// payload delivers partial success, while an incomplete event name with a
+// completed payload errors.
 type Response struct {
 	ID         string         `json:"id"`
 	Content    []ContentBlock `json:"content"`

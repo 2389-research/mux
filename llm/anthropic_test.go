@@ -1155,6 +1155,34 @@ func TestCreateMessageStream_InputJSONDelta(t *testing.T) {
 	}
 }
 
+// TestAnthropicStreamAccumulatorTruncatedToolInput: input_json_delta
+// fragments cut off mid-JSON (a max_tokens stop during tool input leaves
+// inputRaw as partial JSON) must not produce a tool block in the finished
+// Response. The orchestrator executes whatever tool blocks the final Response
+// carries, so a block with substituted empty input would run a partial call
+// as if complete. Complete JSON retains the block with parsed input.
+func TestAnthropicStreamAccumulatorTruncatedToolInput(t *testing.T) {
+	truncated := newAnthropicStreamAccumulator()
+	truncated.startBlock(0, ContentTypeToolUse, "toolu_1", "get_weather", "", "")
+	truncated.appendDelta(0, "input_json_delta", `{"location": "New `)
+	truncated.stopBlock(0)
+	if resp := truncated.finish(); len(resp.Content) != 0 {
+		t.Fatalf("expected truncated tool block to be dropped, got %+v", resp.Content)
+	}
+
+	complete := newAnthropicStreamAccumulator()
+	complete.startBlock(0, ContentTypeToolUse, "toolu_2", "get_weather", "", "")
+	complete.appendDelta(0, "input_json_delta", `{"location":"New York"}`)
+	complete.stopBlock(0)
+	resp := complete.finish()
+	if len(resp.Content) != 1 {
+		t.Fatalf("expected complete tool block to be kept, got %+v", resp.Content)
+	}
+	if location, ok := resp.Content[0].Input["location"].(string); !ok || location != "New York" {
+		t.Errorf("expected parsed input location New York, got %+v", resp.Content[0].Input)
+	}
+}
+
 func TestConvertRequest_WithThinking(t *testing.T) {
 	req := &Request{
 		Model:     "claude-opus-4-6-20250414",
