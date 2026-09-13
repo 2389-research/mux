@@ -169,6 +169,17 @@ func convertMessage(msg Message) *genai.Content {
 	}
 }
 
+// geminiUsage converts Gemini's cumulative usage metadata to our Usage.
+// Gemini reports totals per response, so callers replace prior usage with
+// this value rather than summing across chunks.
+func geminiUsage(meta *genai.GenerateContentResponseUsageMetadata) Usage {
+	return Usage{
+		InputTokens:    int(meta.PromptTokenCount),
+		OutputTokens:   int(meta.CandidatesTokenCount),
+		ThinkingTokens: int(meta.ThoughtsTokenCount),
+	}
+}
+
 // convertGeminiResponse converts Gemini's GenerateContentResponse to our Response.
 func convertGeminiResponse(resp *genai.GenerateContentResponse, model string) *Response {
 	result := &Response{
@@ -181,11 +192,7 @@ func convertGeminiResponse(resp *genai.GenerateContentResponse, model string) *R
 
 	// Usage metadata
 	if resp.UsageMetadata != nil {
-		result.Usage = Usage{
-			InputTokens:    int(resp.UsageMetadata.PromptTokenCount),
-			OutputTokens:   int(resp.UsageMetadata.CandidatesTokenCount),
-			ThinkingTokens: int(resp.UsageMetadata.ThoughtsTokenCount),
-		}
+		result.Usage = geminiUsage(resp.UsageMetadata)
 	}
 
 	reason := ""
@@ -203,29 +210,118 @@ func convertGeminiResponse(resp *genai.GenerateContentResponse, model string) *R
 	// Extract content from candidate
 	if candidate.Content != nil {
 		for _, part := range candidate.Content.Parts {
-			if part.Thought {
-				result.Content = append(result.Content, ContentBlock{
-					Type:     ContentTypeThinking,
-					Thinking: part.Text,
-				})
-			} else if part.Text != "" {
-				result.Content = append(result.Content, ContentBlock{
-					Type: ContentTypeText,
-					Text: part.Text,
-				})
-			}
-			if part.FunctionCall != nil {
-				result.Content = append(result.Content, ContentBlock{
-					Type:  ContentTypeToolUse,
-					ID:    part.FunctionCall.ID,
-					Name:  part.FunctionCall.Name,
-					Input: part.FunctionCall.Args,
-				})
+			if block, ok := geminiPartToBlock(part); ok {
+				result.Content = append(result.Content, block)
 			}
 		}
 	}
 
 	return result
+}
+
+// geminiPartToBlock maps one Gemini content part to a mux ContentBlock.
+// It returns false for parts with no mux representation (e.g. inline data),
+// letting both the non-streaming and streaming paths share one mapping.
+// Only the first candidate is processed; do not aggregate alternate
+// candidates.
+func geminiPartToBlock(part *genai.Part) (ContentBlock, bool) {
+	if part == nil {
+		return ContentBlock{}, false
+	}
+	if part.Thought {
+		return ContentBlock{Type: ContentTypeThinking, Thinking: part.Text}, true
+	}
+	if part.FunctionCall != nil {
+		return ContentBlock{
+			Type:  ContentTypeToolUse,
+			ID:    part.FunctionCall.ID,
+			Name:  part.FunctionCall.Name,
+			Input: part.FunctionCall.Args,
+		}, true
+	}
+	if part.Text != "" {
+		return ContentBlock{Type: ContentTypeText, Text: part.Text}, true
+	}
+	return ContentBlock{}, false
+}
+
+// geminiStreamAccumulator builds the final streamed Response from every
+// GenerateContentStream chunk (mux#ac2b). Gemini chunks are incremental, so
+// keeping only the last chunk loses text and tool calls emitted earlier, and
+// lets a usage-only trailer erase accumulated content.
+//
+// Rules:
+//   - Content blocks are appended in the order the parts were received;
+//     adjacent text blocks are never merged so part boundaries (and any
+//     future per-part signatures, mux#62ba) are preserved.
+//   - Usage metadata is cumulative and replaces prior usage only when a
+//     chunk actually carries UsageMetadata.
+//   - The finish reason is recorded only when a chunk explicitly states one;
+//     a chunk without a finish reason must never override a prior explicit
+//     one (zero-value FinishReason means "not stopped yet").
+//   - Function-call parts are appended as received; do not deduplicate by
+//     function name, since parallel calls repeat names with distinct IDs.
+type geminiStreamAccumulator struct {
+	response     Response
+	finishReason genai.FinishReason
+}
+
+func newGeminiStreamAccumulator(model string) *geminiStreamAccumulator {
+	return &geminiStreamAccumulator{
+		response: Response{
+			Model:      model,
+			StopReason: StopReasonOther,
+		},
+	}
+}
+
+// add folds one streamed chunk into the accumulator. Only the first
+// candidate is considered.
+func (a *geminiStreamAccumulator) add(chunk *genai.GenerateContentResponse) {
+	if chunk == nil {
+		return
+	}
+	if chunk.ResponseID != "" {
+		a.response.ID = chunk.ResponseID
+	}
+	if chunk.UsageMetadata != nil {
+		a.response.Usage = geminiUsage(chunk.UsageMetadata)
+	}
+	if len(chunk.Candidates) == 0 {
+		return
+	}
+	candidate := chunk.Candidates[0]
+	if candidate == nil {
+		return
+	}
+	if candidate.FinishReason != "" {
+		a.finishReason = candidate.FinishReason
+	}
+	if candidate.Content == nil {
+		return
+	}
+	for _, part := range candidate.Content.Parts {
+		if block, ok := geminiPartToBlock(part); ok {
+			a.response.Content = append(a.response.Content, block)
+		}
+	}
+}
+
+// snapshot returns the accumulated Response. The stop reason derives from
+// the last explicitly stated finish reason plus whether any tool call was
+// accumulated; abnormal and token-limit reasons keep priority over the
+// tool-use inference, matching convertGeminiResponse.
+func (a *geminiStreamAccumulator) snapshot() Response {
+	response := a.response
+	hasTools := false
+	for _, block := range response.Content {
+		if block.Type == ContentTypeToolUse {
+			hasTools = true
+			break
+		}
+	}
+	response.StopReason = mapGeminiStopReason(string(a.finishReason), hasTools)
+	return response
 }
 
 // CreateMessage sends a message and returns the complete response.
@@ -291,6 +387,7 @@ func (g *GeminiClient) CreateMessageStream(ctx context.Context, req *Request) (<
 		}
 
 		var lastResp *genai.GenerateContentResponse
+		acc := newGeminiStreamAccumulator(model)
 
 		// Iterate over the streaming response
 		for resp, err := range g.client.Models.GenerateContentStream(ctx, model, contents, config) {
@@ -303,6 +400,7 @@ func (g *GeminiClient) CreateMessageStream(ctx context.Context, req *Request) (<
 			}
 
 			lastResp = resp
+			acc.add(resp)
 
 			// Process each candidate's content
 			if len(resp.Candidates) > 0 && resp.Candidates[0].Content != nil {
@@ -328,11 +426,12 @@ func (g *GeminiClient) CreateMessageStream(ctx context.Context, req *Request) (<
 			}
 		}
 
-		// Send final message stop with complete response
+		// Send final message stop with the complete accumulated response
 		if lastResp != nil {
+			snapshot := acc.snapshot()
 			eventChan <- StreamEvent{
 				Type:     EventMessageStop,
-				Response: convertGeminiResponse(lastResp, model),
+				Response: &snapshot,
 			}
 		} else {
 			eventChan <- StreamEvent{
