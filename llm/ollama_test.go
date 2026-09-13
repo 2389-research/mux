@@ -331,7 +331,9 @@ func TestOllamaClient_CreateMessageStream(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			t.Fatal("expected http.Flusher")
+			t.Error("expected http.Flusher")
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
 		}
 
 		// Chunk 1: Role
@@ -416,7 +418,9 @@ func TestOllamaClient_StreamWithToolCalls(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			t.Fatal("expected http.Flusher")
+			t.Error("expected http.Flusher")
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
 		}
 
 		// Chunk 1: Start with role
@@ -508,7 +512,9 @@ func TestOllamaClient_StreamContextCancellation(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			t.Fatal("expected http.Flusher")
+			t.Error("expected http.Flusher")
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
 		}
 
 		// Send initial event

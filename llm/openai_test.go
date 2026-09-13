@@ -250,7 +250,9 @@ func TestOpenAIClient_CreateMessageUsesResponsesAPIWithToolsAndReasoning(t *test
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestPath = r.URL.Path
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatalf("decode request body: %v", err)
+			t.Errorf("decode request body: %v", err)
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
@@ -325,7 +327,9 @@ func TestOpenAIClient_CreateMessageSendsFunctionCallOutputsToResponsesAPI(t *tes
 	var body map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatalf("decode request body: %v", err)
+			t.Errorf("decode request body: %v", err)
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
@@ -415,6 +419,16 @@ func TestOpenAIClient_CreateMessageRejectsIncompleteAndFailedStatus(t *testing.T
 			name:    "failed",
 			body:    `{"id":"r1","status":"failed","error":{"code":"server_error","message":"failed"},"output":[]}`,
 			wantErr: "failed: failed",
+		},
+		{
+			name:    "queued",
+			body:    `{"id":"r1","status":"queued","output":[]}`,
+			wantErr: "unexpected status: queued",
+		},
+		{
+			name:    "future_status",
+			body:    `{"id":"r1","status":"future_status","output":[]}`,
+			wantErr: "unexpected status: future_status",
 		},
 		{
 			name: "completed",
@@ -920,6 +934,65 @@ func TestConvertOpenAIResponsesResponse_StopReason(t *testing.T) {
 	}
 }
 
+// TestConvertOpenAIResponsesResponse_RefusalContent pins the refusal branch:
+// the refusal text must surface as a text content block, alone and alongside
+// output_text, while hasRefusal keeps driving StopReasonRefusal.
+func TestConvertOpenAIResponsesResponse_RefusalContent(t *testing.T) {
+	t.Run("refusal only", func(t *testing.T) {
+		resp := &responses.Response{
+			Status: responses.ResponseStatusCompleted,
+			Output: []responses.ResponseOutputItemUnion{
+				{
+					Type: "message",
+					Content: []responses.ResponseOutputMessageContentUnion{
+						{Type: "refusal", Refusal: "I cannot help with that."},
+					},
+				},
+			},
+		}
+
+		result := convertOpenAIResponsesResponse(resp)
+		if result.StopReason != StopReasonRefusal {
+			t.Errorf("expected stop reason %q, got %q", StopReasonRefusal, result.StopReason)
+		}
+		if len(result.Content) != 1 {
+			t.Fatalf("expected 1 content block, got %d", len(result.Content))
+		}
+		if result.Content[0].Type != ContentTypeText || result.Content[0].Text != "I cannot help with that." {
+			t.Errorf("expected text block carrying the refusal text, got %+v", result.Content[0])
+		}
+	})
+
+	t.Run("refusal alongside output text", func(t *testing.T) {
+		resp := &responses.Response{
+			Status: responses.ResponseStatusCompleted,
+			Output: []responses.ResponseOutputItemUnion{
+				{
+					Type: "message",
+					Content: []responses.ResponseOutputMessageContentUnion{
+						{Type: "output_text", Text: "Here is what I can say."},
+						{Type: "refusal", Refusal: "I cannot help with the rest."},
+					},
+				},
+			},
+		}
+
+		result := convertOpenAIResponsesResponse(resp)
+		if result.StopReason != StopReasonRefusal {
+			t.Errorf("expected stop reason %q, got %q", StopReasonRefusal, result.StopReason)
+		}
+		if len(result.Content) != 2 {
+			t.Fatalf("expected 2 content blocks, got %d", len(result.Content))
+		}
+		if result.Content[0].Type != ContentTypeText || result.Content[0].Text != "Here is what I can say." {
+			t.Errorf("expected first block to be the output_text, got %+v", result.Content[0])
+		}
+		if result.Content[1].Type != ContentTypeText || result.Content[1].Text != "I cannot help with the rest." {
+			t.Errorf("expected second block to carry the refusal text, got %+v", result.Content[1])
+		}
+	})
+}
+
 // Usage Tracking Tests
 
 func TestConvertOpenAIResponse_UsageTracking(t *testing.T) {
@@ -958,7 +1031,9 @@ func TestOpenAIClient_StreamContextCancellation(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			t.Fatal("expected http.Flusher")
+			t.Error("expected http.Flusher")
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
 		}
 
 		writeOpenAIResponseSSE(t, w, "response.created", `{"type":"response.created","response":{"id":"resp_123","status":"in_progress","model":"gpt-5.2"}}`)
@@ -1053,7 +1128,9 @@ func TestOpenAIClient_StreamWithToolCalls(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			t.Fatal("expected http.Flusher")
+			t.Error("expected http.Flusher")
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
 		}
 
 		writeOpenAIResponseSSE(t, w, "response.created", `{"type":"response.created","response":{"id":"resp_123","status":"in_progress","model":"gpt-5.2"}}`)
@@ -1148,7 +1225,9 @@ func TestOpenAIClient_StreamWithMultipleContentDeltas(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			t.Fatal("expected http.Flusher")
+			t.Error("expected http.Flusher")
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
 		}
 
 		writeOpenAIResponseSSE(t, w, "response.created", `{"type":"response.created","response":{"id":"resp_123","status":"in_progress","model":"gpt-5.2"}}`)
@@ -1232,7 +1311,9 @@ func TestOpenAIClient_StreamJustFinishedToolCallEvent(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			t.Fatal("expected http.Flusher")
+			t.Error("expected http.Flusher")
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
 		}
 
 		writeOpenAIResponseSSE(t, w, "response.created", `{"type":"response.created","response":{"id":"resp_123","status":"in_progress","model":"gpt-5.2"}}`)
@@ -1511,6 +1592,56 @@ func TestOpenAIClient_StreamCompletedEventWithNonCompletedStatus(t *testing.T) {
 	}
 }
 
+// TestOpenAIClient_StreamFailedEventWithCompletedStatus guards the
+// contradictory-payload case: a response.failed event whose embedded
+// Response carries status "completed" makes openAIResponseError return nil,
+// which would emit EventError with a nil Error. The producer must substitute
+// a descriptive non-nil error so direct consumers of llm.StreamEvent never
+// see a nil error on an error event.
+func TestOpenAIClient_StreamFailedEventWithCompletedStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Errorf("expected /responses request, got %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		writeOpenAIResponseSSE(t, w, "response.failed", `{"type":"response.failed","response":{"id":"r1","status":"completed","output":[]}}`)
+	}))
+	defer server.Close()
+
+	client := &OpenAIClient{
+		client: openai.NewClient(
+			option.WithAPIKey("test-key"),
+			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
+		),
+		model: "gpt-5.2",
+	}
+
+	eventChan, err := client.CreateMessageStream(context.Background(), &Request{
+		Messages: []Message{NewUserMessage("Hello")},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error creating stream: %v", err)
+	}
+
+	var gotError bool
+	for event := range eventChan {
+		if event.Type != EventError {
+			continue
+		}
+		gotError = true
+		if event.Error == nil {
+			t.Fatal("EventError carried a nil Error")
+		}
+		if msg := event.Error.Error(); !strings.Contains(msg, "response.failed") || !strings.Contains(msg, "completed") {
+			t.Errorf("expected error naming the event type and status, got %v", event.Error)
+		}
+	}
+	if !gotError {
+		t.Fatal("expected error event")
+	}
+}
+
 // assertOpenAIStreamStatusError consumes a stream that must fail with a typed
 // *ErrProviderResponse carrying exactly wantReason, and asserts no converted
 // response escapes as EventMessageStop.
@@ -1546,7 +1677,8 @@ func assertOpenAIStreamStatusError(t *testing.T, eventChan <-chan StreamEvent, w
 func writeOpenAIResponseSSE(t *testing.T, w http.ResponseWriter, eventName string, data string) {
 	t.Helper()
 	if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventName, data); err != nil {
-		t.Fatalf("failed to write SSE event: %v", err)
+		t.Errorf("failed to write SSE event: %v", err)
+		return
 	}
 }
 
