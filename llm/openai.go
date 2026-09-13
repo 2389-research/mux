@@ -785,9 +785,13 @@ func (o *OpenAIClient) CreateMessageStream(ctx context.Context, req *Request) (<
 				}
 				return
 			case "response.failed", "response.incomplete":
+				err := openAIResponseError(&event.Response)
+				if err == nil {
+					err = fmt.Errorf("openai: stream reported %s with status %q", event.Type, event.Response.Status)
+				}
 				eventChan <- StreamEvent{
 					Type:  EventError,
-					Error: openAIResponseError(&event.Response),
+					Error: err,
 				}
 				return
 			}

@@ -1533,6 +1533,56 @@ func TestOpenAIClient_StreamCompletedEventWithNonCompletedStatus(t *testing.T) {
 	}
 }
 
+// TestOpenAIClient_StreamFailedEventWithCompletedStatus guards the
+// contradictory-payload case: a response.failed event whose embedded
+// Response carries status "completed" makes openAIResponseError return nil,
+// which would emit EventError with a nil Error. The producer must substitute
+// a descriptive non-nil error so direct consumers of llm.StreamEvent never
+// see a nil error on an error event.
+func TestOpenAIClient_StreamFailedEventWithCompletedStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Errorf("expected /responses request, got %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		writeOpenAIResponseSSE(t, w, "response.failed", `{"type":"response.failed","response":{"id":"r1","status":"completed","output":[]}}`)
+	}))
+	defer server.Close()
+
+	client := &OpenAIClient{
+		client: openai.NewClient(
+			option.WithAPIKey("test-key"),
+			option.WithBaseURL(server.URL),
+			option.WithMaxRetries(0),
+		),
+		model: "gpt-5.2",
+	}
+
+	eventChan, err := client.CreateMessageStream(context.Background(), &Request{
+		Messages: []Message{NewUserMessage("Hello")},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error creating stream: %v", err)
+	}
+
+	var gotError bool
+	for event := range eventChan {
+		if event.Type != EventError {
+			continue
+		}
+		gotError = true
+		if event.Error == nil {
+			t.Fatal("EventError carried a nil Error")
+		}
+		if msg := event.Error.Error(); !strings.Contains(msg, "response.failed") || !strings.Contains(msg, "completed") {
+			t.Errorf("expected error naming the event type and status, got %v", event.Error)
+		}
+	}
+	if !gotError {
+		t.Fatal("expected error event")
+	}
+}
+
 // assertOpenAIStreamStatusError consumes a stream that must fail with a typed
 // *ErrProviderResponse carrying exactly wantReason, and asserts no converted
 // response escapes as EventMessageStop.
