@@ -752,8 +752,8 @@ func (o *OpenAIClient) CreateMessageStream(ctx context.Context, req *Request) (<
 	if err := validateRequest("openai", o.Capabilities(), req); err != nil {
 		return nil, err
 	}
-	// CreateMessageStream uses Chat Completions, which has no URL form for
-	// PDFs — only inline base64. URL PDFs are rejected pre-flight.
+	// CreateMessageStream streams over the Responses API. URL-form PDFs are
+	// rejected pre-flight on this path; only inline base64 is sent.
 	if err := validateOpenAISources("openai", false, req); err != nil {
 		return nil, err
 	}

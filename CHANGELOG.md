@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `llm.ProviderReplay` envelope (`ContentBlock.Replay`) preserving raw provider items — OpenAI reasoning items, message `phase`, and item IDs survive response → tool history → persistence → the next Responses request byte-for-byte; replayed items are emitted verbatim via raw-JSON overrides. Requests carrying a replay envelope for a different provider/model are rejected pre-flight with `*llm.ErrReplayMismatch`. OpenAI Responses calls now request `reasoning.encrypted_content` so reasoning items remain replayable across turns.
 - New `llm.StopReason` values `stop_sequence`, `refusal`, `content_filter`, `pause_turn`, and `other`, covering provider-native finish reasons outside the existing `end_turn`/`tool_use`/`max_tokens` set. `pause_turn` is surfaced as-is and does not trigger automatic continuation; callers decide how to handle it.
 
 ### Fixed
