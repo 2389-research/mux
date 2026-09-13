@@ -913,7 +913,7 @@ func TestConvertOpenAIResponsesResponse_StopReason(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := convertOpenAIResponsesResponse(tc.resp).StopReason; got != tc.want {
+			if got := convertOpenAIResponsesResponse(tc.resp, "gpt-5.5").StopReason; got != tc.want {
 				t.Errorf("expected stop reason %q, got %q", tc.want, got)
 			}
 		})
@@ -2087,10 +2087,13 @@ func TestOpenAIResponsesWireFormat_ImageBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	params := convertOpenAIResponsesRequest(&Request{
+	params, err := convertOpenAIResponsesRequest(&Request{
 		Model:    "gpt-5.2",
 		Messages: []Message{NewUserMessageWithBlocks(img)},
 	})
+	if err != nil {
+		t.Fatalf("convertOpenAIResponsesRequest: %v", err)
+	}
 	body, err := json.Marshal(params)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -2110,9 +2113,12 @@ func TestOpenAIResponsesWireFormat_ImageBytes(t *testing.T) {
 
 func TestOpenAIResponsesWireFormat_ImageURL(t *testing.T) {
 	img := NewImageFromURL("https://example.com/cat.png")
-	params := convertOpenAIResponsesRequest(&Request{
+	params, err := convertOpenAIResponsesRequest(&Request{
 		Messages: []Message{NewUserMessageWithBlocks(img)},
 	})
+	if err != nil {
+		t.Fatalf("convertOpenAIResponsesRequest: %v", err)
+	}
 	body, err := json.Marshal(params)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -2131,9 +2137,12 @@ func TestOpenAIResponsesWireFormat_PDFBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	params := convertOpenAIResponsesRequest(&Request{
+	params, err := convertOpenAIResponsesRequest(&Request{
 		Messages: []Message{NewUserMessageWithBlocks(pdf)},
 	})
+	if err != nil {
+		t.Fatalf("convertOpenAIResponsesRequest: %v", err)
+	}
 	body, err := json.Marshal(params)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -2155,9 +2164,12 @@ func TestOpenAIResponsesWireFormat_PDFBytes(t *testing.T) {
 // Responses API treats it as a remote-fetch request.
 func TestOpenAIResponsesWireFormat_PDFURL(t *testing.T) {
 	pdf := NewPDFFromURL("https://example.com/paper.pdf")
-	params := convertOpenAIResponsesRequest(&Request{
+	params, err := convertOpenAIResponsesRequest(&Request{
 		Messages: []Message{NewUserMessageWithBlocks(pdf)},
 	})
+	if err != nil {
+		t.Fatalf("convertOpenAIResponsesRequest: %v", err)
+	}
 	body, err := json.Marshal(params)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -2179,12 +2191,15 @@ func TestOpenAIResponsesWireFormat_TextPlusImageMultipart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	params := convertOpenAIResponsesRequest(&Request{
+	params, err := convertOpenAIResponsesRequest(&Request{
 		Messages: []Message{NewUserMessageWithBlocks(
 			ContentBlock{Type: ContentTypeText, Text: "describe this"},
 			img,
 		)},
 	})
+	if err != nil {
+		t.Fatalf("convertOpenAIResponsesRequest: %v", err)
+	}
 	body, err := json.Marshal(params)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)

@@ -129,6 +129,11 @@ type ContentBlock struct {
 	// For media content (image, pdf, audio, video)
 	Source    *MediaSource `json:"source,omitempty"`
 	MediaType string       `json:"media_type,omitempty"`
+
+	// Replay carries the raw provider item backing this block, preserved
+	// byte-for-byte (see ProviderReplay). Present regardless of Type when a
+	// raw provider item must survive to the next request.
+	Replay *ProviderReplay `json:"replay,omitempty"`
 }
 
 // ToolDefinition describes a tool for the LLM.

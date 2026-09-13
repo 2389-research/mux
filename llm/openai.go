@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -118,12 +119,24 @@ func convertOpenAIRequest(req *Request) openai.ChatCompletionNewParams {
 }
 
 // convertOpenAIResponsesRequest converts our Request to the Responses API shape.
-func convertOpenAIResponsesRequest(req *Request) responses.ResponseNewParams {
+func convertOpenAIResponsesRequest(req *Request) (responses.ResponseNewParams, error) {
+	input, err := convertResponsesInput(req.Messages)
+	if err != nil {
+		return responses.ResponseNewParams{}, err
+	}
 	params := responses.ResponseNewParams{
 		Model: req.Model,
 		Input: responses.ResponseNewParamsInputUnion{
-			OfInputItemList: convertResponsesInput(req.Messages),
+			OfInputItemList: input,
 		},
+	}
+	// Retain opaque reasoning items (encrypted_content) so stateless
+	// clients can replay them back on the next request. OpenAI rejects the
+	// include with a hard 400 on non-reasoning models, so it is gated on the
+	// model family. Store stays at its default: no hosted conversation
+	// storage is required.
+	if supportsEncryptedReasoning(req.Model) {
+		params.Include = []responses.ResponseIncludable{responses.ResponseIncludableReasoningEncryptedContent}
 	}
 
 	if req.System != "" {
@@ -156,7 +169,24 @@ func convertOpenAIResponsesRequest(req *Request) responses.ResponseNewParams {
 		}
 	}
 
-	return params
+	return params, nil
+}
+
+// supportsEncryptedReasoning reports whether the model family supports the
+// reasoning.encrypted_content include: reasoning model families o1, o3, o4,
+// gpt-5, and codex, matched by documented case-insensitive prefixes
+// ("gpt-5.1", "o3-mini", and "codex-mini" match; "gpt-4o", "gpt-4.1", and
+// "gpt-3.5-turbo" do not). The check is default-deny: omitting the include
+// degrades gracefully (the response simply carries no encrypted_content),
+// while sending it to a non-reasoning model is a hard 400.
+func supportsEncryptedReasoning(model string) bool {
+	m := strings.ToLower(model)
+	for _, prefix := range []string{"o1", "o3", "o4", "gpt-5", "codex"} {
+		if strings.HasPrefix(m, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func reasoningEffort(budget int) openai.ReasoningEffort {
@@ -170,7 +200,7 @@ func reasoningEffort(budget int) openai.ReasoningEffort {
 	}
 }
 
-func convertResponsesInput(messages []Message) responses.ResponseInputParam {
+func convertResponsesInput(messages []Message) (responses.ResponseInputParam, error) {
 	items := make(responses.ResponseInputParam, 0, len(messages))
 	for _, msg := range messages {
 		role := responses.EasyInputMessageRoleUser
@@ -183,20 +213,35 @@ func convertResponsesInput(messages []Message) responses.ResponseInputParam {
 		// Responses API accepts for multimodal). Otherwise preserve the
 		// pre-multimodal behavior of emitting each text block as its own item.
 		hasMedia := false
+		hasReplay := false
 		for _, block := range msg.Blocks {
 			if block.Type == ContentTypeImage || block.Type == ContentTypePDF {
 				hasMedia = true
-				break
+			}
+			if block.Replay != nil {
+				hasReplay = true
 			}
 		}
 
 		if hasMedia {
-			items = append(items, buildResponsesMultipartMessage(role, msg))
-		} else if msg.Content != "" {
+			items = append(items, buildResponsesMultipartMessage(role, msg, hasReplay))
+		} else if msg.Content != "" && !hasReplay {
 			items = append(items, responseMessage(role, msg.Content))
 		}
 
 		for _, block := range msg.Blocks {
+			// Replay envelopes carry the provider's raw item and are
+			// authoritative: decode and emit the item verbatim (preserving
+			// id, phase, and encrypted bytes via the SDK's raw-JSON
+			// override) instead of re-deriving it from normalized fields.
+			if block.Replay != nil {
+				var item responses.ResponseInputItemUnion
+				if err := json.Unmarshal(block.Replay.Data, &item); err != nil {
+					return nil, fmt.Errorf("decode replay item: %w", err)
+				}
+				items = append(items, item.ToParam())
+				continue
+			}
 			switch block.Type {
 			case ContentTypeText:
 				if !hasMedia && block.Text != "" {
@@ -210,15 +255,19 @@ func convertResponsesInput(messages []Message) responses.ResponseInputParam {
 			}
 		}
 	}
-	return items
+	return items, nil
 }
 
 // buildResponsesMultipartMessage emits one EasyInputMessage with list-form
 // content (text + image + file parts) for a message that has at least one
 // image or PDF block. validateRequest has already gated unsupported media.
-func buildResponsesMultipartMessage(role responses.EasyInputMessageRole, msg Message) responses.ResponseInputItemUnionParam {
+// When any block carries a Replay envelope (hasReplay), the raw replay items
+// are authoritative, so the normalized msg.Content text part is skipped to
+// avoid duplicating the replayed message text on the wire; media parts and
+// independent text blocks still emit.
+func buildResponsesMultipartMessage(role responses.EasyInputMessageRole, msg Message, hasReplay bool) responses.ResponseInputItemUnionParam {
 	var content responses.ResponseInputMessageContentListParam
-	if msg.Content != "" {
+	if msg.Content != "" && !hasReplay {
 		content = append(content, responses.ResponseInputContentUnionParam{
 			OfInputText: &responses.ResponseInputTextParam{Text: msg.Content},
 		})
@@ -582,7 +631,15 @@ func convertOpenAIResponse(resp *openai.ChatCompletion) *Response {
 	return result
 }
 
-func convertOpenAIResponsesResponse(resp *responses.Response) *Response {
+// convertOpenAIResponsesResponse converts a Responses API result to our
+// Response. Every output item yields exactly one mux block, in order, and
+// carries a Replay envelope with the item's raw JSON pinned to the effective
+// requested model (requestModel), so reasoning items, message phase, and
+// item IDs survive to the next request byte-for-byte. Reasoning items are
+// replay-only; message output_text joins into one text block (empty text is
+// still emitted so the envelope has a block to ride on); function_call keeps
+// its normalized parse keyed by call_id, with the item ID staying raw-only.
+func convertOpenAIResponsesResponse(resp *responses.Response, requestModel string) *Response {
 	result := &Response{
 		ID:    resp.ID,
 		Model: resp.Model,
@@ -596,19 +653,35 @@ func convertOpenAIResponsesResponse(resp *responses.Response) *Response {
 	hasTools := false
 	hasRefusal := false
 	for _, item := range resp.Output {
+		replay := &ProviderReplay{
+			Provider: "openai",
+			Model:    requestModel,
+			Data:     json.RawMessage(item.RawJSON()),
+		}
 		switch item.Type {
 		case "message":
+			var text strings.Builder
 			for _, content := range item.Content {
-				if content.Type == "output_text" && content.Text != "" {
-					result.Content = append(result.Content, ContentBlock{
-						Type: ContentTypeText,
-						Text: content.Text,
-					})
+				if content.Type == "output_text" {
+					if text.Len() > 0 {
+						text.WriteString("\n")
+					}
+					text.WriteString(content.Text)
 				}
 				if content.Type == "refusal" {
 					hasRefusal = true
 				}
 			}
+			result.Content = append(result.Content, ContentBlock{
+				Type:   ContentTypeText,
+				Text:   text.String(),
+				Replay: replay,
+			})
+		case "reasoning":
+			result.Content = append(result.Content, ContentBlock{
+				Type:   ContentTypeReplay,
+				Replay: replay,
+			})
 		case "function_call":
 			// v3 made item.Arguments a tagged union (OfString / OfResponseToolSearchCallArguments).
 			// For function_call items the arguments are a JSON-encoded string in OfString.
@@ -618,10 +691,11 @@ func convertOpenAIResponsesResponse(resp *responses.Response) *Response {
 				input = make(map[string]any)
 			}
 			result.Content = append(result.Content, ContentBlock{
-				Type:  ContentTypeToolUse,
-				ID:    item.CallID,
-				Name:  item.Name,
-				Input: input,
+				Type:   ContentTypeToolUse,
+				ID:     item.CallID,
+				Name:   item.Name,
+				Input:  input,
+				Replay: replay,
 			})
 			hasTools = true
 		}
@@ -675,8 +749,14 @@ func (o *OpenAIClient) CreateMessage(ctx context.Context, req *Request) (*Respon
 	if err := validateOpenAISources("openai", true, req); err != nil {
 		return nil, err
 	}
+	if err := validateReplay("openai", req.Model, req.Messages); err != nil {
+		return nil, err
+	}
 
-	params := convertOpenAIResponsesRequest(req)
+	params, err := convertOpenAIResponsesRequest(req)
+	if err != nil {
+		return nil, err
+	}
 	resp, err := o.client.Responses.New(ctx, params)
 	if err != nil {
 		return nil, err
@@ -685,7 +765,7 @@ func (o *OpenAIClient) CreateMessage(ctx context.Context, req *Request) (*Respon
 		return nil, err
 	}
 
-	return convertOpenAIResponsesResponse(resp), nil
+	return convertOpenAIResponsesResponse(resp, req.Model), nil
 }
 
 // CreateMessageStream sends a message and returns a channel of streaming events.
@@ -700,13 +780,19 @@ func (o *OpenAIClient) CreateMessageStream(ctx context.Context, req *Request) (<
 	if err := validateRequest("openai", o.Capabilities(), req); err != nil {
 		return nil, err
 	}
-	// CreateMessageStream uses Chat Completions, which has no URL form for
-	// PDFs — only inline base64. URL PDFs are rejected pre-flight.
+	// CreateMessageStream streams over the Responses API. URL-form PDFs are
+	// rejected pre-flight on this path; only inline base64 is sent.
 	if err := validateOpenAISources("openai", false, req); err != nil {
 		return nil, err
 	}
+	if err := validateReplay("openai", req.Model, req.Messages); err != nil {
+		return nil, err
+	}
 
-	params := convertOpenAIResponsesRequest(req)
+	params, err := convertOpenAIResponsesRequest(req)
+	if err != nil {
+		return nil, err
+	}
 	stream := o.client.Responses.NewStreaming(ctx, params)
 
 	eventChan := make(chan StreamEvent, 100)
@@ -773,7 +859,7 @@ func (o *OpenAIClient) CreateMessageStream(ctx context.Context, req *Request) (<
 				if !messageStarted {
 					eventChan <- StreamEvent{Type: EventMessageStart}
 				}
-				resp := convertOpenAIResponsesResponse(&event.Response)
+				resp := convertOpenAIResponsesResponse(&event.Response, req.Model)
 				eventChan <- StreamEvent{
 					Type:     EventMessageStop,
 					Response: resp,
