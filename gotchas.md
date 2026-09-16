@@ -55,3 +55,65 @@ directory `kata show` finds nothing and looks like lost data. `kata show
 DEPENDENTS.md is stale. The corrected local-consumer inventory is appendix
 B.2 of the pass-2 report: eight unlisted Go consumers, and
 `agent-class/agents/mux` is a copy of mux, not a consumer.
+
+## Subagent worktrees refuse the GOROOT wrapper (2026-09-16)
+
+The Go toolchain here needs `env -u GOROOT mise exec -- <cmd>`: the inherited
+`GOROOT` points at a Go 1.26.5 install that no longer exists, so both bare `go`
+and `mise exec -- go` fail. That prefix works in the main checkout.
+
+Inside a harness agent worktree it does not. The sandbox rejects `env -u ... --`
+as an unverifiable wrapper around worktree-isolated git operations. Four
+subagents hit this independently. Use `unset GOROOT && mise exec -- <cmd>`, or
+bare `go` after confirming `go version` reports go1.26.6. Hand the substitute to
+subagents in their prompt; otherwise each one rediscovers it and improvises.
+
+## Merging several branches that all edit CHANGELOG.md (2026-09-16)
+
+When a wave of branches each append a bullet to `## [Unreleased]`, expect every
+pair to conflict on CHANGELOG.md and do not read that as trouble. The conflicts
+have an empty base — both sides add where BASE has nothing — so a sequential
+merge resolves them by keeping both. `git merge-tree --write-tree --name-only
+<a> <b>` measures this in seconds; predicting it from file names gets it wrong.
+
+**Merge the branch that adds a whole new section LAST.** A branch adding, say,
+`### Security` sits at the end of `## [Unreleased]`. Merged early, it swallows
+every later addition that anchors at end-of-section: those bullets land under
+the new heading instead of their own, and nothing complains, because the merge
+is genuinely additive at the text level and wrong only in meaning. This bit us
+once — a `Fixed` entry landed under `Security`. After any additive resolution,
+check each bullet sits under the heading its own branch filed it under.
+
+## Never auto-resolve a code conflict by keeping both sides (2026-09-16)
+
+Git's diff3 output puts text the two sides share *after* the conflict, as
+context. For a Go test file that shared text is the trailing `\t}\n}` — the
+closing braces. Stacking ours-then-theirs leaves one copy of those braces to
+close two function bodies, so the first one never closes:
+
+    agent/transcript_test.go:422:6: expected '(', found TestTranscript...
+    agent/transcript_test.go:445:3: expected '}', found 'EOF'
+
+Both sides were pure additions and the conflict was additive by every textual
+test. It still produced a file that does not compile. An automated "keep both"
+pass is safe only for prose whose units are whole lines; code conflicts get
+resolved by hand, or by rebasing one branch onto the other so there is no
+conflict left to resolve.
+
+## Go toolchain pinning and what govulncheck can see (2026-09-16)
+
+`GOTOOLCHAIN=auto` (the default) silently upgrades any `go` invocation to the
+`toolchain` line in go.mod, whatever is installed. Measured: against a go.mod
+declaring `go 1.25.0` + `toolchain go1.26.6`, a 1.25.0 binary reports
+`go1.26.6`. So pinning a CI job by Go version alone does NOT test that version —
+it needs `GOTOOLCHAIN=local`, which honours the base binary and ignores a higher
+`toolchain` directive as long as the `go` line is satisfied.
+
+The `toolchain` directive applies only to the main module. Nothing that requires
+mux as a dependency inherits it.
+
+govulncheck v1.8.0 itself requires Go >= 1.26 to run, so `make vulncheck` always
+executes under the pinned toolchain and scans that standard library — never the
+declared floor's. A floor below a stdlib advisory's fix threshold is therefore
+invisible to every gate in this repo. Say so in writing rather than implying CI
+covers it.
