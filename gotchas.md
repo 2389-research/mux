@@ -84,6 +84,22 @@ is genuinely additive at the text level and wrong only in meaning. This bit us
 once — a `Fixed` entry landed under `Security`. After any additive resolution,
 check each bullet sits under the heading its own branch filed it under.
 
+## Never auto-resolve a code conflict by keeping both sides (2026-09-16)
+
+Git's diff3 output puts text the two sides share *after* the conflict, as
+context. For a Go test file that shared text is the trailing `\t}\n}` — the
+closing braces. Stacking ours-then-theirs leaves one copy of those braces to
+close two function bodies, so the first one never closes:
+
+    agent/transcript_test.go:422:6: expected '(', found TestTranscript...
+    agent/transcript_test.go:445:3: expected '}', found 'EOF'
+
+Both sides were pure additions and the conflict was additive by every textual
+test. It still produced a file that does not compile. An automated "keep both"
+pass is safe only for prose whose units are whole lines; code conflicts get
+resolved by hand, or by rebasing one branch onto the other so there is no
+conflict left to resolve.
+
 ## Go toolchain pinning and what govulncheck can see (2026-09-16)
 
 `GOTOOLCHAIN=auto` (the default) silently upgrades any `go` invocation to the
