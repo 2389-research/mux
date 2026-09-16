@@ -96,7 +96,7 @@ func (c *httpClient) Start(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.state != transportStarting {
-		return transportError(c.state, c.cause)
+		return handshakeInterrupted(c.state, c.cause)
 	}
 	c.state = transportRunning
 	return nil
@@ -108,7 +108,7 @@ func (c *httpClient) publishSession(sessionID string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.state != transportStarting {
-		return transportError(c.state, c.cause)
+		return handshakeInterrupted(c.state, c.cause)
 	}
 	c.sessionID = sessionID
 	return nil
