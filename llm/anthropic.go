@@ -731,8 +731,13 @@ func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request)
 					})
 					return
 				}
-				for idx, block := range acc.blocks {
-					if !block.stopped {
+				indexes := make([]int, 0, len(acc.blocks))
+				for idx := range acc.blocks {
+					indexes = append(indexes, idx)
+				}
+				sort.Ints(indexes)
+				for _, idx := range indexes {
+					if !acc.blocks[idx].stopped {
 						sendStreamEvent(ctx, eventChan, StreamEvent{
 							Type:  EventError,
 							Error: &StreamProtocolError{Provider: "anthropic", BlockID: anthropicBlockID(idx), Reason: reasonMessageStopUnfinished},

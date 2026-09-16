@@ -218,6 +218,16 @@ func TestAnthropicStreamMalformed(t *testing.T) {
 		// that first, valid message_stop is expected to succeed even though
 		// the stream as a whole is malformed.
 		wantMessageStop bool
+		// wantReason pins the case to its specific StreamProtocolError.Reason
+		// constant. Without this, a case only proves some error fired: the
+		// post-loop "stream ended early" fallback fires for almost any
+		// truncated fixture, so a broken specific check can go undetected
+		// while the case still passes for the wrong reason.
+		wantReason string
+		// wantBlockID is asserted whenever the reason is block-scoped. Left
+		// at its zero value "" for the message-level reasons, which never
+		// set BlockID.
+		wantBlockID string
 	}{
 		{
 			name: "delta for unstarted block",
@@ -225,6 +235,8 @@ func TestAnthropicStreamMalformed(t *testing.T) {
 				{"message_start", `{"type":"message_start","message":{"id":"m1","type":"message","role":"assistant","content":[],"model":"fixture","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}`},
 				{"content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`},
 			},
+			wantReason:  reasonDeltaUnstartedBlock,
+			wantBlockID: "anthropic:0",
 		},
 		{
 			name: "stop for unstarted block",
@@ -232,6 +244,8 @@ func TestAnthropicStreamMalformed(t *testing.T) {
 				{"message_start", `{"type":"message_start","message":{"id":"m1","type":"message","role":"assistant","content":[],"model":"fixture","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}`},
 				{"content_block_stop", `{"type":"content_block_stop","index":0}`},
 			},
+			wantReason:  reasonStopUnstartedBlock,
+			wantBlockID: "anthropic:0",
 		},
 		{
 			name: "repeated block start",
@@ -240,6 +254,8 @@ func TestAnthropicStreamMalformed(t *testing.T) {
 				{"content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`},
 				{"content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`},
 			},
+			wantReason:  reasonDuplicateBlockStart,
+			wantBlockID: "anthropic:0",
 		},
 		{
 			name: "repeated block stop",
@@ -249,6 +265,57 @@ func TestAnthropicStreamMalformed(t *testing.T) {
 				{"content_block_stop", `{"type":"content_block_stop","index":0}`},
 				{"content_block_stop", `{"type":"content_block_stop","index":0}`},
 			},
+			wantReason:  reasonDuplicateBlockStop,
+			wantBlockID: "anthropic:0",
+		},
+		{
+			name: "delta after block stop",
+			events: []struct{ kind, data string }{
+				{"message_start", `{"type":"message_start","message":{"id":"m1","type":"message","role":"assistant","content":[],"model":"fixture","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}`},
+				{"content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`},
+				{"content_block_stop", `{"type":"content_block_stop","index":0}`},
+				{"content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`},
+			},
+			wantReason:  reasonDeltaAfterStop,
+			wantBlockID: "anthropic:0",
+		},
+		{
+			name: "unrecognized delta variant",
+			events: []struct{ kind, data string }{
+				{"message_start", `{"type":"message_start","message":{"id":"m1","type":"message","role":"assistant","content":[],"model":"fixture","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}`},
+				{"content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`},
+				{"content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{}}}`},
+			},
+			wantReason:  reasonUnknownDeltaVariant,
+			wantBlockID: "anthropic:0",
+		},
+		{
+			name: "message_stop without message_start",
+			events: []struct{ kind, data string }{
+				{"message_stop", `{"type":"message_stop"}`},
+			},
+			wantReason: reasonMessageStopNoStart,
+		},
+		{
+			// Two blocks stopped, two left open: the lowest UNFINISHED index
+			// (2) must be reported, not merely the lowest of all indexes.
+			// Regression coverage for reporting this deterministically
+			// regardless of Go's randomized map iteration order lives in
+			// TestAnthropicStreamMessageStopUnfinishedBlockIsDeterministic,
+			// which repeats this exact shape many times in one process.
+			name: "message_stop with unfinished block",
+			events: []struct{ kind, data string }{
+				{"message_start", `{"type":"message_start","message":{"id":"m1","type":"message","role":"assistant","content":[],"model":"fixture","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}`},
+				{"content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`},
+				{"content_block_stop", `{"type":"content_block_stop","index":0}`},
+				{"content_block_start", `{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`},
+				{"content_block_stop", `{"type":"content_block_stop","index":1}`},
+				{"content_block_start", `{"type":"content_block_start","index":2,"content_block":{"type":"text","text":""}}`},
+				{"content_block_start", `{"type":"content_block_start","index":3,"content_block":{"type":"text","text":""}}`},
+				{"message_stop", `{"type":"message_stop"}`},
+			},
+			wantReason:  reasonMessageStopUnfinished,
+			wantBlockID: "anthropic:2",
 		},
 		{
 			name: "duplicate message_stop",
@@ -260,6 +327,8 @@ func TestAnthropicStreamMalformed(t *testing.T) {
 				{"message_stop", `{"type":"message_stop"}`},
 			},
 			wantMessageStop: true,
+			wantReason:      reasonEventAfterTerminal,
+			wantBlockID:     "anthropic:0",
 		},
 		{
 			name: "eof before block stop",
@@ -268,6 +337,7 @@ func TestAnthropicStreamMalformed(t *testing.T) {
 				{"content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`},
 				{"content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`},
 			},
+			wantReason: reasonStreamEndedEarly,
 		},
 		{
 			name: "eof before message_stop with block stopped",
@@ -277,6 +347,7 @@ func TestAnthropicStreamMalformed(t *testing.T) {
 				{"content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`},
 				{"content_block_stop", `{"type":"content_block_stop","index":0}`},
 			},
+			wantReason: reasonStreamEndedEarly,
 		},
 		{
 			name: "partial tool input object",
@@ -286,6 +357,8 @@ func TestAnthropicStreamMalformed(t *testing.T) {
 				{"content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{"}}`},
 				{"content_block_stop", `{"type":"content_block_stop","index":0}`},
 			},
+			wantReason:  reasonInvalidToolInput,
+			wantBlockID: "anthropic:0",
 		},
 		{
 			name: "null tool input object",
@@ -295,6 +368,8 @@ func TestAnthropicStreamMalformed(t *testing.T) {
 				{"content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"null"}}`},
 				{"content_block_stop", `{"type":"content_block_stop","index":0}`},
 			},
+			wantReason:  reasonInvalidToolInput,
+			wantBlockID: "anthropic:0",
 		},
 		{
 			name: "array tool input object",
@@ -304,6 +379,8 @@ func TestAnthropicStreamMalformed(t *testing.T) {
 				{"content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"[]"}}`},
 				{"content_block_stop", `{"type":"content_block_stop","index":0}`},
 			},
+			wantReason:  reasonInvalidToolInput,
+			wantBlockID: "anthropic:0",
 		},
 		{
 			name: "no start info and no deltas",
@@ -312,14 +389,8 @@ func TestAnthropicStreamMalformed(t *testing.T) {
 				{"content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call-1","name":"get_weather"}}`},
 				{"content_block_stop", `{"type":"content_block_stop","index":0}`},
 			},
-		},
-		{
-			name: "unrecognized delta variant",
-			events: []struct{ kind, data string }{
-				{"message_start", `{"type":"message_start","message":{"id":"m1","type":"message","role":"assistant","content":[],"model":"fixture","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}`},
-				{"content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`},
-				{"content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{}}}`},
-			},
+			wantReason:  reasonInvalidToolInput,
+			wantBlockID: "anthropic:0",
 		},
 	}
 
@@ -367,7 +438,80 @@ func TestAnthropicStreamMalformed(t *testing.T) {
 			if sawMessageStop != tc.wantMessageStop {
 				t.Errorf("sawMessageStop = %v, want %v", sawMessageStop, tc.wantMessageStop)
 			}
+			if protocolErr != nil {
+				if protocolErr.Reason != tc.wantReason {
+					t.Errorf("Reason = %q, want %q", protocolErr.Reason, tc.wantReason)
+				}
+				if protocolErr.BlockID != tc.wantBlockID {
+					t.Errorf("BlockID = %q, want %q", protocolErr.BlockID, tc.wantBlockID)
+				}
+			}
 		})
+	}
+}
+
+// TestAnthropicStreamMessageStopUnfinishedBlockIsDeterministic repeats a
+// message_stop with two unfinished blocks (indexes 2 and 3; 0 and 1 are
+// properly stopped) many times in one process. The unfinished-block scan
+// ranges over an accumulator map, and Go randomizes map iteration order per
+// range: a single run can land on the correct lowest-unfinished-index answer
+// by chance even when the scan does not sort first, so one green execution
+// does not prove determinism. Before llm/anthropic.go sorted the indexes,
+// an equivalent 4-block fixture reported anthropic:0/1/2/3 in a roughly
+// 131/21/23/25 split across 200 runs instead of the correct, constant
+// anthropic:2.
+func TestAnthropicStreamMessageStopUnfinishedBlockIsDeterministic(t *testing.T) {
+	events := []struct{ kind, data string }{
+		{"message_start", `{"type":"message_start","message":{"id":"m1","type":"message","role":"assistant","content":[],"model":"fixture","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}`},
+		{"content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`},
+		{"content_block_stop", `{"type":"content_block_stop","index":0}`},
+		{"content_block_start", `{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`},
+		{"content_block_stop", `{"type":"content_block_stop","index":1}`},
+		{"content_block_start", `{"type":"content_block_start","index":2,"content_block":{"type":"text","text":""}}`},
+		{"content_block_start", `{"type":"content_block_start","index":3,"content_block":{"type":"text","text":""}}`},
+		{"message_stop", `{"type":"message_stop"}`},
+	}
+
+	const iterations = 50
+	for i := 0; i < iterations; i++ {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			writeIdentitySSE(t, w, events)
+		}))
+
+		client := &AnthropicClient{
+			client: anthropic.NewClient(
+				option.WithAPIKey("fixture"),
+				option.WithBaseURL(server.URL),
+				option.WithMaxRetries(0),
+			),
+			model: "fixture",
+		}
+
+		eventChan, err := client.CreateMessageStream(context.Background(), &Request{
+			Messages: []Message{NewUserMessage("go")},
+		})
+		if err != nil {
+			server.Close()
+			t.Fatalf("iteration %d: CreateMessageStream: %v", i, err)
+		}
+
+		var protocolErr *StreamProtocolError
+		for event := range eventChan {
+			if event.Type == EventError {
+				errors.As(event.Error, &protocolErr)
+			}
+		}
+		server.Close()
+
+		if protocolErr == nil {
+			t.Fatalf("iteration %d: expected a protocol error, got none", i)
+		}
+		if protocolErr.Reason != reasonMessageStopUnfinished {
+			t.Fatalf("iteration %d: Reason = %q, want %q", i, protocolErr.Reason, reasonMessageStopUnfinished)
+		}
+		if protocolErr.BlockID != "anthropic:2" {
+			t.Fatalf("iteration %d: BlockID = %q, want \"anthropic:2\" (lowest unfinished index)", i, protocolErr.BlockID)
+		}
 	}
 }
 
