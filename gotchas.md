@@ -294,3 +294,30 @@ still passing because those tests also only compare bytes. One corpus got fixed
 while its twin kept pinning the invalid value. When golden data lives in two
 places, fixing one and not the other is worse than fixing neither: the package now
 disagrees with itself and every test is green.
+
+## "Same shape, so the same rule applies" is two claims (2026-09-16)
+
+A review of mux#ac20 flagged that `ToolOutcomeUnknownPayload.EvidenceRef` had no
+present-but-empty check while its twin on `ToolResultPayload`, seven lines above in the
+same switch, had just gained one. Identical type, identical `omitempty`, identical JSON
+name. The prescription was: extend the check.
+
+The shape matched; the rule did not. `record.schema.json` constrains exactly three payload
+kinds. Listing every per-kind block settles it in one command:
+
+    grep -nE '"const"\s*:\s*"[a-z_]+\.[a-z_]+"' <schema>
+
+Three hits per schema copy: `message.delta`, `tool.intent`, `tool.result`. `tool.result`'s
+`evidence_ref` has `minLength: 1`; `tool.outcome_unknown` has no payload block at all. So
+the sibling check could not be justified as "implementing the schema" — and `ValidateRecord`
+takes a `Binding`, making it an ingestion gate where extra strictness rejects records a
+conforming host may legitimately send.
+
+The gap was still real, on other grounds: `Reason` was already required for that kind with
+no schema backing, so the local-strictness decision had already been made, and an evidence
+pointer that points nowhere is precisely what the durability contract refuses. Same fix,
+different reason, and the reason belongs in the comment — the next reader needs to know
+where the schema stops and mux's own rule starts.
+
+A finding that cites a spec makes two claims: the gap exists, and the spec covers it.
+Reviewers check the first one.
