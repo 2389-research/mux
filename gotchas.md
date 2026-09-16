@@ -55,3 +55,15 @@ directory `kata show` finds nothing and looks like lost data. `kata show
 DEPENDENTS.md is stale. The corrected local-consumer inventory is appendix
 B.2 of the pass-2 report: eight unlisted Go consumers, and
 `agent-class/agents/mux` is a copy of mux, not a consumer.
+
+## Subagent worktrees refuse the GOROOT wrapper (2026-09-16)
+
+The Go toolchain here needs `env -u GOROOT mise exec -- <cmd>`: the inherited
+`GOROOT` points at a Go 1.26.5 install that no longer exists, so both bare `go`
+and `mise exec -- go` fail. That prefix works in the main checkout.
+
+Inside a harness agent worktree it does not. The sandbox rejects `env -u ... --`
+as an unverifiable wrapper around worktree-isolated git operations. Four
+subagents hit this independently. Use `unset GOROOT && mise exec -- <cmd>`, or
+bare `go` after confirming `go version` reports go1.26.6. Hand the substitute to
+subagents in their prompt; otherwise each one rediscovers it and improvises.
