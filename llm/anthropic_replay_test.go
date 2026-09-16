@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -339,5 +340,169 @@ func TestAnthropicThinkingReplay_SecondRequestKeepsSignature(t *testing.T) {
 	result := sent.Messages[2]
 	if len(result.Content) != 1 || result.Content[0]["tool_use_id"] != "toolu_sig" {
 		t.Errorf("tool result lost its pairing: %v", result.Content)
+	}
+}
+
+// sigTwoTurnServer answers the first request with firstBody and captures the
+// second request's body, so a test can assert what a replayed history sends.
+// It reports the request count so a preflight rejection is visible as a turn
+// that never reached the wire.
+func sigTwoTurnServer(t *testing.T, firstBody string) (*httptest.Server, func() (int, []byte)) {
+	t.Helper()
+	var mu sync.Mutex
+	var requests int
+	var secondBody []byte
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		mu.Lock()
+		requests++
+		turn := requests
+		if turn == 2 {
+			secondBody = body
+		}
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		if turn == 1 {
+			_, _ = w.Write([]byte(firstBody))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"msg_done","type":"message","role":"assistant","model":"claude-haiku-4-5","stop_reason":"end_turn","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":20,"output_tokens":3}}`))
+	}))
+	t.Cleanup(server.Close)
+
+	return server, func() (int, []byte) {
+		mu.Lock()
+		defer mu.Unlock()
+		return requests, secondBody
+	}
+}
+
+// sigPlainToolTurnBody is a tool turn with no thinking anywhere in it.
+const sigPlainToolTurnBody = `{"id":"msg_plain","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","stop_reason":"tool_use","content":[{"type":"text","text":"hello"},{"type":"tool_use","id":"toolu_plain","name":"read_file","input":{"path":"/tmp/x"}}],"usage":{"input_tokens":12,"output_tokens":34}}`
+
+// sigReplayHistory runs one request against server, then replays the response
+// as assistant history (through JSON, as a resumed agent would) under model.
+func sigReplayHistory(t *testing.T, server *httptest.Server, model string, edit func([]ContentBlock)) error {
+	t.Helper()
+	client := sigAnthropicClient(server.URL, "claude-sonnet-4-20250514")
+	first, err := client.CreateMessage(context.Background(), &Request{
+		Messages: []Message{NewUserMessage("read /tmp/x")},
+		Tools:    []ToolDefinition{{Name: "read_file", Description: "read a file"}},
+	})
+	if err != nil {
+		t.Fatalf("first CreateMessage: %v", err)
+	}
+	if edit != nil {
+		edit(first.Content)
+	}
+
+	history := []Message{
+		NewUserMessage("read /tmp/x"),
+		{Role: RoleAssistant, Blocks: first.Content},
+	}
+	encoded, err := json.Marshal(history)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reloaded []Message
+	if err := json.Unmarshal(encoded, &reloaded); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = client.CreateMessage(context.Background(), &Request{
+		Model:    model,
+		Messages: reloaded,
+		Tools:    []ToolDefinition{{Name: "read_file", Description: "read a file"}},
+	})
+	return err
+}
+
+func TestAnthropicThinkingReplay_TextOnlyHistorySurvivesModelSwitch(t *testing.T) {
+	server, captured := sigTwoTurnServer(t, sigPlainToolTurnBody)
+
+	// A turn with no thinking in it carries no opaque bytes, so switching
+	// models must not fail preflight.
+	if err := sigReplayHistory(t, server, "claude-haiku-4-5", nil); err != nil {
+		t.Fatalf("model switch on a thinking-free history: %v", err)
+	}
+
+	total, body := captured()
+	if total != 2 {
+		t.Fatalf("expected 2 requests, got %d", total)
+	}
+	var sent sigSentMessages
+	if err := json.Unmarshal(body, &sent); err != nil {
+		t.Fatalf("decode second request body: %v\n%s", err, body)
+	}
+	assistant := sent.Messages[1]
+	if len(assistant.Content) != 2 {
+		t.Fatalf("assistant turn replayed %d blocks, want text and tool_use: %s", len(assistant.Content), body)
+	}
+	if assistant.Content[0]["text"] != "hello" {
+		t.Errorf("text block did not replay: %v", assistant.Content[0])
+	}
+	if assistant.Content[1]["id"] != "toolu_plain" {
+		t.Errorf("tool_use block did not replay: %v", assistant.Content[1])
+	}
+}
+
+func TestAnthropicThinkingReplay_CallerEditToAssistantTextReachesWire(t *testing.T) {
+	server, captured := sigTwoTurnServer(t, sigPlainToolTurnBody)
+
+	// Text and tool_use round-trip through normalized fields, so a caller
+	// rewriting them is authoritative — an envelope would discard the edit.
+	err := sigReplayHistory(t, server, "claude-sonnet-4-20250514", func(blocks []ContentBlock) {
+		for i := range blocks {
+			switch blocks[i].Type {
+			case ContentTypeText:
+				blocks[i].Text = "EDITED BY CALLER"
+			case ContentTypeToolUse:
+				blocks[i].Input = map[string]any{"path": "/edited"}
+			}
+		}
+	})
+	if err != nil {
+		t.Fatalf("second CreateMessage: %v", err)
+	}
+
+	total, body := captured()
+	if total != 2 {
+		t.Fatalf("expected 2 requests, got %d", total)
+	}
+	var sent sigSentMessages
+	if err := json.Unmarshal(body, &sent); err != nil {
+		t.Fatalf("decode second request body: %v\n%s", err, body)
+	}
+	assistant := sent.Messages[1]
+	if assistant.Content[0]["text"] != "EDITED BY CALLER" {
+		t.Errorf("caller edit to assistant text was discarded: %v", assistant.Content[0])
+	}
+	input, _ := assistant.Content[1]["input"].(map[string]any)
+	if input["path"] != "/edited" {
+		t.Errorf("caller edit to tool input was discarded: %v", assistant.Content[1])
+	}
+}
+
+func TestAnthropicThinkingReplay_ModelSwitchRejectsSignedThinking(t *testing.T) {
+	server, captured := sigTwoTurnServer(t, sigSignedThinkingBody)
+
+	err := sigReplayHistory(t, server, "claude-haiku-4-5", nil)
+	var mismatch *ErrReplayMismatch
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("want *ErrReplayMismatch, got %v", err)
+	}
+	if mismatch.Model != "claude-haiku-4-5" || mismatch.ReplayModel != "claude-sonnet-4-20250514" {
+		t.Errorf("mismatch names the wrong identities: %+v", mismatch)
+	}
+
+	// Preflight, so the second turn never reached the wire.
+	if total, _ := captured(); total != 1 {
+		t.Errorf("expected the rejected turn to send nothing, got %d requests", total)
 	}
 }

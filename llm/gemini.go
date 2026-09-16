@@ -3,6 +3,7 @@
 package llm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -185,9 +186,35 @@ func convertMessage(msg Message) (*genai.Content, error) {
 	}, nil
 }
 
+// validateGeminiReplayPayload checks that a replay payload really is a
+// genai.Part. A Part carries no "type" discriminator to key off, so the check
+// is structural: the payload must be a non-empty JSON object and every field
+// in it must be one genai.Part declares. The field set comes from the SDK's
+// own struct tags rather than a list kept by hand here, so it cannot drift
+// from the SDK. Without this, "{}" and {"totally":"unrelated"} both decoded
+// into an empty Part and shipped to the API as "{}".
+func validateGeminiReplayPayload(field string, data json.RawMessage) error {
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(data, &keys); err != nil || len(keys) == 0 {
+		return fmt.Errorf("%s: unsupported replay item payload: %.32q", field, data)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var part genai.Part
+	if err := decoder.Decode(&part); err != nil {
+		return fmt.Errorf("%s: unsupported replay item payload: %.32q", field, data)
+	}
+	return nil
+}
+
 // restoreGeminiPart rebuilds a genai.Part from a replay envelope's raw JSON,
-// so the thought signature reaches the API as the exact bytes it sent.
+// so the thought signature reaches the API as the exact bytes it sent. The
+// payload is re-checked here rather than trusted from preflight, because a
+// caller can reach convertMessage directly.
 func restoreGeminiPart(replay *ProviderReplay) (*genai.Part, error) {
+	if err := validateGeminiReplayPayload("gemini replay part", replay.Data); err != nil {
+		return nil, err
+	}
 	var part genai.Part
 	if err := json.Unmarshal(replay.Data, &part); err != nil {
 		return nil, fmt.Errorf("gemini: decoding replay part: %w", err)

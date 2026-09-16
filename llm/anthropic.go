@@ -49,14 +49,39 @@ func NewAnthropicClientWithBaseURL(apiKey, model, baseURL string) *AnthropicClie
 	}
 }
 
-// anthropicReplayableTypes are the content block types convertResponse stamps
-// with a replay envelope and convertRequest can restore. Anything else in a
-// replay payload is rejected rather than sent as an empty block.
-var anthropicReplayableTypes = map[string]bool{
-	"text":              true,
+// anthropicSignedTypes are the content block types convertResponse stamps with
+// a replay envelope and convertRequest can restore. They hold opaque bytes mux
+// cannot rebuild: a thinking signature, or redacted thinking's encrypted data.
+//
+// Text and tool_use are deliberately absent. Both round-trip losslessly through
+// their normalized fields, so an envelope would buy nothing and cost plenty: it
+// would discard a caller's edits to assistant text or tool input, and make a
+// model switch fail preflight on a history containing no thinking at all.
+//
+// Anything else in a replay payload is rejected rather than sent as an empty
+// block.
+var anthropicSignedTypes = map[string]bool{
 	"thinking":          true,
 	"redacted_thinking": true,
-	"tool_use":          true,
+}
+
+// anthropicBlockReplay returns the envelope for a block whose bytes must reach
+// the API unmodified, and nil for one mux can rebuild. A block the SDK did not
+// decode from the wire (hand-built in a test, or a stream snapshot) has no raw
+// JSON to preserve, so it is left unstamped rather than stamped empty.
+func anthropicBlockReplay(block anthropic.ContentBlockUnion, requestModel string) *ProviderReplay {
+	if !anthropicSignedTypes[block.Type] {
+		return nil
+	}
+	raw := block.RawJSON()
+	if raw == "" {
+		return nil
+	}
+	return &ProviderReplay{
+		Provider: "anthropic",
+		Model:    requestModel,
+		Data:     json.RawMessage(raw),
+	}
 }
 
 // convertRequest converts our Request to Anthropic's MessageNewParams.
@@ -177,7 +202,7 @@ func restoreAnthropicBlock(replay *ProviderReplay) (anthropic.ContentBlockParamU
 	if err := json.Unmarshal(replay.Data, &item); err != nil {
 		return anthropic.ContentBlockParamUnion{}, fmt.Errorf("anthropic: decoding replay block: %w", err)
 	}
-	if !anthropicReplayableTypes[item.Type] {
+	if !anthropicSignedTypes[item.Type] {
 		return anthropic.ContentBlockParamUnion{}, fmt.Errorf("anthropic: replay block has unsupported type %q", item.Type)
 	}
 	return item.ToParam(), nil
@@ -185,10 +210,11 @@ func restoreAnthropicBlock(replay *ProviderReplay) (anthropic.ContentBlockParamU
 
 // convertResponse converts Anthropic's Message to our Response.
 //
-// Every block it recognizes carries a replay envelope holding the block's
-// unmodified JSON, pinned to requestModel (the effective requested model, not
-// the returned snapshot name). That is what lets a thinking block and its
-// signature survive a tool turn. redacted_thinking has no readable text, so it
+// A thinking or redacted_thinking block carries a replay envelope holding the
+// block's unmodified JSON, pinned to requestModel (the effective requested
+// model, not the returned snapshot name). That is what lets a thinking block
+// and its signature survive a tool turn. Text and tool_use are left normalized
+// — see anthropicSignedTypes. redacted_thinking has no readable text, so it
 // becomes a replay-only block: its encrypted data stays in the envelope and
 // never reaches display text.
 func convertResponse(msg *anthropic.Message, requestModel string) *Response {
@@ -203,22 +229,12 @@ func convertResponse(msg *anthropic.Message, requestModel string) *Response {
 	}
 
 	for _, block := range msg.Content {
-		// A block the SDK did not decode from the wire (hand-built in a test,
-		// or a stream snapshot) has no raw JSON to preserve.
-		var replay *ProviderReplay
-		if raw := block.RawJSON(); raw != "" {
-			replay = &ProviderReplay{
-				Provider: "anthropic",
-				Model:    requestModel,
-				Data:     json.RawMessage(raw),
-			}
-		}
+		replay := anthropicBlockReplay(block, requestModel)
 		switch block.Type {
 		case "text":
 			resp.Content = append(resp.Content, ContentBlock{
-				Type:   ContentTypeText,
-				Text:   block.Text,
-				Replay: replay,
+				Type: ContentTypeText,
+				Text: block.Text,
 			})
 		case "thinking":
 			resp.Content = append(resp.Content, ContentBlock{
@@ -227,6 +243,11 @@ func convertResponse(msg *anthropic.Message, requestModel string) *Response {
 				Replay:   replay,
 			})
 		case "redacted_thinking":
+			// Redacted thinking has nothing to display, so it is worth
+			// carrying only while its encrypted bytes can be replayed.
+			if replay == nil {
+				continue
+			}
 			resp.Content = append(resp.Content, ContentBlock{
 				Type:   ContentTypeReplay,
 				Replay: replay,
@@ -241,11 +262,10 @@ func convertResponse(msg *anthropic.Message, requestModel string) *Response {
 				}
 			}
 			resp.Content = append(resp.Content, ContentBlock{
-				Type:   ContentTypeToolUse,
-				ID:     block.ID,
-				Name:   block.Name,
-				Input:  input,
-				Replay: replay,
+				Type:  ContentTypeToolUse,
+				ID:    block.ID,
+				Name:  block.Name,
+				Input: input,
 			})
 		}
 	}

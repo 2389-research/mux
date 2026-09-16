@@ -6,10 +6,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -230,6 +232,103 @@ func TestGeminiSignedPartReplay_SecondRequestKeepsSignature(t *testing.T) {
 	}
 	if name := gjson.GetBytes(captured, "contents.2.parts.0.functionResponse.name").String(); name != "read_file" {
 		t.Errorf("tool result lost its pairing: %q; body=%s", name, captured)
+	}
+}
+
+func TestGeminiSignedPartReplay_ModelSwitchRejectsSignedPart(t *testing.T) {
+	var mu sync.Mutex
+	var requests int
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(sigGeminiParallelCallsBody()))
+	}))
+	defer server.Close()
+
+	client, err := NewGeminiClientWithBaseURL(context.Background(), "test-key", "gemini-2.5-pro", server.URL)
+	if err != nil {
+		t.Fatalf("NewGeminiClientWithBaseURL: %v", err)
+	}
+
+	first, err := client.CreateMessage(context.Background(), &Request{
+		Messages: []Message{NewUserMessage("read /a and /b")},
+		Tools:    []ToolDefinition{{Name: "read_file", Description: "read a file"}},
+	})
+	if err != nil {
+		t.Fatalf("first CreateMessage: %v", err)
+	}
+
+	_, err = client.CreateMessage(context.Background(), &Request{
+		Model: "gemini-2.5-flash",
+		Messages: []Message{
+			NewUserMessage("read /a and /b"),
+			{Role: RoleAssistant, Blocks: first.Content},
+		},
+	})
+	var mismatch *ErrReplayMismatch
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("want *ErrReplayMismatch, got %v", err)
+	}
+	if mismatch.Model != "gemini-2.5-flash" || mismatch.ReplayModel != "gemini-2.5-pro" {
+		t.Errorf("mismatch names the wrong identities: %+v", mismatch)
+	}
+
+	mu.Lock()
+	total := requests
+	mu.Unlock()
+	if total != 1 {
+		t.Errorf("expected the rejected turn to send nothing, got %d requests", total)
+	}
+}
+
+// TestSigReplayPayloadCheck covers both branches of validateReplay's
+// provider-specific payload check: Gemini parts have no "type" discriminator,
+// every other provider's items do.
+func TestSigReplayPayloadCheck(t *testing.T) {
+	signedPart := `{"functionCall":{"name":"read_file"},"thoughtSignature":"AAH+/w=="}`
+
+	cases := []struct {
+		name     string
+		provider string
+		data     string
+		wantErr  bool
+	}{
+		{"gemini part without a type field", "gemini", signedPart, false},
+		{"gemini text part", "gemini", `{"text":"hi"}`, false},
+		{"gemini empty object", "gemini", `{}`, true},
+		{"gemini unrelated object", "gemini", `{"totally":"unrelated"}`, true},
+		{"gemini part with one unknown field", "gemini", `{"text":"hi","sneaky":1}`, true},
+		{"gemini non-object", "gemini", `["text"]`, true},
+		{"anthropic block with a type field", "anthropic", `{"type":"thinking","signature":"x"}`, false},
+		{"anthropic block without a type field", "anthropic", signedPart, true},
+		{"anthropic block with an empty type", "anthropic", `{"type":""}`, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			messages := []Message{{Role: RoleAssistant, Blocks: []ContentBlock{{
+				Type: ContentTypeToolUse,
+				Replay: &ProviderReplay{
+					Provider: tc.provider,
+					Model:    "m",
+					Data:     json.RawMessage(tc.data),
+				},
+			}}}}
+			err := validateReplay(tc.provider, "m", messages)
+			if tc.wantErr && err == nil {
+				t.Fatalf("want an error for %s payload %s", tc.provider, tc.data)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error for %s payload %s: %v", tc.provider, tc.data, err)
+			}
+			// Opaque provider bytes must not leak into the error text.
+			if err != nil && len(tc.data) > 32 && strings.Contains(err.Error(), tc.data) {
+				t.Errorf("error leaked the whole payload: %v", err)
+			}
+		})
 	}
 }
 

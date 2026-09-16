@@ -27,17 +27,7 @@ type ProviderReplay struct {
 	Data     json.RawMessage `json:"data"`
 
 	// Data is the provider's own item shape, never a mux invention, so its
-	// structural check in validateReplay is provider-specific: see
-	// replayPayloadHasTypeField.
-}
-
-// replayPayloadHasTypeField reports whether a provider's raw items carry a
-// top-level "type" discriminator. OpenAI Responses items and Anthropic content
-// blocks do. A genai.Part does not — its kind is implied by which field is
-// set — so a Gemini payload is only checked for being a non-empty JSON object.
-// Unknown providers keep the stricter check.
-func replayPayloadHasTypeField(provider string) bool {
-	return provider != "gemini"
+	// structural check in validateReplayBlock is provider-specific.
 }
 
 // ErrReplayMismatch indicates a replay envelope was carried into a request
@@ -95,12 +85,12 @@ func validateReplayBlock(provider, model string, msgIdx, blockIdx int, replay *P
 	}
 	// Truncate the payload in every error below: opaque provider bytes must
 	// not leak into logs. The field path above identifies the block.
-	if !replayPayloadHasTypeField(provider) {
-		var item map[string]json.RawMessage
-		if err := json.Unmarshal(replay.Data, &item); err != nil || len(item) == 0 {
-			return fmt.Errorf("%s: unsupported replay item payload: %.32q", field, replay.Data)
-		}
-		return nil
+	//
+	// A genai.Part has no top-level "type" discriminator — its kind is implied
+	// by which field is set — so Gemini payloads are checked against the SDK
+	// struct instead. Every other provider's items carry one.
+	if provider == "gemini" {
+		return validateGeminiReplayPayload(field, replay.Data)
 	}
 	var item struct {
 		Type string `json:"type"`
