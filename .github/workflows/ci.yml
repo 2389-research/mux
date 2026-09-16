@@ -35,6 +35,41 @@ jobs:
       - name: go test -race
         run: go test -race -timeout=300s ./...
 
+  test-floor:
+    name: test (race, go 1.25.0 floor)
+    runs-on: ubuntu-latest
+    env:
+      # go.mod's toolchain directive (currently go1.26.6) would otherwise
+      # auto-upgrade any `go` invocation past the version installed below —
+      # GOTOOLCHAIN=auto self-upgrades even a plain `go vet`/`go build`
+      # regardless of what setup-go installs. This job exists specifically
+      # to prove the declared floor (go 1.25.0) still builds and passes, so
+      # it must be pinned local or it silently re-tests the same toolchain
+      # as the job above instead of the floor.
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.0'
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      - name: go test -race
+        run: go test -race -timeout=300s ./...
+
   lint:
     name: golangci-lint
     runs-on: ubuntu-latest
