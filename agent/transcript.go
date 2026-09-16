@@ -246,6 +246,7 @@ func writeFileAtomic(path string, encode func(io.Writer) error) (err error) {
 // atomic: content is encoded to a temporary file in the destination
 // directory first, and path is only replaced once that succeeds, so a
 // serialization or write failure leaves any existing file at path intact.
+// The file is written at mode 0600 (owner read/write only).
 func (t *Transcript) SaveToFile(path string) error {
 	if err := writeFileAtomic(path, t.SaveJSON); err != nil {
 		return fmt.Errorf("save transcript: %w", err)
@@ -268,6 +269,7 @@ func LoadFromFile(path string) (*Transcript, error) {
 // is atomic: content is encoded to a temporary file in the destination
 // directory first, and path is only replaced once that succeeds, so a
 // serialization or write failure leaves any existing file at path intact.
+// The file is written at mode 0600 (owner read/write only).
 func (t *Transcript) SaveToFileJSONL(path string) error {
 	if err := writeFileAtomic(path, t.SaveJSONL); err != nil {
 		return fmt.Errorf("save JSONL transcript: %w", err)
