@@ -128,6 +128,15 @@ type RecoveryPlan struct {
 	Operations            []OperationDisposition `json:"operations"`
 }
 
+// Clone returns a RecoveryPlan whose Operations is independent of the
+// receiver's, preserving nil versus non-nil-empty. OperationDisposition
+// holds only strings and a bool, so copying each element is already a full
+// deep copy; slices.Clone does exactly that.
+func (p RecoveryPlan) Clone() RecoveryPlan {
+	p.Operations = slices.Clone(p.Operations)
+	return p
+}
+
 // ErrorKind classifies an Error without requiring callers to parse its
 // message. Tests and callers match on Kind via errors.As, never on message
 // substrings.
@@ -297,8 +306,9 @@ type CommittedCheckpoint struct {
 	ThroughRecord    CommittedEnvelope
 }
 
-// Clone returns a CommittedCheckpoint whose Snapshot and ThroughRecord
-// buffers are independent of the receiver's.
+// Clone returns a CommittedCheckpoint fully independent of the receiver:
+// Snapshot and ThroughRecord are each cloned, and every other field is a
+// plain value with nothing to alias.
 func (c CommittedCheckpoint) Clone() CommittedCheckpoint {
 	c.Snapshot = c.Snapshot.Clone()
 	c.ThroughRecord = c.ThroughRecord.Clone()
@@ -320,13 +330,15 @@ type RestoreInput struct {
 	Binding          Binding
 }
 
-// Clone returns a RestoreInput whose Checkpoint, Tail and HostKinds are
-// independent of the receiver's, preserving nil versus non-nil-empty on
-// both Tail and HostKinds.
+// Clone returns a RestoreInput fully independent of the receiver: Checkpoint,
+// Tail, Recovery and HostKinds are each cloned, preserving nil versus
+// non-nil-empty on Tail and HostKinds. Binding and LastCommittedSeq are
+// plain values with nothing to alias.
 func (r RestoreInput) Clone() RestoreInput {
 	r.Checkpoint = r.Checkpoint.Clone()
 	r.Tail = cloneCommittedEnvelopes(r.Tail)
 	r.HostKinds = slices.Clone(r.HostKinds)
+	r.Recovery = r.Recovery.Clone()
 	return r
 }
 
@@ -346,12 +358,17 @@ type RestoredState struct {
 	HostKinds        []string
 }
 
-// Clone returns a RestoredState whose RawTail, SourceCheckpoint and
-// HostKinds are independent of the receiver's, preserving nil versus
-// non-nil-empty on both RawTail and HostKinds.
+// Clone returns a RestoredState whose RawTail, SourceCheckpoint, Recovery
+// and HostKinds are independent of the receiver's, preserving nil versus
+// non-nil-empty on RawTail and HostKinds. State is deliberately not deep
+// cloned: CheckpointState's own deep clone is CloneCheckpointState (kata
+// 1rky, over the llm.Message data it carries), and this package must not
+// grow a second implementation of it. A caller must not mutate a clone's
+// State expecting the receiver's State to be unaffected.
 func (s RestoredState) Clone() RestoredState {
 	s.RawTail = cloneCommittedEnvelopes(s.RawTail)
 	s.SourceCheckpoint = s.SourceCheckpoint.Clone()
 	s.HostKinds = slices.Clone(s.HostKinds)
+	s.Recovery = s.Recovery.Clone()
 	return s
 }

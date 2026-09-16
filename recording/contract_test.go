@@ -86,6 +86,35 @@ func TestCommittedCheckpointClone_NestedBuffersAreIndependentCopies(t *testing.T
 	}
 }
 
+func TestRecoveryPlanClone_NilOperationsStaysNil(t *testing.T) {
+	p := RecoveryPlan{Operations: nil}
+	c := p.Clone()
+	if c.Operations != nil {
+		t.Fatalf("nil Operations promoted to non-nil: %#v", c.Operations)
+	}
+}
+
+func TestRecoveryPlanClone_EmptyOperationsStaysEmptyNotNil(t *testing.T) {
+	p := RecoveryPlan{Operations: []OperationDisposition{}}
+	c := p.Clone()
+	if c.Operations == nil {
+		t.Fatal("empty, non-nil Operations collapsed to nil")
+	}
+	if len(c.Operations) != 0 {
+		t.Fatalf("expected empty Operations, got %#v", c.Operations)
+	}
+}
+
+func TestRecoveryPlanClone_OperationsIsIndependentCopy(t *testing.T) {
+	ops := []OperationDisposition{{OperationID: "op1", Disposition: "result_known"}}
+	p := RecoveryPlan{Operations: ops}
+	c := p.Clone()
+	c.Operations[0].Disposition = "changed"
+	if ops[0].Disposition != "result_known" {
+		t.Fatalf("mutating the clone's Operations changed the original: %v", ops)
+	}
+}
+
 func TestRestoreInputClone_NilHostKindsStaysNil(t *testing.T) {
 	r := RestoreInput{HostKinds: nil}
 	c := r.Clone()
@@ -157,6 +186,16 @@ func TestRestoreInputClone_CheckpointBuffersAreIndependentCopies(t *testing.T) {
 	}
 }
 
+func TestRestoreInputClone_RecoveryOperationsAreIndependentCopies(t *testing.T) {
+	ops := []OperationDisposition{{OperationID: "op1", Disposition: "result_known"}}
+	r := RestoreInput{Recovery: RecoveryPlan{Operations: ops}}
+	c := r.Clone()
+	c.Recovery.Operations[0].Disposition = "changed"
+	if ops[0].Disposition != "result_known" {
+		t.Fatalf("mutating the clone's Recovery.Operations changed the original: %v", ops)
+	}
+}
+
 func TestRestoredStateClone_NilHostKindsStaysNil(t *testing.T) {
 	s := RestoredState{HostKinds: nil}
 	c := s.Clone()
@@ -222,6 +261,16 @@ func TestRestoredStateClone_SourceCheckpointBuffersAreIndependentCopies(t *testi
 	c.SourceCheckpoint.ThroughRecord.Data[0] = 'X'
 	if string(through) != "through-bytes" {
 		t.Fatalf("mutating the clone's SourceCheckpoint buffers changed the original: %s", through)
+	}
+}
+
+func TestRestoredStateClone_RecoveryOperationsAreIndependentCopies(t *testing.T) {
+	ops := []OperationDisposition{{OperationID: "op1", Disposition: "result_known"}}
+	s := RestoredState{Recovery: RecoveryPlan{Operations: ops}}
+	c := s.Clone()
+	c.Recovery.Operations[0].Disposition = "changed"
+	if ops[0].Disposition != "result_known" {
+		t.Fatalf("mutating the clone's Recovery.Operations changed the original: %v", ops)
 	}
 }
 
