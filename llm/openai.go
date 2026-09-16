@@ -328,7 +328,7 @@ func convertResponsesPDF(block ContentBlock) responses.ResponseInputContentUnion
 			if block.Source.Path != "" {
 				filename = filepath.Base(block.Source.Path)
 			}
-			f.FileData = openai.String(encoded)
+			f.FileData = openai.String("data:application/pdf;base64," + encoded)
 			f.Filename = openai.String(filename)
 		}
 	}
@@ -395,7 +395,7 @@ func convertOpenAIPDF(block ContentBlock) openai.ChatCompletionContentPartUnionP
 		filename = filepath.Base(block.Source.Path)
 	}
 	return openai.FileContentPart(openai.ChatCompletionContentPartFileFileParam{
-		FileData: openai.String(encoded),
+		FileData: openai.String("data:application/pdf;base64," + encoded),
 		Filename: openai.String(filename),
 	})
 }

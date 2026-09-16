@@ -4,6 +4,7 @@ package llm
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2193,6 +2194,66 @@ func TestOpenAIConvertUserMessage_PDFFileKeepsFilename(t *testing.T) {
 	}
 }
 
+// TestAuditPDFWireEncoding locks the exact wire format the OpenAI Responses
+// and OpenRouter Chat PDF contracts require: file_data must be a
+// "data:application/pdf;base64,..." URL, not a bare base64 string (unlike
+// input_audio.data, which is raw base64). See
+// https://developers.openai.com/api/docs/guides/file-inputs and
+// https://openrouter.ai/docs/guides/overview/multimodal/pdfs.
+func TestAuditPDFWireEncoding(t *testing.T) {
+	bytesBlock, err := NewPDFFromBytes([]byte("%PDF-1.4"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileBlock := ContentBlock{
+		Type:      ContentTypePDF,
+		MediaType: "application/pdf",
+		Source:    &MediaSource{Kind: SourceKindFile, Bytes: []byte("%PDF-1.4"), Path: "report.pdf"},
+	}
+	realFileBlock, err := NewPDFFromFile("testdata/tiny.pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	realFileDataURL := "data:application/pdf;base64," + base64.StdEncoding.EncodeToString(realFileBlock.Source.Bytes)
+
+	tests := []struct {
+		name         string
+		block        ContentBlock
+		wantFileData string
+		wantFilename string
+	}{
+		{"bytes", bytesBlock, "data:application/pdf;base64,JVBERi0xLjQ=", "file.pdf"},
+		{"file with custom path", fileBlock, "data:application/pdf;base64,JVBERi0xLjQ=", "report.pdf"},
+		{"file from fixture", realFileBlock, realFileDataURL, "tiny.pdf"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			respBody, err := json.Marshal(convertResponsesPDF(tc.block))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if v := gjson.GetBytes(respBody, "file_data").String(); v != tc.wantFileData {
+				t.Errorf("responses file_data: got %q want %q; body=%s", v, tc.wantFileData, respBody)
+			}
+			if v := gjson.GetBytes(respBody, "filename").String(); v != tc.wantFilename {
+				t.Errorf("responses filename: got %q want %q; body=%s", v, tc.wantFilename, respBody)
+			}
+
+			chatBody, err := json.Marshal(convertOpenAIPDF(tc.block))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if v := gjson.GetBytes(chatBody, "file.file_data").String(); v != tc.wantFileData {
+				t.Errorf("chat file.file_data: got %q want %q; body=%s", v, tc.wantFileData, chatBody)
+			}
+			if v := gjson.GetBytes(chatBody, "file.filename").String(); v != tc.wantFilename {
+				t.Errorf("chat file.filename: got %q want %q; body=%s", v, tc.wantFilename, chatBody)
+			}
+		})
+	}
+}
+
 func TestOpenAIConvertUserMessage_AudioMP3(t *testing.T) {
 	audio, err := NewAudioFromBytes("audio/mpeg", []byte{0xff, 0xfb})
 	if err != nil {
@@ -2358,8 +2419,8 @@ func TestOpenAIWireFormat_PDFBytes(t *testing.T) {
 	if v := gjson.GetBytes(body, "messages.0.content.0.file.filename").String(); v != "file.pdf" {
 		t.Errorf("file.filename: got %q want file.pdf; body=%s", v, body)
 	}
-	if v := gjson.GetBytes(body, "messages.0.content.0.file.file_data").String(); v == "" {
-		t.Errorf("file.file_data should be non-empty base64; body=%s", body)
+	if v := gjson.GetBytes(body, "messages.0.content.0.file.file_data").String(); v != "data:application/pdf;base64,JVBERi0xLjQ=" {
+		t.Errorf("file.file_data: got %q want PDF data URL; body=%s", v, body)
 	}
 }
 
@@ -2510,8 +2571,8 @@ func TestOpenAIResponsesWireFormat_PDFBytes(t *testing.T) {
 	if v := gjson.GetBytes(body, "input.0.content.0.filename").String(); v != "file.pdf" {
 		t.Errorf("filename: got %q want file.pdf; body=%s", v, body)
 	}
-	if v := gjson.GetBytes(body, "input.0.content.0.file_data").String(); v == "" {
-		t.Errorf("file_data should be non-empty base64; body=%s", body)
+	if v := gjson.GetBytes(body, "input.0.content.0.file_data").String(); v != "data:application/pdf;base64,JVBERi0xLjQ=" {
+		t.Errorf("file_data: got %q want PDF data URL; body=%s", v, body)
 	}
 }
 
