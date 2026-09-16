@@ -280,3 +280,17 @@ returns nil.
 Fixture corpora advertised as a cross-host contract earn the semantic check. Not every
 fixture, though: synthetic scalars like `integer_one.json` are deliberately not any real
 payload kind and fail such a check spuriously. Tag the realistic ones and skip the rest.
+
+A truncated hash is a *prefix* of the correct one, so grepping for the bad value
+finds the fixed value too. Checking whether the 63-char digest survived anywhere,
+`grep -rn 'e3b0…b85'` lit up the already-corrected JSON fixtures and read exactly
+like a failed fix. Match the class and measure the length instead:
+
+    re.compile(r'[0-9a-f]{60,}')   # then report len(m) per match
+
+That turned a scary ambiguous result into four precise hits, all in `codec_test.go`
+— Go string literals holding a second, independent copy of the same golden data,
+still passing because those tests also only compare bytes. One corpus got fixed
+while its twin kept pinning the invalid value. When golden data lives in two
+places, fixing one and not the other is worse than fixing neither: the package now
+disagrees with itself and every test is green.
