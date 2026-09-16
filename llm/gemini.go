@@ -193,6 +193,11 @@ func convertMessage(msg Message) (*genai.Content, error) {
 // own struct tags rather than a list kept by hand here, so it cannot drift
 // from the SDK. Without this, "{}" and {"totally":"unrelated"} both decoded
 // into an empty Part and shipped to the API as "{}".
+//
+// The check is top-level only. encoding/json does not carry DisallowUnknownFields
+// into a field type that declares its own UnmarshalJSON, so a bogus key nested
+// inside one — videoMetadata, say — is not caught. Going deeper would mean
+// hand-rolling validation the SDK does not expose, so the guard stops here.
 func validateGeminiReplayPayload(field string, data json.RawMessage) error {
 	var keys map[string]json.RawMessage
 	if err := json.Unmarshal(data, &keys); err != nil || len(keys) == 0 {

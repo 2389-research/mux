@@ -489,6 +489,40 @@ func TestAnthropicThinkingReplay_CallerEditToAssistantTextReachesWire(t *testing
 	}
 }
 
+func TestAnthropicThinkingReplay_UnpreservableRedactedThinkingIsDropped(t *testing.T) {
+	// A block the SDK did not decode from the wire has no raw JSON, so its
+	// encrypted data cannot be replayed. Redacted thinking has nothing to
+	// display either, so keeping it would leave a block that is empty on the
+	// wire and empty on screen — an invalid state, not a lossy one.
+	msg := &anthropic.Message{
+		Model: "claude-sonnet-4-20250514",
+		Content: []anthropic.ContentBlockUnion{
+			{Type: "redacted_thinking", Data: "encrypted"},
+			{Type: "text", Text: "visible"},
+		},
+	}
+
+	resp := convertResponse(msg, "claude-sonnet-4-20250514")
+	if len(resp.Content) != 1 {
+		t.Fatalf("expected the unpreservable block to be dropped, got %+v", resp.Content)
+	}
+	if resp.Content[0].Type != ContentTypeText || resp.Content[0].Text != "visible" {
+		t.Errorf("wrong block survived: %+v", resp.Content[0])
+	}
+
+	// A dropped block must not reappear as an empty replay block on the wire.
+	params := sigConvertRequest(t, &Request{
+		Messages: []Message{{Role: RoleAssistant, Blocks: resp.Content}},
+	})
+	wire, err := json.Marshal(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(wire, []byte("redacted_thinking")) {
+		t.Errorf("dropped block leaked into the request: %s", wire)
+	}
+}
+
 func TestAnthropicThinkingReplay_ModelSwitchRejectsSignedThinking(t *testing.T) {
 	server, captured := sigTwoTurnServer(t, sigSignedThinkingBody)
 

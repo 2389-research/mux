@@ -53,10 +53,18 @@ func NewAnthropicClientWithBaseURL(apiKey, model, baseURL string) *AnthropicClie
 // a replay envelope and convertRequest can restore. They hold opaque bytes mux
 // cannot rebuild: a thinking signature, or redacted thinking's encrypted data.
 //
-// Text and tool_use are deliberately absent. Both round-trip losslessly through
-// their normalized fields, so an envelope would buy nothing and cost plenty: it
-// would discard a caller's edits to assistant text or tool input, and make a
-// model switch fail preflight on a history containing no thinking at all.
+// Text and tool_use are deliberately absent, for three reasons: neither holds
+// opaque bytes to preserve (a tool_use block is {type, id, name, input}); a
+// caller's edits to assistant text or tool input have to reach the wire, and an
+// envelope would silently discard them; and a history with no thinking in it
+// has to survive a model switch, which an envelope would fail pre-flight.
+//
+// Their normalized fields are not byte-exact, though. ToolUse.Input is a
+// map[string]any, so every JSON number decodes as a float64 and an integer past
+// 2^53 rebuilds rounded: a wire input of 10000000000000001 replays as
+// 10000000000000000. That predates replay envelopes and is unchanged by them.
+// It is worth knowing because Anthropic invalidates the signature on every
+// later thinking block when an earlier tool_use input changes.
 //
 // Anything else in a replay payload is rejected rather than sent as an empty
 // block.
