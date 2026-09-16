@@ -51,6 +51,218 @@ func TestSnapshotClone_BuffersAreIndependentCopies(t *testing.T) {
 	}
 }
 
+func TestCommittedEnvelopeClone_NilDataStaysNil(t *testing.T) {
+	e := CommittedEnvelope{Data: nil}
+	c := e.Clone()
+	if c.Data != nil {
+		t.Fatalf("nil Data promoted to non-nil: %#v", c.Data)
+	}
+}
+
+func TestCommittedEnvelopeClone_DataIsIndependentCopy(t *testing.T) {
+	data := []byte("payload")
+	e := CommittedEnvelope{Data: data}
+	c := e.Clone()
+	c.Data[0] = 'X'
+	if string(data) != "payload" {
+		t.Fatalf("mutating the clone's Data changed the original: %s", data)
+	}
+}
+
+func TestCommittedCheckpointClone_NestedBuffersAreIndependentCopies(t *testing.T) {
+	pub := json.RawMessage(`{"a":1}`)
+	priv := []byte("secret")
+	through := []byte("through-bytes")
+	cp := CommittedCheckpoint{
+		Snapshot:      Snapshot{PublicState: pub, PrivateState: priv},
+		ThroughRecord: CommittedEnvelope{Data: through},
+	}
+	c := cp.Clone()
+	c.Snapshot.PublicState[2] = 'X'
+	c.Snapshot.PrivateState[0] = 'X'
+	c.ThroughRecord.Data[0] = 'X'
+	if string(pub) != `{"a":1}` || string(priv) != "secret" || string(through) != "through-bytes" {
+		t.Fatalf("mutating the clone's nested buffers changed the original: pub=%s priv=%s through=%s", pub, priv, through)
+	}
+}
+
+func TestRestoreInputClone_NilHostKindsStaysNil(t *testing.T) {
+	r := RestoreInput{HostKinds: nil}
+	c := r.Clone()
+	if c.HostKinds != nil {
+		t.Fatalf("nil HostKinds promoted to non-nil: %#v", c.HostKinds)
+	}
+}
+
+// An empty, non-nil HostKinds means "accept no host kinds" -- a real
+// allowlist that rejects everything. Collapsing it into nil ("no allowlist
+// configured") would silently change what Restore accepts.
+func TestRestoreInputClone_EmptyHostKindsStaysEmptyNotNil(t *testing.T) {
+	r := RestoreInput{HostKinds: []string{}}
+	c := r.Clone()
+	if c.HostKinds == nil {
+		t.Fatal("empty, non-nil HostKinds collapsed to nil")
+	}
+	if len(c.HostKinds) != 0 {
+		t.Fatalf("expected empty HostKinds, got %#v", c.HostKinds)
+	}
+}
+
+func TestRestoreInputClone_HostKindsIsIndependentCopy(t *testing.T) {
+	kinds := []string{"app.note"}
+	r := RestoreInput{HostKinds: kinds}
+	c := r.Clone()
+	c.HostKinds[0] = "changed"
+	if kinds[0] != "app.note" {
+		t.Fatalf("mutating the clone's HostKinds changed the original: %v", kinds)
+	}
+}
+
+func TestRestoreInputClone_NilTailStaysNil(t *testing.T) {
+	r := RestoreInput{Tail: nil}
+	c := r.Clone()
+	if c.Tail != nil {
+		t.Fatalf("nil Tail promoted to non-nil: %#v", c.Tail)
+	}
+}
+
+func TestRestoreInputClone_EmptyTailStaysEmptyNotNil(t *testing.T) {
+	r := RestoreInput{Tail: []CommittedEnvelope{}}
+	c := r.Clone()
+	if c.Tail == nil {
+		t.Fatal("empty, non-nil Tail collapsed to nil")
+	}
+	if len(c.Tail) != 0 {
+		t.Fatalf("expected empty Tail, got %#v", c.Tail)
+	}
+}
+
+func TestRestoreInputClone_TailElementDataIsIndependentCopy(t *testing.T) {
+	data := []byte("host-row")
+	r := RestoreInput{Tail: []CommittedEnvelope{{Data: data}}}
+	c := r.Clone()
+	c.Tail[0].Data[0] = 'X'
+	if string(data) != "host-row" {
+		t.Fatalf("mutating the clone's Tail[0].Data changed the original: %s", data)
+	}
+}
+
+func TestRestoreInputClone_CheckpointBuffersAreIndependentCopies(t *testing.T) {
+	priv := []byte("secret")
+	r := RestoreInput{Checkpoint: CommittedCheckpoint{Snapshot: Snapshot{PrivateState: priv}}}
+	c := r.Clone()
+	c.Checkpoint.Snapshot.PrivateState[0] = 'X'
+	if string(priv) != "secret" {
+		t.Fatalf("mutating the clone's Checkpoint buffers changed the original: %s", priv)
+	}
+}
+
+func TestRestoredStateClone_NilHostKindsStaysNil(t *testing.T) {
+	s := RestoredState{HostKinds: nil}
+	c := s.Clone()
+	if c.HostKinds != nil {
+		t.Fatalf("nil HostKinds promoted to non-nil: %#v", c.HostKinds)
+	}
+}
+
+func TestRestoredStateClone_EmptyHostKindsStaysEmptyNotNil(t *testing.T) {
+	s := RestoredState{HostKinds: []string{}}
+	c := s.Clone()
+	if c.HostKinds == nil {
+		t.Fatal("empty, non-nil HostKinds collapsed to nil")
+	}
+	if len(c.HostKinds) != 0 {
+		t.Fatalf("expected empty HostKinds, got %#v", c.HostKinds)
+	}
+}
+
+func TestRestoredStateClone_HostKindsIsIndependentCopy(t *testing.T) {
+	kinds := []string{"app.note"}
+	s := RestoredState{HostKinds: kinds}
+	c := s.Clone()
+	c.HostKinds[0] = "changed"
+	if kinds[0] != "app.note" {
+		t.Fatalf("mutating the clone's HostKinds changed the original: %v", kinds)
+	}
+}
+
+func TestRestoredStateClone_NilRawTailStaysNil(t *testing.T) {
+	s := RestoredState{RawTail: nil}
+	c := s.Clone()
+	if c.RawTail != nil {
+		t.Fatalf("nil RawTail promoted to non-nil: %#v", c.RawTail)
+	}
+}
+
+func TestRestoredStateClone_EmptyRawTailStaysEmptyNotNil(t *testing.T) {
+	s := RestoredState{RawTail: []CommittedEnvelope{}}
+	c := s.Clone()
+	if c.RawTail == nil {
+		t.Fatal("empty, non-nil RawTail collapsed to nil")
+	}
+	if len(c.RawTail) != 0 {
+		t.Fatalf("expected empty RawTail, got %#v", c.RawTail)
+	}
+}
+
+func TestRestoredStateClone_RawTailElementDataIsIndependentCopy(t *testing.T) {
+	data := []byte("host-row")
+	s := RestoredState{RawTail: []CommittedEnvelope{{Data: data}}}
+	c := s.Clone()
+	c.RawTail[0].Data[0] = 'X'
+	if string(data) != "host-row" {
+		t.Fatalf("mutating the clone's RawTail[0].Data changed the original: %s", data)
+	}
+}
+
+func TestRestoredStateClone_SourceCheckpointBuffersAreIndependentCopies(t *testing.T) {
+	through := []byte("through-bytes")
+	s := RestoredState{SourceCheckpoint: CommittedCheckpoint{ThroughRecord: CommittedEnvelope{Data: through}}}
+	c := s.Clone()
+	c.SourceCheckpoint.ThroughRecord.Data[0] = 'X'
+	if string(through) != "through-bytes" {
+		t.Fatalf("mutating the clone's SourceCheckpoint buffers changed the original: %s", through)
+	}
+}
+
+// TestRestoreTypes_ConstructWithAllNamedFields mirrors mux#9cg6's
+// checkpointInput fixture field-for-field, so these declarations cannot be
+// an incompatible local alias of what Restore's own implementation already
+// expects to construct.
+func TestRestoreTypes_ConstructWithAllNamedFields(t *testing.T) {
+	env := CommittedEnvelope{
+		Seq: 7, Producer: "mux", SessionID: "s1", EventID: "cp-event",
+		Data: []byte("record-bytes"), DataSHA256: "deadbeef",
+	}
+	checkpoint := CommittedCheckpoint{
+		SchemaVersion: 1, CheckpointID: "cp1", MuxRevision: "4c64257",
+		JournalWatermark: 7, StateSHA256: "abc123",
+		Snapshot:      Snapshot{CodecVersion: SnapshotCodec, SessionID: "s1"},
+		ThroughRecord: env,
+	}
+	input := RestoreInput{
+		Checkpoint:       checkpoint,
+		Tail:             []CommittedEnvelope{env},
+		LastCommittedSeq: 7,
+		HostKinds:        []string{"app.note"},
+		Recovery:         RecoveryPlan{SchemaVersion: 1, SessionID: "s1", NewExecutionEpoch: 2, LastCommittedSeq: 7},
+		Binding:          Binding{SessionID: "s1", RuntimeInstanceID: "r2", ExecutionEpoch: 2},
+	}
+	restored := RestoredState{
+		State:            CheckpointState{SchemaVersion: 1, SessionID: "s1"},
+		LastCommittedSeq: 7,
+		RawTail:          []CommittedEnvelope{env},
+		CanContinue:      true,
+		Recovery:         input.Recovery,
+		SourceCheckpoint: checkpoint,
+		Binding:          input.Binding,
+		HostKinds:        input.HostKinds,
+	}
+	if input.LastCommittedSeq != restored.LastCommittedSeq {
+		t.Fatalf("fixture wiring mismatch: %d != %d", input.LastCommittedSeq, restored.LastCommittedSeq)
+	}
+}
+
 func validConfig() Config {
 	return Config{
 		Binding:  Binding{SessionID: "s", RuntimeInstanceID: "r", ExecutionEpoch: 1},

@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 	"time"
 )
 
@@ -259,4 +260,98 @@ type CommittedEnvelope struct {
 	EventID    string
 	Data       []byte
 	DataSHA256 string
+}
+
+// Clone returns a CommittedEnvelope whose Data is independent of the
+// receiver's, so a caller holding a committed tail cannot see an entry
+// mutate out from under it.
+func (e CommittedEnvelope) Clone() CommittedEnvelope {
+	e.Data = bytes.Clone(e.Data)
+	return e
+}
+
+// cloneCommittedEnvelopes clones every entry's Data so the result shares no
+// backing array with envs, directly or through an element. A nil envs
+// returns nil; a non-nil, empty envs returns a non-nil, empty slice.
+func cloneCommittedEnvelopes(envs []CommittedEnvelope) []CommittedEnvelope {
+	if envs == nil {
+		return nil
+	}
+	cloned := make([]CommittedEnvelope, len(envs))
+	for i, e := range envs {
+		cloned[i] = e.Clone()
+	}
+	return cloned
+}
+
+// CommittedCheckpoint is a previously committed checkpoint read back from
+// storage: the Snapshot taken at CheckpointID, plus ThroughRecord, the exact
+// committed envelope the snapshot was taken through.
+type CommittedCheckpoint struct {
+	SchemaVersion    int
+	CheckpointID     string
+	MuxRevision      string
+	JournalWatermark uint64
+	StateSHA256      string
+	Snapshot         Snapshot
+	ThroughRecord    CommittedEnvelope
+}
+
+// Clone returns a CommittedCheckpoint whose Snapshot and ThroughRecord
+// buffers are independent of the receiver's.
+func (c CommittedCheckpoint) Clone() CommittedCheckpoint {
+	c.Snapshot = c.Snapshot.Clone()
+	c.ThroughRecord = c.ThroughRecord.Clone()
+	return c
+}
+
+// RestoreInput is Restore's complete input: a checkpoint to resume from, the
+// committed tail after it, and the caller's trusted context to resume into
+// (Binding), the host record kinds it accepts (HostKinds), and the recovery
+// plan governing in-flight operations. HostKinds distinguishes nil (no
+// allowlist supplied) from a non-nil, empty slice (an allowlist that
+// accepts no host kinds).
+type RestoreInput struct {
+	Checkpoint       CommittedCheckpoint
+	Tail             []CommittedEnvelope
+	LastCommittedSeq uint64
+	HostKinds        []string
+	Recovery         RecoveryPlan
+	Binding          Binding
+}
+
+// Clone returns a RestoreInput whose Checkpoint, Tail and HostKinds are
+// independent of the receiver's, preserving nil versus non-nil-empty on
+// both Tail and HostKinds.
+func (r RestoreInput) Clone() RestoreInput {
+	r.Checkpoint = r.Checkpoint.Clone()
+	r.Tail = cloneCommittedEnvelopes(r.Tail)
+	r.HostKinds = slices.Clone(r.HostKinds)
+	return r
+}
+
+// RestoredState is Restore's complete output: the reduced CheckpointState,
+// the raw committed tail it was derived from (RawTail), whether replay can
+// continue automatically, and the recovery/source-checkpoint/binding/
+// host-kind context carried over from the RestoreInput it was produced
+// from.
+type RestoredState struct {
+	State            CheckpointState
+	LastCommittedSeq uint64
+	RawTail          []CommittedEnvelope
+	CanContinue      bool
+	Recovery         RecoveryPlan
+	SourceCheckpoint CommittedCheckpoint
+	Binding          Binding
+	HostKinds        []string
+}
+
+// Clone returns a RestoredState whose RawTail, SourceCheckpoint and
+// HostKinds are independent of the receiver's, preserving nil versus
+// non-nil-empty on both RawTail and HostKinds.
+func (s RestoredState) Clone() RestoredState {
+	s.RawTail = cloneCommittedEnvelopes(s.RawTail)
+	s.SourceCheckpoint = s.SourceCheckpoint.Clone()
+	s.HostKinds = slices.Clone(s.HostKinds)
+	return s
 }
