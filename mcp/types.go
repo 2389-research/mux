@@ -5,6 +5,7 @@ package mcp
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync/atomic"
 )
 
@@ -14,6 +15,59 @@ var (
 	ErrNotConnected    = errors.New("mcp: client not connected")
 	ErrTransportClosed = errors.New("mcp: transport closed")
 )
+
+// errClientRunning rejects a second Start on a client that is already
+// connected or connecting.
+var errClientRunning = errors.New("client already running")
+
+// transportState is the lifecycle of a transport client. Each client owns
+// exactly one, changed only under that client's mutex.
+type transportState uint8
+
+const (
+	// transportIdle is a constructed client that has never been started.
+	transportIdle transportState = iota
+	// transportStarting is a client running the MCP handshake.
+	transportStarting
+	// transportRunning is a client whose handshake completed.
+	transportRunning
+	// transportClosed is terminal. Transport clients are single use: a closed
+	// client never reopens, so callers build a new one to reconnect. Restart
+	// would have to resurrect pipes, reader goroutines and the notification
+	// channel that Close already handed out and closed.
+	transportClosed
+)
+
+// transportError reports the error an operation must return for a transport in
+// the given state, or nil when the transport can accept the message. cause is
+// the terminal cause recorded when the transport closed. Callers decide
+// whether starting counts as ready: the stdio handshake writes while starting,
+// while the HTTP client publishes nothing until the handshake completes.
+func transportError(state transportState, cause error) error {
+	switch state {
+	case transportClosed:
+		if cause != nil {
+			return cause
+		}
+		return ErrTransportClosed
+	case transportIdle:
+		return ErrNotConnected
+	default:
+		return nil
+	}
+}
+
+// handshakeInterrupted reports the error a handshake must return when the
+// transport left transportStarting underneath it. Close racing the handshake is
+// the expected case; any other state is a lifecycle bug, reported rather than
+// mistaken for success, since transportError treats a running transport as
+// ready.
+func handshakeInterrupted(state transportState, cause error) error {
+	if err := transportError(state, cause); err != nil {
+		return err
+	}
+	return fmt.Errorf("%w: handshake interrupted in state %d", ErrTransportClosed, state)
+}
 
 var requestID uint64
 

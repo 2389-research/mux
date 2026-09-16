@@ -11,21 +11,31 @@ import (
 )
 
 // Client is the interface for MCP server communication.
+//
+// A client is single use. Close and a failed handshake are both terminal: every
+// later operation reports ErrTransportClosed, and reconnecting means building a
+// new client with NewClient.
 type Client interface {
-	// Start initializes the connection and performs MCP handshake.
+	// Start initializes the connection and performs MCP handshake. It succeeds
+	// once per client: a client that is already connected reports "client
+	// already running", and one that was closed, or whose handshake failed,
+	// reports ErrTransportClosed instead of connecting again.
 	Start(ctx context.Context) error
 
 	// ListTools retrieves available tools from the server.
 	ListTools(ctx context.Context) ([]ToolInfo, error)
 
-	// CallTool executes a tool on the server.
+	// CallTool executes a tool on the server. Cancelling ctx ends this call;
+	// it does not close the connection, which stays usable for the next one.
 	CallTool(ctx context.Context, name string, args map[string]any) (*ToolCallResult, error)
 
-	// Notifications returns a channel for server-initiated messages.
+	// Notifications returns a channel for server-initiated messages. The
+	// channel is closed when the client closes.
 	// Returns nil for transports that don't support notifications (stdio).
 	Notifications() <-chan Notification
 
-	// Close shuts down the connection.
+	// Close shuts down the connection and fails every call still in flight
+	// with ErrTransportClosed. It is terminal and safe to call more than once.
 	Close() error
 }
 
