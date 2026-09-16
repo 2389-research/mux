@@ -159,3 +159,101 @@ func TestHTTPRestartAfterCloseRejected(t *testing.T) {
 		t.Fatalf("server saw %d sessions, want 1", n)
 	}
 }
+
+// TestHTTPCloseCancelsSSEStream covers the streaming half of the second
+// trigger in mux#xxrt: a reply that arrives as an open SSE stream kept the
+// caller reading until the server gave up.
+func TestHTTPCloseCancelsSSEStream(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		// A notification tells the test the client is inside the SSE loop; the
+		// matching response never arrives.
+		_, _ = w.Write([]byte("event: message\ndata: {\"method\":\"notifications/progress\"}\n\n"))
+		w.(http.Flusher).Flush()
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer server.Close()
+	defer close(release)
+
+	c := newHTTPClient(ServerConfig{URL: server.URL})
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := c.post(context.Background(), "tools/list", nil)
+		done <- err
+	}()
+
+	select {
+	case <-c.Notifications():
+	case <-time.After(watchdog):
+		t.Fatal("client never reached the SSE stream")
+	}
+
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("stream read outlived Close and succeeded")
+		}
+	case <-time.After(watchdog):
+		t.Fatal("Close left the stream read blocked")
+	}
+}
+
+// TestHTTPCloseRacingStart covers the last trigger in mux#xxrt: Close landing
+// mid-handshake left Start free to publish a running client behind it.
+func TestHTTPCloseRacingStart(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req Request
+		_ = json.NewDecoder(r.Body).Decode(&req)
+
+		if req.Method == "initialize" {
+			w.Header().Set("Mcp-Session-Id", "test-session")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(Response{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(`{}`)})
+			return
+		}
+		// Hold the handshake open on the initialized notification, so Close
+		// arrives while Start is still between its two state transitions.
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer server.Close()
+	defer close(release)
+
+	c := newHTTPClient(ServerConfig{URL: server.URL})
+	started := make(chan error, 1)
+	go func() { started <- c.Start(context.Background()) }()
+
+	<-entered
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	select {
+	case err := <-started:
+		if !errors.Is(err, ErrTransportClosed) {
+			t.Fatalf("Start interrupted by Close = %v, want ErrTransportClosed", err)
+		}
+	case <-time.After(watchdog):
+		t.Fatal("Close left Start blocked mid-handshake")
+	}
+
+	if _, err := c.ListTools(context.Background()); !errors.Is(err, ErrTransportClosed) {
+		t.Fatalf("ListTools after interrupted Start = %v, want ErrTransportClosed", err)
+	}
+}
