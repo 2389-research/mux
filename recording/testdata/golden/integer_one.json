@@ -1,0 +1,7 @@
+{
+  "name": "integer_one",
+  "description": "An integer literal round-trips as an integer literal, with no trailing fractional part.",
+  "kind": "payload",
+  "input": "{\"n\":1}",
+  "output": "{\"n\":1}"
+}

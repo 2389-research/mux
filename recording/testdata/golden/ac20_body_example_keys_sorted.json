@@ -1,0 +1,7 @@
+{
+  "name": "ac20_body_example_keys_sorted",
+  "description": "The exact example from ac20's plan body: reordered keys sort lexically and the 17-digit integer beyond float64's exact-integer range survives digit-for-digit.",
+  "kind": "payload",
+  "input": "{\"b\":2,\"a\":9007199254740993}",
+  "output": "{\"a\":9007199254740993,\"b\":2}"
+}
