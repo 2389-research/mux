@@ -60,7 +60,7 @@ func TestAnthropicClientCreateMessage_ConvertsRequest(t *testing.T) {
 		},
 	}
 
-	params := convertRequest(req)
+	params := sigConvertRequest(t, req)
 	if params.Model != "claude-sonnet-4-20250514" {
 		t.Errorf("expected model claude-sonnet-4-20250514, got %s", params.Model)
 	}
@@ -300,7 +300,7 @@ func TestConvertRequest_ToolSchemaWithMissingProperties(t *testing.T) {
 		},
 	}
 
-	params := convertRequest(req)
+	params := sigConvertRequest(t, req)
 	if len(params.Tools) != 1 {
 		t.Fatalf("expected 1 tool, got %d", len(params.Tools))
 	}
@@ -329,7 +329,7 @@ func TestConvertRequest_ToolSchemaWithEmptyRequired(t *testing.T) {
 		},
 	}
 
-	params := convertRequest(req)
+	params := sigConvertRequest(t, req)
 	if len(params.Tools) != 1 {
 		t.Fatalf("expected 1 tool, got %d", len(params.Tools))
 	}
@@ -357,7 +357,7 @@ func TestConvertRequest_ToolSchemaWithAnySliceRequired(t *testing.T) {
 		},
 	}
 
-	params := convertRequest(req)
+	params := sigConvertRequest(t, req)
 	if len(params.Tools) != 1 {
 		t.Fatalf("expected 1 tool, got %d", len(params.Tools))
 	}
@@ -388,7 +388,7 @@ func TestConvertRequest_ToolSchemaWithInvalidRequiredType(t *testing.T) {
 		},
 	}
 
-	params := convertRequest(req)
+	params := sigConvertRequest(t, req)
 	if len(params.Tools) != 1 {
 		t.Fatalf("expected 1 tool, got %d", len(params.Tools))
 	}
@@ -417,7 +417,7 @@ func TestConvertRequest_ToolSchemaWithMixedRequiredTypes(t *testing.T) {
 		},
 	}
 
-	params := convertRequest(req)
+	params := sigConvertRequest(t, req)
 	if len(params.Tools) != 1 {
 		t.Fatalf("expected 1 tool, got %d", len(params.Tools))
 	}
@@ -456,7 +456,7 @@ func TestConvertRequest_MultipleTools(t *testing.T) {
 		},
 	}
 
-	params := convertRequest(req)
+	params := sigConvertRequest(t, req)
 	if len(params.Tools) != 2 {
 		t.Fatalf("expected 2 tools, got %d", len(params.Tools))
 	}
@@ -603,7 +603,7 @@ func TestConvertRequest_ComplexMessageBlocks(t *testing.T) {
 		},
 	}
 
-	params := convertRequest(req)
+	params := sigConvertRequest(t, req)
 	if len(params.Messages) != 3 {
 		t.Fatalf("expected 3 messages, got %d", len(params.Messages))
 	}
@@ -643,7 +643,7 @@ func TestConvertResponse_ToolUseWithNullInput(t *testing.T) {
 		},
 	}
 
-	resp := convertResponse(msg)
+	resp := convertResponse(msg, string(msg.Model))
 	if len(resp.Content) != 1 {
 		t.Fatalf("expected 1 content block, got %d", len(resp.Content))
 	}
@@ -1162,18 +1162,22 @@ func TestCreateMessageStream_InputJSONDelta(t *testing.T) {
 // carries, so a block with substituted empty input would run a partial call
 // as if complete. Complete JSON retains the block with parsed input.
 func TestAnthropicStreamAccumulatorTruncatedToolInput(t *testing.T) {
-	truncated := newAnthropicStreamAccumulator()
-	truncated.startBlock(0, ContentTypeToolUse, "toolu_1", "get_weather", "", "")
+	truncated := newAnthropicStreamAccumulator("claude-sonnet-4-20250514")
+	truncated.startBlock(0, "tool_use", "toolu_1", "get_weather", "", "", "", "")
 	truncated.appendDelta(0, "input_json_delta", `{"location": "New `)
-	truncated.stopBlock(0)
+	if err := truncated.stopBlock(0); err != nil {
+		t.Fatalf("stopBlock: %v", err)
+	}
 	if resp := truncated.finish(); len(resp.Content) != 0 {
 		t.Fatalf("expected truncated tool block to be dropped, got %+v", resp.Content)
 	}
 
-	complete := newAnthropicStreamAccumulator()
-	complete.startBlock(0, ContentTypeToolUse, "toolu_2", "get_weather", "", "")
+	complete := newAnthropicStreamAccumulator("claude-sonnet-4-20250514")
+	complete.startBlock(0, "tool_use", "toolu_2", "get_weather", "", "", "", "")
 	complete.appendDelta(0, "input_json_delta", `{"location":"New York"}`)
-	complete.stopBlock(0)
+	if err := complete.stopBlock(0); err != nil {
+		t.Fatalf("stopBlock: %v", err)
+	}
 	resp := complete.finish()
 	if len(resp.Content) != 1 {
 		t.Fatalf("expected complete tool block to be kept, got %+v", resp.Content)
@@ -1190,7 +1194,7 @@ func TestConvertRequest_WithThinking(t *testing.T) {
 		Messages:  []Message{NewUserMessage("Think about this")},
 		Thinking:  &ThinkingConfig{Enabled: true, Budget: 10000},
 	}
-	params := convertRequest(req)
+	params := sigConvertRequest(t, req)
 	if params.Thinking.OfEnabled == nil {
 		t.Fatal("expected thinking to be enabled")
 	}
@@ -1206,7 +1210,7 @@ func TestConvertRequest_WithThinkingBumpsMaxTokens(t *testing.T) {
 		Messages:  []Message{NewUserMessage("Think")},
 		Thinking:  &ThinkingConfig{Enabled: true, Budget: 10000},
 	}
-	params := convertRequest(req)
+	params := sigConvertRequest(t, req)
 	if params.MaxTokens < 10000 {
 		t.Errorf("expected MaxTokens >= 10000, got %d", params.MaxTokens)
 	}
@@ -1223,7 +1227,7 @@ func TestConvertResponse_ThinkingBlock(t *testing.T) {
 		StopReason: "end_turn",
 		Usage:      anthropic.Usage{InputTokens: 10, OutputTokens: 50},
 	}
-	resp := convertResponse(msg)
+	resp := convertResponse(msg, string(msg.Model))
 	if len(resp.Content) != 2 {
 		t.Fatalf("expected 2 blocks, got %d", len(resp.Content))
 	}
@@ -1244,7 +1248,7 @@ func TestConvertRequest_WithoutThinking(t *testing.T) {
 		MaxTokens: 1024,
 		Messages:  []Message{NewUserMessage("Hello")},
 	}
-	params := convertRequest(req)
+	params := sigConvertRequest(t, req)
 	if params.Thinking.OfEnabled != nil {
 		t.Error("expected thinking to not be set")
 	}
@@ -1409,7 +1413,7 @@ func TestAnthropicConvertRequest_ImageBytes(t *testing.T) {
 		Model:    "claude-sonnet-4-20250514",
 		Messages: []Message{NewUserMessageWithBlocks(img)},
 	}
-	params := convertRequest(req)
+	params := sigConvertRequest(t, req)
 	if len(params.Messages) != 1 || len(params.Messages[0].Content) != 1 {
 		t.Fatalf("expected 1 content block, got %+v", params.Messages)
 	}
@@ -1431,7 +1435,7 @@ func TestAnthropicConvertRequest_ImageBytes(t *testing.T) {
 func TestAnthropicConvertRequest_ImageURL(t *testing.T) {
 	img := NewImageFromURL("https://example.com/cat.png")
 	req := &Request{Messages: []Message{NewUserMessageWithBlocks(img)}}
-	params := convertRequest(req)
+	params := sigConvertRequest(t, req)
 	block := params.Messages[0].Content[0]
 	if block.OfImage == nil || block.OfImage.Source.OfURL == nil {
 		t.Fatalf("expected URL image source, got %+v", block.OfImage)
@@ -1447,7 +1451,7 @@ func TestAnthropicConvertRequest_PDFBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	req := &Request{Messages: []Message{NewUserMessageWithBlocks(pdf)}}
-	params := convertRequest(req)
+	params := sigConvertRequest(t, req)
 	block := params.Messages[0].Content[0]
 	if block.OfDocument == nil || block.OfDocument.Source.OfBase64 == nil {
 		t.Fatalf("expected base64 PDF source, got %+v", block.OfDocument)
@@ -1460,7 +1464,7 @@ func TestAnthropicConvertRequest_PDFBytes(t *testing.T) {
 func TestAnthropicConvertRequest_PDFURL(t *testing.T) {
 	pdf := NewPDFFromURL("https://example.com/x.pdf")
 	req := &Request{Messages: []Message{NewUserMessageWithBlocks(pdf)}}
-	params := convertRequest(req)
+	params := sigConvertRequest(t, req)
 	block := params.Messages[0].Content[0]
 	if block.OfDocument == nil || block.OfDocument.Source.OfURL == nil {
 		t.Fatalf("expected URL PDF source")
@@ -1505,7 +1509,7 @@ func TestAnthropicWireFormat_ImageBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	params := convertRequest(&Request{
+	params := sigConvertRequest(t, &Request{
 		Model:    "claude-sonnet-4-20250514",
 		Messages: []Message{NewUserMessageWithBlocks(img)},
 	})
@@ -1531,7 +1535,7 @@ func TestAnthropicWireFormat_ImageBytes(t *testing.T) {
 
 func TestAnthropicWireFormat_ImageURL(t *testing.T) {
 	img := NewImageFromURL("https://example.com/cat.png")
-	params := convertRequest(&Request{
+	params := sigConvertRequest(t, &Request{
 		Messages: []Message{NewUserMessageWithBlocks(img)},
 	})
 	body, err := json.Marshal(params)
@@ -1555,7 +1559,7 @@ func TestAnthropicWireFormat_PDFBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	params := convertRequest(&Request{
+	params := sigConvertRequest(t, &Request{
 		Messages: []Message{NewUserMessageWithBlocks(pdf)},
 	})
 	body, err := json.Marshal(params)
@@ -1579,7 +1583,7 @@ func TestAnthropicWireFormat_PDFBytes(t *testing.T) {
 
 func TestAnthropicWireFormat_PDFURL(t *testing.T) {
 	pdf := NewPDFFromURL("https://example.com/x.pdf")
-	params := convertRequest(&Request{
+	params := sigConvertRequest(t, &Request{
 		Messages: []Message{NewUserMessageWithBlocks(pdf)},
 	})
 	body, err := json.Marshal(params)

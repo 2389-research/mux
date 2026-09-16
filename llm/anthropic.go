@@ -49,8 +49,56 @@ func NewAnthropicClientWithBaseURL(apiKey, model, baseURL string) *AnthropicClie
 	}
 }
 
+// anthropicSignedTypes are the content block types convertResponse stamps with
+// a replay envelope and convertRequest can restore. They hold opaque bytes mux
+// cannot rebuild: a thinking signature, or redacted thinking's encrypted data.
+//
+// Text and tool_use are deliberately absent, for three reasons: neither holds
+// opaque bytes to preserve (a tool_use block is {type, id, name, input}); a
+// caller's edits to assistant text or tool input have to reach the wire, and an
+// envelope would silently discard them; and a history with no thinking in it
+// has to survive a model switch, which an envelope would fail pre-flight.
+//
+// Their normalized fields are not byte-exact, though. ToolUse.Input is a
+// map[string]any, so every JSON number decodes as a float64 and an integer past
+// 2^53 rebuilds rounded: a wire input of 10000000000000001 replays as
+// 10000000000000000. That predates replay envelopes and is unchanged by them.
+// It is worth knowing because Anthropic invalidates the signature on every
+// later thinking block when an earlier tool_use input changes.
+//
+// Anything else in a replay payload is rejected rather than sent as an empty
+// block.
+var anthropicSignedTypes = map[string]bool{
+	"thinking":          true,
+	"redacted_thinking": true,
+}
+
+// anthropicBlockReplay returns the envelope for a block whose bytes must reach
+// the API unmodified, and nil for one mux can rebuild. A block the SDK did not
+// decode from the wire (hand-built in a test, or a stream snapshot) has no raw
+// JSON to preserve, so it is left unstamped rather than stamped empty.
+func anthropicBlockReplay(block anthropic.ContentBlockUnion, requestModel string) *ProviderReplay {
+	if !anthropicSignedTypes[block.Type] {
+		return nil
+	}
+	raw := block.RawJSON()
+	if raw == "" {
+		return nil
+	}
+	return &ProviderReplay{
+		Provider: "anthropic",
+		Model:    requestModel,
+		Data:     json.RawMessage(raw),
+	}
+}
+
 // convertRequest converts our Request to Anthropic's MessageNewParams.
-func convertRequest(req *Request) anthropic.MessageNewParams {
+//
+// A block carrying a Replay envelope is restored from its raw provider JSON
+// and the normalized fields are ignored: Anthropic rejects thinking blocks
+// whose text or signature changed, so the bytes the API sent are the only
+// thing safe to send back.
+func convertRequest(req *Request) (anthropic.MessageNewParams, error) {
 	params := anthropic.MessageNewParams{
 		Model:     anthropic.Model(req.Model),
 		MaxTokens: int64(req.MaxTokens),
@@ -76,6 +124,14 @@ func convertRequest(req *Request) anthropic.MessageNewParams {
 			content = append(content, anthropic.NewTextBlock(msg.Content))
 		}
 		for _, block := range msg.Blocks {
+			if block.Replay != nil {
+				restored, err := restoreAnthropicBlock(block.Replay)
+				if err != nil {
+					return anthropic.MessageNewParams{}, err
+				}
+				content = append(content, restored)
+				continue
+			}
 			switch block.Type {
 			case ContentTypeText:
 				content = append(content, anthropic.NewTextBlock(block.Text))
@@ -143,11 +199,33 @@ func convertRequest(req *Request) anthropic.MessageNewParams {
 		params.Tools = tools
 	}
 
-	return params
+	return params, nil
+}
+
+// restoreAnthropicBlock rebuilds the SDK content block param from a replay
+// envelope's raw JSON, so signed thinking and redacted thinking reach the API
+// exactly as they left it.
+func restoreAnthropicBlock(replay *ProviderReplay) (anthropic.ContentBlockParamUnion, error) {
+	var item anthropic.ContentBlockUnion
+	if err := json.Unmarshal(replay.Data, &item); err != nil {
+		return anthropic.ContentBlockParamUnion{}, fmt.Errorf("anthropic: decoding replay block: %w", err)
+	}
+	if !anthropicSignedTypes[item.Type] {
+		return anthropic.ContentBlockParamUnion{}, fmt.Errorf("anthropic: replay block has unsupported type %q", item.Type)
+	}
+	return item.ToParam(), nil
 }
 
 // convertResponse converts Anthropic's Message to our Response.
-func convertResponse(msg *anthropic.Message) *Response {
+//
+// A thinking or redacted_thinking block carries a replay envelope holding the
+// block's unmodified JSON, pinned to requestModel (the effective requested
+// model, not the returned snapshot name). That is what lets a thinking block
+// and its signature survive a tool turn. Text and tool_use are left normalized
+// — see anthropicSignedTypes. redacted_thinking has no readable text, so it
+// becomes a replay-only block: its encrypted data stays in the envelope and
+// never reaches display text.
+func convertResponse(msg *anthropic.Message, requestModel string) *Response {
 	resp := &Response{
 		ID:         msg.ID,
 		Model:      string(msg.Model),
@@ -159,6 +237,7 @@ func convertResponse(msg *anthropic.Message) *Response {
 	}
 
 	for _, block := range msg.Content {
+		replay := anthropicBlockReplay(block, requestModel)
 		switch block.Type {
 		case "text":
 			resp.Content = append(resp.Content, ContentBlock{
@@ -169,6 +248,17 @@ func convertResponse(msg *anthropic.Message) *Response {
 			resp.Content = append(resp.Content, ContentBlock{
 				Type:     ContentTypeThinking,
 				Thinking: block.Thinking,
+				Replay:   replay,
+			})
+		case "redacted_thinking":
+			// Redacted thinking has nothing to display, so it is worth
+			// carrying only while its encrypted bytes can be replayed.
+			if replay == nil {
+				continue
+			}
+			resp.Content = append(resp.Content, ContentBlock{
+				Type:   ContentTypeReplay,
+				Replay: replay,
 			})
 		case "tool_use":
 			// Unmarshal the raw JSON input to map[string]any
@@ -202,37 +292,59 @@ func (a *AnthropicClient) CreateMessage(ctx context.Context, req *Request) (*Res
 	if err := validateRequest("anthropic", a.Capabilities(), req); err != nil {
 		return nil, err
 	}
+	if err := validateReplay("anthropic", req.Model, req.Messages); err != nil {
+		return nil, err
+	}
 
-	params := convertRequest(req)
+	params, err := convertRequest(req)
+	if err != nil {
+		return nil, err
+	}
 	msg, err := a.client.Messages.New(ctx, params)
 	if err != nil {
 		return nil, err
 	}
 
-	return convertResponse(msg), nil
+	return convertResponse(msg, req.Model), nil
 }
 
 type anthropicStreamBlock struct {
 	block    ContentBlock
 	inputRaw string
+	// rawType is the provider's own block type ("thinking",
+	// "redacted_thinking", ...), kept because several of them normalize onto
+	// the same mux ContentType.
+	rawType string
+	// signature accumulates signature_delta fragments for a thinking block.
+	// It is never appended to displayed text.
+	signature string
+	// redactedData is the encrypted payload of a redacted_thinking block.
+	redactedData string
 }
 
 type anthropicStreamAccumulator struct {
 	response *Response
 	blocks   map[int]*anthropicStreamBlock
+	// model is the effective requested model, stamped on replay envelopes.
+	model string
 }
 
-func newAnthropicStreamAccumulator() *anthropicStreamAccumulator {
-	return &anthropicStreamAccumulator{blocks: make(map[int]*anthropicStreamBlock)}
+func newAnthropicStreamAccumulator(model string) *anthropicStreamAccumulator {
+	return &anthropicStreamAccumulator{blocks: make(map[int]*anthropicStreamBlock), model: model}
 }
 
 func (a *anthropicStreamAccumulator) start(msg *anthropic.Message) *Response {
-	a.response = convertResponse(msg)
+	a.response = convertResponse(msg, a.model)
 	a.response.Content = nil
 	return a.response
 }
 
-func (a *anthropicStreamAccumulator) startBlock(index int, blockType ContentType, id string, name string, text string, thinking string) {
+func (a *anthropicStreamAccumulator) startBlock(index int, rawType string, id string, name string, text string, thinking string, signature string, redactedData string) {
+	blockType := ContentType(rawType)
+	if rawType == "redacted_thinking" {
+		// No readable text: it exists only to be replayed.
+		blockType = ContentTypeReplay
+	}
 	block := ContentBlock{
 		Type:     blockType,
 		ID:       id,
@@ -240,7 +352,12 @@ func (a *anthropicStreamAccumulator) startBlock(index int, blockType ContentType
 		Text:     text,
 		Thinking: thinking,
 	}
-	a.blocks[index] = &anthropicStreamBlock{block: block}
+	a.blocks[index] = &anthropicStreamBlock{
+		block:        block,
+		rawType:      rawType,
+		signature:    signature,
+		redactedData: redactedData,
+	}
 }
 
 func (a *anthropicStreamAccumulator) appendDelta(index int, deltaType string, text string) {
@@ -253,19 +370,64 @@ func (a *anthropicStreamAccumulator) appendDelta(index int, deltaType string, te
 		block.block.Text += text
 	case "thinking_delta":
 		block.block.Thinking += text
+	case "signature_delta":
+		block.signature += text
 	case "input_json_delta":
 		block.inputRaw += text
 	}
 }
 
-func (a *anthropicStreamAccumulator) stopBlock(index int) {
+// finalizeThinkingReplay attaches the replay envelope for a completed thinking
+// or redacted_thinking block, rebuilt from the exact accumulated deltas. A
+// thinking block that never received its signature (a stream cut short) gets
+// no envelope: replaying an unsigned block would be rejected, and mux does not
+// fabricate signatures.
+func (a *anthropicStreamAccumulator) finalizeThinkingReplay(block *anthropicStreamBlock) error {
+	var raw []byte
+	var err error
+	switch block.rawType {
+	case "thinking":
+		if block.signature == "" {
+			return nil
+		}
+		raw, err = json.Marshal(struct {
+			Type      string `json:"type"`
+			Thinking  string `json:"thinking"`
+			Signature string `json:"signature"`
+		}{"thinking", block.block.Thinking, block.signature})
+	case "redacted_thinking":
+		if block.redactedData == "" {
+			return nil
+		}
+		raw, err = json.Marshal(struct {
+			Type string `json:"type"`
+			Data string `json:"data"`
+		}{"redacted_thinking", block.redactedData})
+	default:
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("anthropic: encoding streamed %s block: %w", block.rawType, err)
+	}
+	block.block.Replay = &ProviderReplay{
+		Provider: "anthropic",
+		Model:    a.model,
+		Data:     raw,
+	}
+	return nil
+}
+
+func (a *anthropicStreamAccumulator) stopBlock(index int) error {
 	block, ok := a.blocks[index]
-	if !ok || block.block.Type != ContentTypeToolUse {
-		return
+	if !ok {
+		return nil
+	}
+	if block.block.Type != ContentTypeToolUse {
+		return a.finalizeThinkingReplay(block)
 	}
 	if block.inputRaw == "" {
 		block.block.Input = make(map[string]any)
-		return
+		return nil
 	}
 	var input map[string]any
 	if err := json.Unmarshal([]byte(block.inputRaw), &input); err != nil {
@@ -275,9 +437,10 @@ func (a *anthropicStreamAccumulator) stopBlock(index int) {
 		// it were complete.
 		fmt.Fprintf(os.Stderr, "Warning: failed to parse streamed tool input for %s: %v\n", block.block.Name, err)
 		delete(a.blocks, index)
-		return
+		return nil
 	}
 	block.block.Input = input
+	return nil
 }
 
 func (a *anthropicStreamAccumulator) mergeDelta(stopReason StopReason, usage Usage) *Response {
@@ -346,8 +509,14 @@ func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request)
 	if err := validateRequest("anthropic", a.Capabilities(), req); err != nil {
 		return nil, err
 	}
+	if err := validateReplay("anthropic", req.Model, req.Messages); err != nil {
+		return nil, err
+	}
 
-	params := convertRequest(req)
+	params, err := convertRequest(req)
+	if err != nil {
+		return nil, err
+	}
 	stream := a.client.Messages.NewStreaming(ctx, params)
 
 	eventChan := make(chan StreamEvent, 100)
@@ -364,7 +533,7 @@ func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request)
 			close(eventChan)
 		}()
 
-		acc := newAnthropicStreamAccumulator()
+		acc := newAnthropicStreamAccumulator(req.Model)
 		for stream.Next() {
 			event := stream.Current()
 			switch event.Type {
@@ -381,13 +550,12 @@ func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request)
 				}
 				// Populate Block so consumers can distinguish text from tool_use
 				if event.ContentBlock.Type != "" {
-					blockType := ContentType(event.ContentBlock.Type)
+					acc.startBlock(int(event.Index), event.ContentBlock.Type, event.ContentBlock.ID, event.ContentBlock.Name, event.ContentBlock.Text, event.ContentBlock.Thinking, event.ContentBlock.Signature, event.ContentBlock.Data)
 					se.Block = &ContentBlock{
-						Type: blockType,
+						Type: acc.blocks[int(event.Index)].block.Type,
 						ID:   event.ContentBlock.ID,
 						Name: event.ContentBlock.Name,
 					}
-					acc.startBlock(int(event.Index), blockType, event.ContentBlock.ID, event.ContentBlock.Name, event.ContentBlock.Text, event.ContentBlock.Thinking)
 				}
 				eventChan <- se
 			case "content_block_delta":
@@ -400,14 +568,23 @@ func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request)
 				case "thinking_delta":
 					text = event.Delta.Thinking
 				}
-				acc.appendDelta(int(event.Index), event.Delta.Type, text)
+				// The signature is opaque provider state, not display text: it
+				// goes to the accumulator only, never into StreamEvent.Text.
+				if event.Delta.Type == "signature_delta" {
+					acc.appendDelta(int(event.Index), event.Delta.Type, event.Delta.Signature)
+				} else {
+					acc.appendDelta(int(event.Index), event.Delta.Type, text)
+				}
 				eventChan <- StreamEvent{
 					Type:  EventContentDelta,
 					Index: int(event.Index),
 					Text:  text,
 				}
 			case "content_block_stop":
-				acc.stopBlock(int(event.Index))
+				if err := acc.stopBlock(int(event.Index)); err != nil {
+					eventChan <- StreamEvent{Type: EventError, Error: err}
+					return
+				}
 				eventChan <- StreamEvent{
 					Type:  EventContentStop,
 					Index: int(event.Index),

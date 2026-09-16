@@ -26,11 +26,8 @@ type ProviderReplay struct {
 	Model    string          `json:"model"`
 	Data     json.RawMessage `json:"data"`
 
-	// The structural payload check in validateReplay currently requires a
-	// top-level, non-empty string "type" discriminator (the Responses item
-	// shape). Adapters for providers whose raw items lack one (Gemini,
-	// Anthropic — tickets 62ba/w9xj) must wrap items in a discriminator
-	// envelope or extend the check before wiring their replay support.
+	// Data is the provider's own item shape, never a mux invention, so its
+	// structural check in validateReplayBlock is provider-specific.
 }
 
 // ErrReplayMismatch indicates a replay envelope was carried into a request
@@ -86,12 +83,19 @@ func validateReplayBlock(provider, model string, msgIdx, blockIdx int, replay *P
 	if !json.Valid(replay.Data) {
 		return fmt.Errorf("%s: replay data is not valid JSON", field)
 	}
+	// Truncate the payload in every error below: opaque provider bytes must
+	// not leak into logs. The field path above identifies the block.
+	//
+	// A genai.Part has no top-level "type" discriminator — its kind is implied
+	// by which field is set — so Gemini payloads are checked against the SDK
+	// struct instead. Every other provider's items carry one.
+	if provider == "gemini" {
+		return validateGeminiReplayPayload(field, replay.Data)
+	}
 	var item struct {
 		Type string `json:"type"`
 	}
 	if err := json.Unmarshal(replay.Data, &item); err != nil || item.Type == "" {
-		// Truncate the payload: opaque provider bytes must not leak into
-		// logged errors. The field path above identifies the block.
 		return fmt.Errorf("%s: unsupported replay item payload: %.32q", field, replay.Data)
 	}
 	return nil
