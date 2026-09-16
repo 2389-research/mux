@@ -156,6 +156,17 @@ func TestToolAdapterError(t *testing.T) {
 	if result.Success {
 		t.Error("expected failure")
 	}
+	// The server's text lives in Error, not duplicated into Output too (mux#5ez6):
+	// tool.Result.ModelText is the single contract for what the model sees.
+	if result.Output != "" {
+		t.Errorf("Output = %q, want empty (text belongs in Error for a failed Result)", result.Output)
+	}
+	if result.Error != "error message" {
+		t.Errorf("Error = %q, want %q", result.Error, "error message")
+	}
+	if got := result.ModelText(); got != "error message" {
+		t.Errorf("ModelText() = %q, want %q", got, "error message")
+	}
 }
 
 // Server startup failure tests

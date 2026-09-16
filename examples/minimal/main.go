@@ -98,7 +98,7 @@ func main() {
 				case orchestrator.EventToolCall:
 					fmt.Printf("\n[Tool: %s]\n", ev.ToolName)
 				case orchestrator.EventToolResult:
-					fmt.Printf("[Result: %s]\n", ev.Result.Output)
+					fmt.Printf("[Result: %s]\n", ev.Result.ModelText())
 				case orchestrator.EventError:
 					fmt.Fprintf(os.Stderr, "\nError: %v\n", ev.Error)
 				}

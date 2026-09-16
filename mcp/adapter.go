@@ -58,11 +58,10 @@ func (a *ToolAdapter) Execute(ctx context.Context, params map[string]any) (*tool
 	}
 
 	output := a.extractOutput(mcpResult)
-	result := tool.NewResult(a.info.Name, !mcpResult.IsError, output, "")
 	if mcpResult.IsError {
-		result.Error = output
+		return tool.NewErrorResult(a.info.Name, output), nil
 	}
-	return result, nil
+	return tool.NewResult(a.info.Name, true, output, ""), nil
 }
 
 func (a *ToolAdapter) extractOutput(mcpResult *ToolCallResult) string {
