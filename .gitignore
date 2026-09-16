@@ -56,3 +56,6 @@ output.txt
 architecture.png
 architecture.svg
 .kata.local.toml
+
+# Harness-managed agent worktrees
+.claude/worktrees/
