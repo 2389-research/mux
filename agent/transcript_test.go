@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -334,5 +335,114 @@ func TestTranscriptWithToolCalls(t *testing.T) {
 	// Verify tool result preserved
 	if loaded.Entries[1].Content[0].Type != llm.ContentTypeToolResult {
 		t.Errorf("Entry[1].Content[0].Type = %v, want tool_result", loaded.Entries[1].Content[0].Type)
+	}
+}
+
+func TestTranscriptSaveFailurePreservesExistingFile(t *testing.T) {
+	cases := []struct {
+		name string
+		save func(*Transcript, string) error
+		load func(string) (*Transcript, error)
+	}{
+		{"JSON", (*Transcript).SaveToFile, LoadFromFile},
+		{"JSONL", (*Transcript).SaveToFileJSONL, LoadFromFileJSONL},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := NewTranscript("test-agent")
+			tr.Entries = []TranscriptEntry{
+				{Timestamp: time.Now(), Role: "user", Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "hello"}}},
+			}
+
+			tmpDir := t.TempDir()
+			path := filepath.Join(tmpDir, "transcript")
+
+			if err := tc.save(tr, path); err != nil {
+				t.Fatalf("initial save error: %v", err)
+			}
+
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read saved file: %v", err)
+			}
+			if len(before) == 0 {
+				t.Fatal("initial saved file is empty")
+			}
+
+			// Put an unsupported value in the already-saved entry's
+			// ContentBlock.Input so the encoder fails on the very entry
+			// already on disk. For JSONL this guarantees the broken
+			// partial write (header only) differs from "before"; a
+			// header-only match masked the bug when the bad value was
+			// appended as a later entry instead.
+			tr.Entries[0].Content[0].Input = map[string]any{"unsupported": make(chan int)}
+
+			if err := tc.save(tr, path); err == nil {
+				t.Fatal("save with unsupported value should have failed")
+			}
+
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read file after failed save: %v", err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatalf("previous file changed after failed save: before=%d bytes, after=%d bytes", len(before), len(after))
+			}
+
+			loaded, err := tc.load(path)
+			if err != nil {
+				t.Fatalf("load after failed save: %v", err)
+			}
+			if loaded.AgentID != "test-agent" {
+				t.Errorf("AgentID = %q, want %q", loaded.AgentID, "test-agent")
+			}
+			if len(loaded.Entries) != 1 {
+				t.Errorf("loaded Entries len = %d, want 1 (the pre-failure state)", len(loaded.Entries))
+			}
+
+			// The failed save must not leave a temp file behind in the directory.
+			entries, err := os.ReadDir(tmpDir)
+			if err != nil {
+				t.Fatalf("read dir: %v", err)
+			}
+			if len(entries) != 1 {
+				names := make([]string, len(entries))
+				for i, e := range entries {
+					names[i] = e.Name()
+				}
+				t.Errorf("dir has %d entries after failed save, want 1: %v", len(entries), names)
+			}
+		})
+	}
+}
+
+// TestTranscriptJSONLRoundTripsLargeEntry covers a transcript entry whose single
+// JSONL line exceeds bufio.Scanner's 64 KiB default. Provider replay envelopes and
+// extended-thinking blocks both routinely produce entries that large, and the whole
+// point of this file is resume: a transcript that saves but will not load back is
+// the failure that matters.
+func TestTranscriptJSONLRoundTripsLargeEntry(t *testing.T) {
+	big := strings.Repeat("x", 100*1024)
+	tr := NewTranscript("large-entry")
+	tr.Append(llm.Message{
+		Role:   llm.RoleAssistant,
+		Blocks: []llm.ContentBlock{{Type: llm.ContentTypeThinking, Text: big}},
+	})
+
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	if err := tr.SaveToFileJSONL(path); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	got, err := LoadFromFileJSONL(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got.Len() != 1 {
+		t.Fatalf("entries: got %d want 1", got.Len())
+	}
+	if text := got.Entries[0].Content[0].Text; text != big {
+		t.Errorf("thinking text: got %d bytes want %d", len(text), len(big))
 	}
 }

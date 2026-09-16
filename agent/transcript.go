@@ -8,10 +8,18 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/2389-research/mux/llm"
 )
+
+// MaxTranscriptLineBytes is the per-line ceiling when reading JSONL transcripts.
+// One line carries one entry's entire content, and provider replay envelopes and
+// extended-thinking blocks routinely run past bufio.Scanner's 64 KiB default. That
+// default makes an otherwise intact transcript impossible to resume from, so this
+// matches the 16 MiB ceiling the MCP stdio transport uses for the same reason.
+const MaxTranscriptLineBytes = 16 * 1024 * 1024
 
 // TranscriptEntry represents a single entry in the transcript.
 type TranscriptEntry struct {
@@ -145,6 +153,7 @@ func LoadJSONL(r io.Reader) (*Transcript, error) {
 	}
 
 	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), MaxTranscriptLineBytes)
 	lineNum := 0
 
 	for scanner.Scan() {
@@ -204,21 +213,53 @@ func LoadJSONL(r io.Reader) (*Transcript, error) {
 	return t, nil
 }
 
-// SaveToFile writes the transcript to a file (JSON format).
-func (t *Transcript) SaveToFile(path string) (err error) {
-	f, err := os.Create(path)
+// writeFileAtomic encodes to a temporary file created exclusively in path's
+// directory, then renames it over path only once encoding, syncing, and
+// closing that temporary file all succeed. A serialization or write
+// failure never touches path, so any previously saved content there
+// remains byte-for-byte intact and loadable.
+func writeFileAtomic(path string, encode func(io.Writer) error) (err error) {
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
-		return fmt.Errorf("create file: %w", err)
+		return fmt.Errorf("create temp file: %w", err)
 	}
-	// Capture a close error so a failed flush on networked or buffered
-	// filesystems surfaces instead of silently losing the trailing write.
+	tmpPath := f.Name()
 	defer func() {
-		if cerr := f.Close(); cerr != nil && err == nil {
-			err = fmt.Errorf("close file: %w", cerr)
+		if err != nil {
+			os.Remove(tmpPath) // best-effort: don't leave an orphan temp file behind
 		}
 	}()
 
-	return t.SaveJSON(f)
+	if err = encode(f); err != nil {
+		f.Close()
+		return fmt.Errorf("encode: %w", err)
+	}
+	if err = f.Sync(); err != nil {
+		f.Close()
+		return fmt.Errorf("sync temp file: %w", err)
+	}
+	// Capture a close error so a failed flush on networked or buffered
+	// filesystems surfaces instead of silently losing the trailing write.
+	if err = f.Close(); err != nil {
+		return fmt.Errorf("close temp file: %w", err)
+	}
+	if err = os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("rename temp file: %w", err)
+	}
+	return nil
+}
+
+// SaveToFile writes the transcript to a file (JSON format). The write is
+// atomic: content is encoded to a temporary file in the destination
+// directory first, and path is only replaced once that succeeds, so a
+// serialization or write failure leaves any existing file at path intact.
+// The file is written at mode 0600 (owner read/write only).
+func (t *Transcript) SaveToFile(path string) error {
+	if err := writeFileAtomic(path, t.SaveJSON); err != nil {
+		return fmt.Errorf("save transcript: %w", err)
+	}
+	return nil
 }
 
 // LoadFromFile reads a transcript from a file (JSON format).
@@ -232,21 +273,16 @@ func LoadFromFile(path string) (*Transcript, error) {
 	return LoadJSON(f)
 }
 
-// SaveToFileJSONL writes the transcript to a file (JSONL format).
-func (t *Transcript) SaveToFileJSONL(path string) (err error) {
-	f, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("create file: %w", err)
+// SaveToFileJSONL writes the transcript to a file (JSONL format). The write
+// is atomic: content is encoded to a temporary file in the destination
+// directory first, and path is only replaced once that succeeds, so a
+// serialization or write failure leaves any existing file at path intact.
+// The file is written at mode 0600 (owner read/write only).
+func (t *Transcript) SaveToFileJSONL(path string) error {
+	if err := writeFileAtomic(path, t.SaveJSONL); err != nil {
+		return fmt.Errorf("save JSONL transcript: %w", err)
 	}
-	// Capture a close error so a failed flush on networked or buffered
-	// filesystems surfaces instead of silently losing the trailing write.
-	defer func() {
-		if cerr := f.Close(); cerr != nil && err == nil {
-			err = fmt.Errorf("close file: %w", cerr)
-		}
-	}()
-
-	return t.SaveJSONL(f)
+	return nil
 }
 
 // LoadFromFileJSONL reads a transcript from a file (JSONL format).
