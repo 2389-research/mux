@@ -117,3 +117,36 @@ executes under the pinned toolchain and scans that standard library — never th
 declared floor's. A floor below a stdlib advisory's fix threshold is therefore
 invisible to every gate in this repo. Say so in writing rather than implying CI
 covers it.
+
+## Proving a new test reproduces the bug, when it needs new names (2026-09-16)
+
+The standard check is to revert the production fix and watch the new test fail.
+That only works if the test compiles without the fix. When the test references
+names the fix introduced — new exported types, constants, methods — reverting
+gives a compile error, which says nothing about whether the assertion is any
+good. Both look red in the terminal.
+
+Mutate the fix instead. Keep every name; break one behaviour at a time; confirm
+the test that should catch it is the one that fails, by its exact message. On
+kata yhen three mutations each landed on the right test: restoring the discarded
+cancel path failed both cancellation tests, forcing the already-ran check to
+false failed with `audit ran 2 times across both Resumes, want exactly 1`, and
+dropping the call list from `CheckpointError` failed with
+`CheckpointError.Calls = [], want [call-1]`.
+
+If a mutation reports `ok`, check the mutation actually applied before believing
+it. A scripted edit whose pattern silently missed reports a clean run of
+unmutated code, which reads exactly like a passing mutation test.
+
+## A whole wave making the same mistake is a prompt defect (2026-09-16)
+
+All six wave-1 agents filed their CHANGELOG entry the wrong way, and each was
+corrected at review — six times, as six findings. It was one defect: the
+dispatch prompt never stated the standard. Wave 2 stated it up front and both
+units got it right on the first try.
+
+Agents dispatched with clean contexts cannot infer a house convention that is
+not written where they will read it. When a review finding repeats across a
+wave, stop fixing instances and amend the dispatch template, then check on the
+next wave that it took. The GOROOT substitution above went the same way: four
+agents rediscovered it one at a time before anyone put it in the prompt.
