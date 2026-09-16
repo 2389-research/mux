@@ -46,18 +46,21 @@ func TestGolden_ToolIntentPayload_TypedValue_KeysSortedLargeIntPreserved(t *test
 			"a":     json.Number("9007199254740993"),
 			"query": "cats <and> dogs & birds",
 		},
-		RequestSHA256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85",
+		RequestSHA256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 	}
 	got, err := EncodePayload(p)
 	if err != nil {
 		t.Fatalf("EncodePayload: %v", err)
 	}
-	const want = `{"arguments":{"a":9007199254740993,"b":2,"query":"cats \u003cand\u003e dogs \u0026 birds"},"name":"search_web","request_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85"}`
+	const want = `{"arguments":{"a":9007199254740993,"b":2,"query":"cats \u003cand\u003e dogs \u0026 birds"},"name":"search_web","request_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}`
 	if string(got) != want {
 		t.Fatalf("canonical bytes mismatch:\ngot:  %s\nwant: %s", got, want)
 	}
 	if got[len(got)-1] == '\n' {
 		t.Fatal("trailing newline present")
+	}
+	if err := ValidatePayload("tool.intent", got); err != nil {
+		t.Fatalf("ValidatePayload(%q): %v", "tool.intent", err)
 	}
 }
 
@@ -69,7 +72,7 @@ func TestGolden_Record_FullRoundTrip_UTCAndSHA256(t *testing.T) {
 			"a":     json.Number("9007199254740993"),
 			"query": "cats <and> dogs & birds",
 		},
-		RequestSHA256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85",
+		RequestSHA256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 	})
 	if err != nil {
 		t.Fatalf("EncodePayload: %v", err)
@@ -88,12 +91,15 @@ func TestGolden_Record_FullRoundTrip_UTCAndSHA256(t *testing.T) {
 		OperationID:       "op-0001",
 		Payload:           payload,
 	}
+	if err := ValidatePayload(rec.Kind, rec.Payload); err != nil {
+		t.Fatalf("ValidatePayload(%q): %v", rec.Kind, err)
+	}
 
 	got, err := EncodeRecord(rec)
 	if err != nil {
 		t.Fatalf("EncodeRecord: %v", err)
 	}
-	const want = `{"event_id":"evt-0001","execution_epoch":1,"kind":"tool.intent","occurred_at":"2026-09-16T17:30:00Z","operation_id":"op-0001","payload":{"arguments":{"a":9007199254740993,"b":2,"query":"cats \u003cand\u003e dogs \u0026 birds"},"name":"search_web","request_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85"},"runtime_instance_id":"rti-0001","schema_version":1,"session_id":"sess-0001","tool_call_id":"call-0001","turn_id":"turn-0001"}`
+	const want = `{"event_id":"evt-0001","execution_epoch":1,"kind":"tool.intent","occurred_at":"2026-09-16T17:30:00Z","operation_id":"op-0001","payload":{"arguments":{"a":9007199254740993,"b":2,"query":"cats \u003cand\u003e dogs \u0026 birds"},"name":"search_web","request_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},"runtime_instance_id":"rti-0001","schema_version":1,"session_id":"sess-0001","tool_call_id":"call-0001","turn_id":"turn-0001"}`
 	if string(got) != want {
 		t.Fatalf("canonical record bytes mismatch:\ngot:  %s\nwant: %s", got, want)
 	}
@@ -101,7 +107,7 @@ func TestGolden_Record_FullRoundTrip_UTCAndSHA256(t *testing.T) {
 		t.Fatal("trailing newline present")
 	}
 
-	const wantSHA = "d8396f1a7584b2971586c7e5cb72b0b96005c2a52f44b67ccb0f9cdcbed9e274"
+	const wantSHA = "abfd5bb13b67819105aa8c2f3ebaf1e2ad1faceb9b94dd9ab1eab2bb411e02fd"
 	gotSHA, err := RecordSHA256(rec)
 	if err != nil {
 		t.Fatalf("RecordSHA256: %v", err)
