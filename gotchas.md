@@ -321,3 +321,31 @@ where the schema stops and mux's own rule starts.
 
 A finding that cites a spec makes two claims: the gap exists, and the spec covers it.
 Reviewers check the first one.
+
+## A generic fallback error makes every specific check unfalsifiable (2026-09-16)
+
+mux#1kr7 added 11 typed `StreamProtocolError` reasons and a 12-case table test for them.
+Each case asserted `errors.As(event.Error, &protocolErr)` and nothing about
+`protocolErr.Reason`.
+
+The code also has a post-loop catch-all, `reasonStreamEndedEarly`, which fires whenever a
+stream ends without a clean `message_stop` — true in most malformed fixtures. It satisfied
+every assertion. Neutralizing the duplicate-start guard (`exists` -> `exists && false`) left
+all 12 subtests passing, and `go test -race ./llm/ -count=1` passing too. The named check
+could be deleted and no test would notice.
+
+Map the error constants to their test references before reading a single test body:
+
+    for r in $(grep -hoE 'reason[A-Za-z]+ +=' llm/*.go | sed 's/ *=//' | sort -u); do
+      printf "%-30s prod=%-3s test=%s\n" "$r" \
+        "$(cat llm/*.go | grep -c "\b$r\b")" "$(cat llm/*_test.go | grep -c "\b$r\b")"
+    done
+
+Eleven constants, every one `test=0`. The review that surfaced this reported "5 of 12
+subtests are masked" — true, but the constant map showed the entire reason surface was
+untested by name. Different size, different fix: not "patch five cases" but "the table needs
+a `wantReason` column".
+
+The irony is that a thorough fallback hides more. Code careful enough to never end a stream
+silently is exactly the code where "did it error?" becomes a tautology. Assert which error,
+not whether.
