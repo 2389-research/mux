@@ -237,3 +237,46 @@ The script still did its job. It reduced 44 sites to the 10 worth reading by han
 reading them settled the question in one pass. Write the crude rule, accept the false
 positives, and read what it hands you — a checker that under-flags tells you nothing, and
 one that over-flags costs a few minutes.
+
+## A review finding needs a baseline column too (2026-09-16)
+
+Two of the four findings from ac20's adversarial review measured something real and
+attributed it to the wrong cause. Both survived because nobody measured the control.
+
+A reviewer reported the recording codec's cycle guard as exponentially slow on shared
+but non-cyclic input, with clean numbers: a diamond DAG (`{"a": prev, "b": prev}` per
+level) took 2.6ms at depth 10, 1.2s at depth 20, 19.7s at depth 24. True, reproducible,
+and not the guard's fault. JSON has no references, so serializing a shared-structure
+value expands it — plain `json.Marshal` on the identical value is exponential too.
+Measured side by side, `EncodePayload` costs a flat ~4x the marshal at every depth
+(depth 20: 840ms vs 199ms, output 17.8 MB). Same complexity class, constant factor.
+Memoizing the guard would drop 840ms to 200ms and still emit 17.8 MB.
+
+The second: a validator that never checks `ToolResultPayload.EvidenceRef` against the
+schema's `minLength: 1`. Real gap, but the field is `json:"evidence_ref,omitempty"`, so
+our own encoder cannot emit the empty string that would violate it. The bug is narrow —
+foreign raw JSON only — not the trust-chain hole it read as.
+
+Both are the schema entry's one-column table in another costume. "Is it slow?" and "is
+the constraint unenforced?" are single-column questions. Ask what the same operation
+costs without the mechanism, and what the encoder can actually produce.
+
+## A fixture that pins bytes and their hash is never a one-character fix (2026-09-16)
+
+`record_full_roundtrip_utc_and_sha256.json` carried a 63-character `request_sha256` —
+the empty-string SHA-256 with its final `5` dropped, inside both its `input` and `output`
+strings. The fixture also has a top-level `sha256` that genuinely binds the canonical
+output bytes (verified: it matched before the fix). Correcting the digest changes those
+bytes, so that field moves too — `d8396f1a…` becomes `abfd5bb1…`. Hand-edit the digit
+alone and the fixture contradicts itself.
+
+It shipped because `golden_fixtures_test.go` compares encoded bytes to the pinned output
+and never calls `ValidatePayload` or `ValidateRecord`. The package's own `hex64Pattern`
+is correct and would have caught it. "Encodes deterministically", "is semantically
+well-formed" and "conforms to the frozen schema" are three properties, and a byte-pin
+composes only the first. A validator nobody calls cannot be told from one that always
+returns nil.
+
+Fixture corpora advertised as a cross-host contract earn the semantic check. Not every
+fixture, though: synthetic scalars like `integer_one.json` are deliberately not any real
+payload kind and fail such a check spuriously. Tag the realistic ones and skip the rest.
