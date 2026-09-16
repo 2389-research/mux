@@ -56,3 +56,20 @@ jobs:
           # so we pin to a known v2.x release matching the version used
           # locally by the pre-commit hook.
           version: v2.12.2
+
+  vulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: govulncheck
+        # Scanner version is pinned in the Makefile (GOVULNCHECK_VERSION) so
+        # this job and local runs can never drift apart.
+        run: make vulncheck

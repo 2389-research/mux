@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - OpenAI non-streaming responses now derive `StopReason` from the Responses API `status` and `incomplete_details.reason` (previously every response defaulted to `end_turn`); refusal output content overrides a completed response to `refusal`.
 - Chat Completions and Gemini responses with an empty choice/candidate list now report `StopReason` `other` instead of an empty string.
 
+### Security
+- Updated `google.golang.org/grpc` v1.66.2 → v1.83.1, `golang.org/x/text` v0.27.0 → v0.39.0, and `golang.org/x/net` v0.41.0 → v0.55.0, resolving govulncheck's reachable findings GO-2026-6348 and GO-2026-6061 (grpc), GO-2026-5970 (x/text), and GO-2026-5026 and GO-2026-4918 (x/net). Reachability ran through mux's own MCP client code (`mcp/stdio.go`, `mcp/http.go`) calling into the dependency graph; these are static reachability findings, not confirmed exploits. The bump raises `go.mod`'s minimum language version from 1.24 to 1.25.0. GO-2026-5026 and GO-2026-4918 also have separate fixes in the Go standard library itself (`net/http/internal/http2`, fixed at Go 1.25.13 and 1.26.3 respectively); `go.mod` now pins `toolchain go1.26.6` so CI and downstream builds default to a standard library past both thresholds instead of the bare 1.25.0 floor. Build, vet, lint, and the race and integration test suites pass on both the pinned toolchain (1.26.6) and the 1.25 floor (1.25.12); govulncheck (scanner v1.8.0, which itself requires Go ≥ 1.26 to run) is clean under the pinned toolchain.
+- Added a pinned `govulncheck` gate (`make vulncheck`, scanner version `v1.8.0` tracked in one Makefile variable) as its own CI job, run on every push and pull request.
+
 ## [0.9.0] - 2026-06-26
 
 ### Added
