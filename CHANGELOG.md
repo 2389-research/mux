@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - OpenAI non-streaming responses now derive `StopReason` from the Responses API `status` and `incomplete_details.reason` (previously every response defaulted to `end_turn`); refusal output content overrides a completed response to `refusal`.
 - Chat Completions and Gemini responses with an empty choice/candidate list now report `StopReason` `other` instead of an empty string.
+- Inline PDF content blocks now serialize `file_data` as a `data:application/pdf;base64,...` URL on both the OpenAI Responses and Chat Completions paths; previously they sent a bare base64 string, which matches neither the OpenAI file-inputs contract nor OpenRouter's PDF contract. `input_audio.data` is unaffected and remains raw base64.
 
 ## [0.9.0] - 2026-06-26
 
