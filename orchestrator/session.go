@@ -28,7 +28,31 @@ const (
 	ReasonApprovalRequired Reason = "authorization.required"
 	// ReasonInputRequired is reserved for a future gene (the loop does not yet produce it).
 	ReasonInputRequired Reason = "input.requested"
+	// ReasonCancelled: the loop stopped part-way through a tool batch because its
+	// context was cancelled. Pending lists only the calls that never ran; the
+	// calls that did keep their results in the snapshot's messages.
+	ReasonCancelled Reason = "execution.cancelled"
 )
+
+// CheckpointError reports that a tool batch ran but its results could not be
+// persisted. Calls names every call whose result is in memory only: the last
+// durable snapshot predates the batch, so a session resumed from the store will
+// dispatch those calls a second time. The orchestrator cannot tell a lost result
+// from a call that never ran, so it reports the calls rather than re-running
+// them. Callers that cannot tolerate a repeated side effect should persist
+// Messages() themselves, or check the effect, before resuming.
+type CheckpointError struct {
+	SessionID string
+	Calls     []string
+	Err       error
+}
+
+func (e *CheckpointError) Error() string {
+	return fmt.Sprintf("orchestrator: session %s: checkpoint failed after tool calls %v ran; their results are in memory only: %v",
+		e.SessionID, e.Calls, e.Err)
+}
+
+func (e *CheckpointError) Unwrap() error { return e.Err }
 
 // PendingToolCall is a caller-facing projection of one tool call from the
 // suspending assistant turn. It is informational: re-execution on Resume reads

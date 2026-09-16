@@ -61,6 +61,12 @@ type ThinkingSettings struct {
 // CompactUserMessageMaxTokens is the maximum tokens of recent user messages to preserve.
 const CompactUserMessageMaxTokens = 20000
 
+// ToolCancelledText is the tool_result text the orchestrator synthesizes for a
+// call that never ran because its batch was cancelled. It is what the model
+// reads, and it is how a resumed batch tells a call that still needs to run from
+// one that already ran and had side effects. Tools must not return it verbatim.
+const ToolCancelledText = "Tool call was not executed: the tool batch was cancelled before this call ran."
+
 // warnedSchemaTools tracks tools we've warned about missing schemas (to avoid spam)
 var warnedSchemaTools sync.Map
 
@@ -355,11 +361,11 @@ func (o *Orchestrator) runIterations(ctx context.Context, startIter int, prompt 
 					return o.suspend(ctx, *susp)
 				}
 			}
-			if err := o.executeTools(ctx, toolUses); err != nil {
+			if err := o.executeTools(ctx, toolUses, nil); err != nil {
 				return o.handleError(err)
 			}
 			if err := o.checkpoint(ctx, StatusRunning); err != nil {
-				return o.handleError(fmt.Errorf("checkpoint failed: %w", err))
+				return o.handleError(o.batchCheckpointError(err))
 			}
 			continue
 		}
@@ -545,21 +551,61 @@ func (o *Orchestrator) processResponse(resp *llm.Response) {
 	o.messages = append(o.messages, llm.Message{Role: llm.RoleAssistant, Blocks: resp.Content})
 }
 
-func (o *Orchestrator) executeTools(ctx context.Context, toolUses []llm.ContentBlock) error {
+// executeTools runs the batch in order and appends exactly one tool_result per
+// call, on every exit path: a cancelled batch fills the calls it cut off with
+// ToolCancelledText rather than orphaning the assistant tool_use message, and a
+// call whose result is already in history is carried forward instead of run a
+// second time. A non-nil decision replays a resumed batch: the executor's
+// approval func is rebound to the exact ContentBlock.ID of each call immediately
+// before that call runs, so a decision can only ever answer the call it was made
+// for. A call that fails before its approval check — its tool was unregistered
+// mid-batch, say — therefore cannot shift a later call onto another call's decision.
+func (o *Orchestrator) executeTools(ctx context.Context, toolUses []llm.ContentBlock, decision *Decision) error {
 	if err := o.transition(StateExecutingTool); err != nil {
 		return err
 	}
 
+	if decision != nil {
+		// Hand the caller's approval func back on every exit path, error included.
+		prev := o.executor.ApprovalFunc()
+		defer o.executor.SetApprovalFunc(prev)
+	}
+
+	recorded := o.takeRecordedResults(toolUses)
 	resultBlocks := make([]llm.ContentBlock, 0, len(toolUses))
+	var unrun []llm.ContentBlock
+	cancelled := false
 	for _, use := range toolUses {
-		// Check context before each tool execution to handle cancellation during long-running operations.
-		// On cancellation, we abandon all results (including any already collected) rather than sending
-		// partial results to the LLM. This is intentional: partial tool execution state could confuse
-		// the LLM's understanding of what happened.
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+		// A call that already has a result ran once and had whatever side effects
+		// it has; carry its result forward rather than dispatching it again.
+		if done, ok := recorded[use.ID]; ok {
+			resultBlocks = append(resultBlocks, done)
+			continue
+		}
+
+		// Check context before each tool execution to handle cancellation during
+		// long-running operations. Every call from here on is reported as not
+		// executed, so the turn stays paired for the provider and a resumed batch
+		// can tell these calls from the ones that already ran.
+		if !cancelled {
+			select {
+			case <-ctx.Done():
+				cancelled = true
+			default:
+			}
+		}
+		if cancelled {
+			resultBlocks = append(resultBlocks, cancelledResult(use))
+			unrun = append(unrun, use)
+			o.eventBus.Publish(NewToolResultEvent(tool.NewErrorResult(use.Name, ToolCancelledText)))
+			continue
+		}
+
+		if decision != nil {
+			approved := decision.approves(use.ID)
+			o.executor.SetApprovalFunc(func(context.Context, tool.Tool, map[string]any) (bool, error) {
+				return approved, nil
+			})
 		}
 
 		result, err := o.executor.Execute(ctx, use.Name, use.Input)
@@ -589,7 +635,105 @@ func (o *Orchestrator) executeTools(ctx context.Context, toolUses []llm.ContentB
 	}
 
 	o.messages = append(o.messages, llm.Message{Role: llm.RoleUser, Blocks: resultBlocks})
+	if cancelled {
+		return o.checkpointCancelled(ctx, unrun)
+	}
 	return nil
+}
+
+// cancelledResult is the tool_result the model sees for a call the cancellation
+// cut off before it ran.
+func cancelledResult(use llm.ContentBlock) llm.ContentBlock {
+	return llm.ContentBlock{
+		Type:      llm.ContentTypeToolResult,
+		ToolUseID: use.ID,
+		Name:      use.Name, // Include tool name for Gemini compatibility
+		Text:      ToolCancelledText,
+		IsError:   true,
+	}
+}
+
+// ranAlready reports whether a recorded tool_result stands for a call that was
+// actually dispatched. A synthesized cancellation says the opposite: that call
+// never ran, so a resumed batch still owes it an execution.
+func ranAlready(block llm.ContentBlock) bool {
+	return block.Type == llm.ContentTypeToolResult && block.Text != ToolCancelledText
+}
+
+// takeRecordedResults removes the results already recorded for this batch from
+// history and returns the ones whose calls actually ran, keyed by call ID. A
+// replayed batch rewrites that one results message instead of appending a second
+// set of results for the same assistant turn, so every call keeps exactly one
+// result. Anything but this batch's own results message is left alone.
+func (o *Orchestrator) takeRecordedResults(toolUses []llm.ContentBlock) map[string]llm.ContentBlock {
+	if len(o.messages) == 0 {
+		return nil
+	}
+	last := o.messages[len(o.messages)-1]
+	if last.Role != llm.RoleUser || len(last.Blocks) == 0 {
+		return nil
+	}
+	inBatch := make(map[string]bool, len(toolUses))
+	for _, use := range toolUses {
+		inBatch[use.ID] = true
+	}
+	for _, block := range last.Blocks {
+		if block.Type != llm.ContentTypeToolResult || !inBatch[block.ToolUseID] {
+			return nil
+		}
+	}
+
+	recorded := make(map[string]llm.ContentBlock, len(last.Blocks))
+	for _, block := range last.Blocks {
+		if ranAlready(block) {
+			recorded[block.ToolUseID] = block
+		}
+	}
+	o.messages = o.messages[:len(o.messages)-1]
+	return recorded
+}
+
+// checkpointCancelled persists the repaired turn and returns the cancellation.
+// The snapshot suspends on the calls that never ran, so a resumed session
+// dispatches those and leaves the ones that already had side effects alone. The
+// write runs on a cancellation-free context on purpose: the cancellation is
+// exactly what makes the record worth keeping.
+func (o *Orchestrator) checkpointCancelled(ctx context.Context, unrun []llm.ContentBlock) error {
+	cause := ctx.Err()
+	if o.config.SessionStore == nil {
+		return cause
+	}
+	snap := o.snapshot(StatusSuspended)
+	snap.Suspension = &Suspension{Reason: ReasonCancelled, Pending: o.pendingCalls(unrun)}
+	if err := o.config.SessionStore.Save(context.WithoutCancel(ctx), snap); err != nil {
+		return fmt.Errorf("%w: %w", cause, o.batchCheckpointError(err))
+	}
+	return cause
+}
+
+// batchCheckpointError names the calls whose results a failed checkpoint left in
+// memory only, so the caller can judge whether a second execution is safe.
+func (o *Orchestrator) batchCheckpointError(err error) *CheckpointError {
+	return &CheckpointError{SessionID: o.sessionID, Calls: o.dispatchedCalls(), Err: err}
+}
+
+// dispatchedCalls returns the IDs of the calls in the most recent results
+// message that actually ran.
+func (o *Orchestrator) dispatchedCalls() []string {
+	if len(o.messages) == 0 {
+		return nil
+	}
+	last := o.messages[len(o.messages)-1]
+	if last.Role != llm.RoleUser {
+		return nil
+	}
+	ids := make([]string, 0, len(last.Blocks))
+	for _, block := range last.Blocks {
+		if ranAlready(block) {
+			ids = append(ids, block.ToolUseID)
+		}
+	}
+	return ids
 }
 
 func (o *Orchestrator) transition(to State) error {
@@ -631,34 +775,40 @@ func (o *Orchestrator) checkpoint(ctx context.Context, status Status) error {
 	return o.config.SessionStore.Save(ctx, o.snapshot(status))
 }
 
-// pendingApproval returns a Suspension if any tool use in the batch needs
-// approval, listing every call in the batch (so Resume replays the whole turn).
-// Returns nil when nothing needs approval.
-func (o *Orchestrator) pendingApproval(toolUses []llm.ContentBlock) *Suspension {
+// pendingCalls projects tool_use blocks into the caller-facing pending list.
+func (o *Orchestrator) pendingCalls(toolUses []llm.ContentBlock) []PendingToolCall {
 	pending := make([]PendingToolCall, 0, len(toolUses))
-	needsAny := false
 	for _, use := range toolUses {
-		needs := o.executor.NeedsApproval(use.Name, use.Input)
-		if needs {
-			needsAny = true
-		}
 		pending = append(pending, PendingToolCall{
 			ID:            use.ID,
 			Name:          use.Name,
 			Params:        use.Input,
-			NeedsApproval: needs,
+			NeedsApproval: o.executor.NeedsApproval(use.Name, use.Input),
 		})
 	}
-	if !needsAny {
-		return nil
+	return pending
+}
+
+// pendingApproval returns a Suspension if any tool use in the batch needs
+// approval, listing every call in the batch (so Resume replays the whole turn).
+// Returns nil when nothing needs approval.
+func (o *Orchestrator) pendingApproval(toolUses []llm.ContentBlock) *Suspension {
+	pending := o.pendingCalls(toolUses)
+	for _, call := range pending {
+		if call.NeedsApproval {
+			return &Suspension{Reason: ReasonApprovalRequired, Pending: pending}
+		}
 	}
-	return &Suspension{Reason: ReasonApprovalRequired, Pending: pending}
+	return nil
 }
 
 // Resume reloads a suspended session and continues it using the caller's
 // approval Decision. Approved tools execute; denied tools become error
-// tool_results (so the model can react). The loop then continues until the next
-// suspension or completion. Returns *Suspended again if it re-suspends.
+// tool_results (so the model can react). A call whose result is already in the
+// snapshot ran once and is not dispatched again — its recorded result is carried
+// into the replayed turn — so resuming a session cancelled part-way through a
+// batch finishes the batch instead of repeating it. The loop then continues until
+// the next suspension or completion. Returns *Suspended again if it re-suspends.
 func (o *Orchestrator) Resume(ctx context.Context, sessionID string, d Decision) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -702,42 +852,14 @@ func (o *Orchestrator) resumeCore(ctx context.Context, d Decision) error {
 		return o.handleError(err)
 	}
 
-	restore := o.installDecisionApproval(toolUses, d)
-	err := o.executeTools(ctx, toolUses)
-	restore()
-	if err != nil {
+	if err := o.executeTools(ctx, toolUses, &d); err != nil {
 		return o.handleError(err)
 	}
 	if err := o.checkpoint(ctx, StatusRunning); err != nil {
-		return o.handleError(fmt.Errorf("checkpoint failed: %w", err))
+		return o.handleError(o.batchCheckpointError(err))
 	}
 
 	return o.runIterations(ctx, o.iteration+1, "")
-}
-
-// installDecisionApproval sets a temporary approval func that resolves each
-// approval-required tool in toolUses (in batch order) against d, and returns a
-// closure that restores the previous approval func. executeTools invokes the
-// approval func only for tools whose RequiresApproval is true, in the same order
-// as toolUses, so an ordered queue of those tool-use IDs aligns 1:1 with the calls.
-func (o *Orchestrator) installDecisionApproval(toolUses []llm.ContentBlock, d Decision) func() {
-	queue := make([]string, 0, len(toolUses))
-	for _, use := range toolUses {
-		if o.executor.NeedsApproval(use.Name, use.Input) {
-			queue = append(queue, use.ID)
-		}
-	}
-	prev := o.executor.ApprovalFunc()
-	idx := 0
-	o.executor.SetApprovalFunc(func(_ context.Context, _ tool.Tool, _ map[string]any) (bool, error) {
-		id := ""
-		if idx < len(queue) {
-			id = queue[idx]
-		}
-		idx++
-		return d.approves(id), nil
-	})
-	return func() { o.executor.SetApprovalFunc(prev) }
 }
 
 // lastAssistantToolUses returns the tool_use blocks of the most recent assistant
