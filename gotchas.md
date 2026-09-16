@@ -194,3 +194,46 @@ that reproduced the leak before claiming done. Treat "someone already did
 this" claims and reference branches as leads, never as source of truth —
 reread the actual current code and actual currently-passing tests before
 trusting either.
+
+## "I searched exhaustively and it isn't there" is a claim, not a result (2026-09-16)
+
+An agent implementing kata ac20 reported that three types named in its own plan —
+`RestoreInput`, `RestoredState`, `CommittedCheckpoint` — had no field-level specification
+anywhere in the tracker, and declined to invent them. Declining was right; inventing a
+"reviewed contract" type is exactly what the review gate exists to stop. The search was
+wrong. It swept ac20, 1rky, e91h and x3hz, because x3hz names 1rky as the owner of these
+definitions. The complete Go structs were in `9cg6`, under "## Exact additional types".
+
+Ownership metadata told the agent where to look and was misleading. The spec lived with the
+consumer that needed the types, not with the issue nominated as their owner.
+
+Testing the negative claim cost one command — count keyword hits per issue rather than
+re-reading the issues already read:
+
+    for id in 1rky e91h x3hz ac20 9cg6 twht; do
+      printf "%-6s " "$id"
+      kata show $id --json | jq -r '[.issue.body] + [.comments[]?.body] | join("\n")' \
+        | grep -cE 'RestoreInput|RestoredState|CommittedCheckpoint'
+    done
+
+Five issues returned 0 or 1; `9cg6` returned 18. `kata list --json | jq -r '.issues[]?.short_id'`
+enumerates all of them when the suspect set isn't obvious. A subagent that reports something
+absent has usually searched a sensible-looking subset — verify the subset, not the conclusion.
+
+## Auditing a mechanical conversion: over-flag on purpose (2026-09-16)
+
+mux#mgpj routed all 44 provider channel sends through one cancellable helper. The count
+matching is not the property that matters; what matters is whether any caller ignores the
+`false` return and keeps working as if the send landed. A grep gives the count, not that.
+
+A paren-balancing parse over the five provider files split the sites 22 checked
+(`if !sendStreamEvent(...) { return }`) and 22 discarding the return, then flagged every
+discard whose next statement was not `return`. Ten flagged. All ten turned out fine — they
+sit inside the `recover()` defer just before `close(eventChan)`, or are the last statement
+before `}()`, so the goroutine unwinds regardless. The rule was too narrow: the real
+property is "the goroutine ends next", not "the next token is `return`".
+
+The script still did its job. It reduced 44 sites to the 10 worth reading by hand, and
+reading them settled the question in one pass. Write the crude rule, accept the false
+positives, and read what it hands you — a checker that under-flags tells you nothing, and
+one that over-flags costs a few minutes.
