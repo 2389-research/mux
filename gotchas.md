@@ -150,3 +150,27 @@ not written where they will read it. When a review finding repeats across a
 wave, stop fixing instances and amend the dispatch template, then check on the
 next wave that it took. The GOROOT substitution above went the same way: four
 agents rediscovered it one at a time before anyone put it in the prompt.
+
+## Amending a schema you extracted from somewhere else (2026-09-16)
+
+Two checks, both cheap, both caught something real on kata 1fqg.
+
+**Reproduce the source's declared hash before you touch the copy.** The frozen durability
+schemas live inside a kata comment on mux#x3hz, each with a `SHA-256:` line. Extracting
+them with `sed -n` and re-hashing matched both declared values exactly, which is what made
+it safe to amend them — without that step you can amend a copy that lost a trailing
+newline or a fence line and never know. If the hashes disagree, fix the extraction; do not
+start editing.
+
+**Run every test case against the old schema and the new one, side by side.** A one-column
+"does it validate now" table cannot tell a working amendment from a broken fixture. Four
+cases failed on the first run here and the amendment was fine — the fixture was missing
+`tool_call_id` and `operation_id`, which `record.schema.json` requires on every `tool.*`
+record through an `allOf` keyed on the `^tool\.` *pattern* rather than an exact `kind`, so
+it is easy to miss when reading the per-kind blocks. The tell is a baseline row: a case
+that should be valid under the *frozen* schema and is not means the fixture is wrong.
+Include those rows even though they assert nothing about your change.
+
+The useful shape is `frozen -> amended` per row. `REJECT -> valid` is the defect you are
+fixing, measured rather than argued; `valid -> REJECT` is a new restriction biting;
+`valid -> valid` on the source's own examples is your regression check.
