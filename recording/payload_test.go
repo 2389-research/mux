@@ -375,6 +375,23 @@ func TestValidatePayload_ToolOutcomeUnknown(t *testing.T) {
 	invalid := ToolOutcomeUnknownPayload{Reason: ""}
 	err := ValidatePayload("tool.outcome_unknown", mustMarshal(t, invalid))
 	assertPayloadInvalid(t, err, "reason is required")
+
+	// Same raw-JSON route as tool.result's evidence_ref cases: the field is
+	// omitempty, so only bytes from elsewhere can carry a present-but-empty
+	// key. record.schema.json leaves this kind's payload unconstrained, so
+	// both expectations below are mux's own rule, not the schema's.
+	t.Run("absent evidence ref is valid", func(t *testing.T) {
+		raw := json.RawMessage(`{"reason":"timeout"}`)
+		if err := ValidatePayload("tool.outcome_unknown", raw); err != nil {
+			t.Fatalf("absent evidence_ref must be accepted: %v", err)
+		}
+	})
+
+	t.Run("present but empty evidence ref is rejected", func(t *testing.T) {
+		raw := json.RawMessage(`{"reason":"timeout","evidence_ref":""}`)
+		err := ValidatePayload("tool.outcome_unknown", raw)
+		assertPayloadInvalid(t, err, "evidence_ref must not be empty when present")
+	})
 }
 
 func TestValidatePayload_ProviderUsage(t *testing.T) {

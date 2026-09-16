@@ -299,6 +299,13 @@ func validatePayloadFields(kind string, payload json.RawMessage, v any) error {
 		if p.Reason == "" {
 			return fmt.Errorf("reason is required")
 		}
+		empty, err := evidenceRefPresentEmpty(payload)
+		if err != nil {
+			return fmt.Errorf("evidence_ref: %w", err)
+		}
+		if empty {
+			return fmt.Errorf("evidence_ref must not be empty when present")
+		}
 	case *ProviderUsagePayload:
 		if p.Usage.InputTokens < 0 || p.Usage.OutputTokens < 0 || p.Usage.ThinkingTokens < 0 {
 			return fmt.Errorf("usage counters must be nonnegative")
@@ -358,6 +365,12 @@ func isToolOutcome(o string) bool {
 // produce that shape (the field is omitempty), so this only bites raw JSON
 // from elsewhere; decodeStrict has already proven payload well-formed, so
 // an error here means the shapes have diverged, not that payload is bad.
+//
+// record.schema.json carries minLength 1 on tool.result's evidence_ref, so
+// rejecting it there implements the schema. It constrains no other payload
+// kind, so rejecting it on tool.outcome_unknown is mux's own rule: an
+// evidence pointer that points nowhere is the "evidence" this contract
+// exists to refuse, and reason is already required there on the same terms.
 func evidenceRefPresentEmpty(payload json.RawMessage) (bool, error) {
 	var probe struct {
 		EvidenceRef *string `json:"evidence_ref"`

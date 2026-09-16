@@ -37,6 +37,13 @@ func TestEncodePayload_ContractGoldenCases(t *testing.T) {
 // Fixture2 bytes and SHA-256 were independently re-hashed with the system
 // `shasum` binary, not just Go's own crypto/sha256, to rule out a
 // self-consistent-but-wrong implementation.
+//
+// That verification covers encoding only: that these bytes are the canonical
+// form and that the digest is a true SHA-256 of them. It says nothing about
+// whether the field values inside the bytes satisfy their own schemas — a
+// malformed request_sha256 canonicalizes and hashes as cleanly as a valid
+// one. The ValidatePayload calls below are what check that, and they were
+// added after four 63-character digests sat under this comment undetected.
 
 func TestGolden_ToolIntentPayload_TypedValue_KeysSortedLargeIntPreserved(t *testing.T) {
 	p := ToolIntentPayload{
