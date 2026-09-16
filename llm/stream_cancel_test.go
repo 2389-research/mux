@@ -112,6 +112,15 @@ func sseTextDeltaFixture(provider string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, _ := w.(http.Flusher)
+		if provider == "anthropic" {
+			// The Anthropic producer rejects a delta for a block that was
+			// never started (kata 1kr7): start index 0 once before the
+			// delta flood below.
+			fmt.Fprint(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
 		for i := 0; i < 250; i++ {
 			switch provider {
 			case "openai":
@@ -308,12 +317,14 @@ var errorPathCases = []struct {
 			"event: error\ndata: {\"type\":\"error\",\"message\":\"boom\"}\n\n"),
 	},
 	{
-		// 100 deltas fill the buffer; an SSE error event makes the
-		// anthropic SDK surface a non-nil stream.Err(), so the post-loop
-		// EventError send blocks.
+		// A content_block_start plus 99 deltas fill the buffer (the
+		// Anthropic producer rejects a delta for a block that was never
+		// started, kata 1kr7); an SSE error event makes the anthropic SDK
+		// surface a non-nil stream.Err(), so the post-loop EventError send
+		// blocks.
 		name: "anthropic/post-loop-stream.Err", provider: "anthropic",
 		fixture: errorPathHandler(
-			sseAnthropicDeltas(100),
+			sseAnthropicDeltas(99),
 			"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"boom\"}}\n\n"),
 	},
 	{
@@ -352,9 +363,12 @@ func sseOpenAIDeltas(n int) string {
 	return s
 }
 
-// sseAnthropicDeltas builds n content_block_delta frames.
+// sseAnthropicDeltas builds a content_block_start for index 0 followed by n
+// content_block_delta frames. The Anthropic producer rejects a delta for a
+// block that was never started (kata 1kr7), so every caller needs the start
+// frame; n is the delta count, making n+1 the total buffered-event count.
 func sseAnthropicDeltas(n int) string {
-	s := ""
+	s := "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
 	for i := 0; i < n; i++ {
 		s += "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"x\"}}\n\n"
 	}

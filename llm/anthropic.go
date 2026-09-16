@@ -308,6 +308,29 @@ func (a *AnthropicClient) CreateMessage(ctx context.Context, req *Request) (*Res
 	return convertResponse(msg, req.Model), nil
 }
 
+// anthropicBlockID builds the stream-local block identity for a provider
+// content index, stable across that block's start/delta*/stop sequence
+// within one streaming attempt.
+func anthropicBlockID(index int) string {
+	return fmt.Sprintf("anthropic:%d", index)
+}
+
+// Fixed, sanitized StreamProtocolError reasons for Anthropic stream sequencing
+// violations. Each is a static string so an error can never embed raw
+// accumulated content.
+const (
+	reasonDuplicateBlockStart   = "duplicate content block start"
+	reasonStopUnstartedBlock    = "content block stop for unstarted block"
+	reasonDuplicateBlockStop    = "duplicate content block stop"
+	reasonDeltaUnstartedBlock   = "content delta for unstarted block"
+	reasonDeltaAfterStop        = "content delta after block stop"
+	reasonUnknownDeltaVariant   = "unrecognized content delta variant"
+	reasonMessageStopUnfinished = "message stop with unfinished content block"
+	reasonMessageStopNoStart    = "message stop without message start"
+	reasonStreamEndedEarly      = "stream ended before message stop"
+	reasonEventAfterTerminal    = "stream event after message stop"
+)
+
 type anthropicStreamBlock struct {
 	block    ContentBlock
 	inputRaw string
@@ -320,6 +343,14 @@ type anthropicStreamBlock struct {
 	signature string
 	// redactedData is the encrypted payload of a redacted_thinking block.
 	redactedData string
+	// hasStartInput records whether content_block_start declared an input
+	// key at all (even an explicit empty object), distinguishing "the model
+	// declared no arguments" from "the stream never said" once inputRaw
+	// turns out to be empty at stop time.
+	hasStartInput bool
+	// stopped is set once content_block_stop for this index has been
+	// processed, so a repeated stop or a late delta can be rejected.
+	stopped bool
 }
 
 type anthropicStreamAccumulator struct {
@@ -339,7 +370,10 @@ func (a *anthropicStreamAccumulator) start(msg *anthropic.Message) *Response {
 	return a.response
 }
 
-func (a *anthropicStreamAccumulator) startBlock(index int, rawType string, id string, name string, text string, thinking string, signature string, redactedData string) {
+func (a *anthropicStreamAccumulator) startBlock(index int, rawType string, id string, name string, text string, thinking string, signature string, redactedData string, hasInput bool) error {
+	if _, exists := a.blocks[index]; exists {
+		return &StreamProtocolError{Provider: "anthropic", BlockID: anthropicBlockID(index), Reason: reasonDuplicateBlockStart}
+	}
 	blockType := ContentType(rawType)
 	if rawType == "redacted_thinking" {
 		// No readable text: it exists only to be replayed.
@@ -353,17 +387,22 @@ func (a *anthropicStreamAccumulator) startBlock(index int, rawType string, id st
 		Thinking: thinking,
 	}
 	a.blocks[index] = &anthropicStreamBlock{
-		block:        block,
-		rawType:      rawType,
-		signature:    signature,
-		redactedData: redactedData,
+		block:         block,
+		rawType:       rawType,
+		signature:     signature,
+		redactedData:  redactedData,
+		hasStartInput: hasInput,
 	}
+	return nil
 }
 
-func (a *anthropicStreamAccumulator) appendDelta(index int, deltaType string, text string) {
+func (a *anthropicStreamAccumulator) appendDelta(index int, deltaType string, text string) error {
 	block, ok := a.blocks[index]
 	if !ok {
-		return
+		return &StreamProtocolError{Provider: "anthropic", BlockID: anthropicBlockID(index), Reason: reasonDeltaUnstartedBlock}
+	}
+	if block.stopped {
+		return &StreamProtocolError{Provider: "anthropic", BlockID: anthropicBlockID(index), Reason: reasonDeltaAfterStop}
 	}
 	switch deltaType {
 	case "text_delta":
@@ -374,7 +413,12 @@ func (a *anthropicStreamAccumulator) appendDelta(index int, deltaType string, te
 		block.signature += text
 	case "input_json_delta":
 		block.inputRaw += text
+	default:
+		// citations_delta and any future SDK delta variant mux does not
+		// know how to interpret: reject rather than silently treat as text.
+		return &StreamProtocolError{Provider: "anthropic", BlockID: anthropicBlockID(index), Reason: reasonUnknownDeltaVariant}
 	}
+	return nil
 }
 
 // finalizeThinkingReplay attaches the replay envelope for a completed thinking
@@ -417,27 +461,34 @@ func (a *anthropicStreamAccumulator) finalizeThinkingReplay(block *anthropicStre
 	return nil
 }
 
+// stopBlock finalizes a content block on content_block_stop. A tool_use
+// block requires a single valid JSON argument object: an explicit empty
+// object declared at content_block_start with no later deltas is valid
+// ({} really was the model's answer), but an empty accumulation with no
+// start declaration is not invented JSON — mux cannot tell "no arguments"
+// from "the stream never said," so it is a protocol error. Any other
+// malformed, truncated, null or non-object accumulated JSON is also a
+// protocol error: executing a tool call built from any of these was the bug
+// this replaces.
 func (a *anthropicStreamAccumulator) stopBlock(index int) error {
 	block, ok := a.blocks[index]
 	if !ok {
-		return nil
+		return &StreamProtocolError{Provider: "anthropic", BlockID: anthropicBlockID(index), Reason: reasonStopUnstartedBlock}
 	}
+	if block.stopped {
+		return &StreamProtocolError{Provider: "anthropic", BlockID: anthropicBlockID(index), Reason: reasonDuplicateBlockStop}
+	}
+	block.stopped = true
 	if block.block.Type != ContentTypeToolUse {
 		return a.finalizeThinkingReplay(block)
 	}
-	if block.inputRaw == "" {
+	if block.inputRaw == "" && block.hasStartInput {
 		block.block.Input = make(map[string]any)
 		return nil
 	}
-	var input map[string]any
-	if err := json.Unmarshal([]byte(block.inputRaw), &input); err != nil {
-		// Truncated input (a max_tokens stop mid tool input leaves inputRaw
-		// as partial JSON): drop the block from the finished Response so the
-		// orchestrator never executes a partial call with empty input as if
-		// it were complete.
-		fmt.Fprintf(os.Stderr, "Warning: failed to parse streamed tool input for %s: %v\n", block.block.Name, err)
-		delete(a.blocks, index)
-		return nil
+	input, err := parseStreamToolInput("anthropic", anthropicBlockID(index), block.inputRaw)
+	if err != nil {
+		return err
 	}
 	block.block.Input = input
 	return nil
@@ -456,7 +507,10 @@ func (a *anthropicStreamAccumulator) mergeDelta(stopReason StopReason, usage Usa
 	return &Response{StopReason: stopReason, Usage: usage}
 }
 
-func (a *anthropicStreamAccumulator) finish() *Response {
+// finish builds the strict final Response from every block that reached a
+// successful stop, in provider index order, alongside a StreamBlockRef for
+// each mapping its stream-local BlockID to its position in Content.
+func (a *anthropicStreamAccumulator) finish() (*Response, []StreamBlockRef) {
 	if a.response == nil {
 		a.response = &Response{}
 	}
@@ -467,10 +521,31 @@ func (a *anthropicStreamAccumulator) finish() *Response {
 	sort.Ints(indexes)
 
 	a.response.Content = make([]ContentBlock, 0, len(indexes))
-	for _, index := range indexes {
-		a.response.Content = append(a.response.Content, a.blocks[index].block)
+	refs := make([]StreamBlockRef, 0, len(indexes))
+	for contentIndex, providerIndex := range indexes {
+		a.response.Content = append(a.response.Content, a.blocks[providerIndex].block)
+		refs = append(refs, StreamBlockRef{BlockID: anthropicBlockID(providerIndex), ContentIndex: contentIndex})
 	}
-	return a.response
+	return a.response, refs
+}
+
+// cloneContentBlock returns a copy of block whose Input map and Replay
+// payload are independent of the original, so a caller can hold or mutate
+// the copy without aliasing accumulator or response state.
+func cloneContentBlock(block ContentBlock) ContentBlock {
+	clone := block
+	if block.Input != nil {
+		clone.Input = make(map[string]any, len(block.Input))
+		for key, value := range block.Input {
+			clone.Input[key] = value
+		}
+	}
+	if block.Replay != nil {
+		replay := *block.Replay
+		replay.Data = bytes.Clone(block.Replay.Data)
+		clone.Replay = &replay
+	}
+	return clone
 }
 
 func cloneResponse(response *Response) *Response {
@@ -481,18 +556,7 @@ func cloneResponse(response *Response) *Response {
 	if len(response.Content) > 0 {
 		clone.Content = make([]ContentBlock, len(response.Content))
 		for i, block := range response.Content {
-			clone.Content[i] = block
-			if block.Input != nil {
-				clone.Content[i].Input = make(map[string]any, len(block.Input))
-				for key, value := range block.Input {
-					clone.Content[i].Input[key] = value
-				}
-			}
-			if block.Replay != nil {
-				replay := *block.Replay
-				replay.Data = bytes.Clone(block.Replay.Data)
-				clone.Content[i].Replay = &replay
-			}
+			clone.Content[i] = cloneContentBlock(block)
 		}
 	}
 	return &clone
@@ -535,10 +599,27 @@ func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request)
 		}()
 
 		acc := newAnthropicStreamAccumulator(req.Model)
+		messageStarted := false
+		terminalSeen := false
+
 		for stream.Next() {
 			event := stream.Current()
+
+			// Once message_stop has been processed, any further event
+			// (another terminal, or stray content) is a protocol violation:
+			// the provider is not allowed to keep talking after ending the
+			// message.
+			if terminalSeen {
+				sendStreamEvent(ctx, eventChan, StreamEvent{
+					Type:  EventError,
+					Error: &StreamProtocolError{Provider: "anthropic", BlockID: anthropicBlockID(int(event.Index)), Reason: reasonEventAfterTerminal},
+				})
+				return
+			}
+
 			switch event.Type {
 			case "message_start":
+				messageStarted = true
 				response := acc.start(&event.Message)
 				if !sendStreamEvent(ctx, eventChan, StreamEvent{
 					Type:     EventMessageStart,
@@ -547,55 +628,88 @@ func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request)
 					return
 				}
 			case "content_block_start":
+				key := anthropicBlockID(int(event.Index))
 				se := StreamEvent{
-					Type:  EventContentStart,
-					Index: int(event.Index),
+					Type:    EventContentStart,
+					Index:   int(event.Index),
+					BlockID: key,
 				}
 				// Populate Block so consumers can distinguish text from tool_use
 				if event.ContentBlock.Type != "" {
-					acc.startBlock(int(event.Index), event.ContentBlock.Type, event.ContentBlock.ID, event.ContentBlock.Name, event.ContentBlock.Text, event.ContentBlock.Thinking, event.ContentBlock.Signature, event.ContentBlock.Data)
+					hasInput := event.ContentBlock.Input != nil
+					if err := acc.startBlock(int(event.Index), event.ContentBlock.Type, event.ContentBlock.ID, event.ContentBlock.Name, event.ContentBlock.Text, event.ContentBlock.Thinking, event.ContentBlock.Signature, event.ContentBlock.Data, hasInput); err != nil {
+						sendStreamEvent(ctx, eventChan, StreamEvent{Type: EventError, Error: err})
+						return
+					}
+					started := acc.blocks[int(event.Index)]
 					se.Block = &ContentBlock{
-						Type: acc.blocks[int(event.Index)].block.Type,
-						ID:   event.ContentBlock.ID,
-						Name: event.ContentBlock.Name,
+						Type:     started.block.Type,
+						ID:       event.ContentBlock.ID,
+						Name:     event.ContentBlock.Name,
+						Text:     event.ContentBlock.Text,
+						Thinking: event.ContentBlock.Thinking,
 					}
 				}
 				if !sendStreamEvent(ctx, eventChan, se) {
 					return
 				}
 			case "content_block_delta":
+				key := anthropicBlockID(int(event.Index))
 				var text string
+				var kind StreamDeltaKind
 				switch event.Delta.Type {
 				case "text_delta":
 					text = event.Delta.Text
+					kind = StreamDeltaText
 				case "input_json_delta":
 					text = event.Delta.PartialJSON
+					kind = StreamDeltaToolInput
 				case "thinking_delta":
 					text = event.Delta.Thinking
+					kind = StreamDeltaThinking
 				}
 				// The signature is opaque provider state, not display text: it
 				// goes to the accumulator only, never into StreamEvent.Text.
+				var appendErr error
 				if event.Delta.Type == "signature_delta" {
-					acc.appendDelta(int(event.Index), event.Delta.Type, event.Delta.Signature)
+					appendErr = acc.appendDelta(int(event.Index), event.Delta.Type, event.Delta.Signature)
 				} else {
-					acc.appendDelta(int(event.Index), event.Delta.Type, text)
+					appendErr = acc.appendDelta(int(event.Index), event.Delta.Type, text)
+				}
+				if appendErr != nil {
+					sendStreamEvent(ctx, eventChan, StreamEvent{Type: EventError, Error: appendErr})
+					return
+				}
+				if event.Delta.Type == "signature_delta" {
+					// Known opaque signature deltas are deliberately kept
+					// private: they never become a public typed delta.
+					continue
 				}
 				if !sendStreamEvent(ctx, eventChan, StreamEvent{
-					Type:  EventContentDelta,
-					Index: int(event.Index),
-					Text:  text,
+					Type:      EventContentDelta,
+					Index:     int(event.Index),
+					Text:      text,
+					BlockID:   key,
+					DeltaKind: kind,
 				}) {
 					return
 				}
 			case "content_block_stop":
+				key := anthropicBlockID(int(event.Index))
 				if err := acc.stopBlock(int(event.Index)); err != nil {
 					sendStreamEvent(ctx, eventChan, StreamEvent{Type: EventError, Error: err})
 					return
 				}
-				if !sendStreamEvent(ctx, eventChan, StreamEvent{
-					Type:  EventContentStop,
-					Index: int(event.Index),
-				}) {
+				se := StreamEvent{
+					Type:    EventContentStop,
+					Index:   int(event.Index),
+					BlockID: key,
+				}
+				if block, ok := acc.blocks[int(event.Index)]; ok {
+					copied := cloneContentBlock(block.block)
+					se.Block = &copied
+				}
+				if !sendStreamEvent(ctx, eventChan, se) {
 					return
 				}
 			case "message_delta":
@@ -610,9 +724,28 @@ func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request)
 					return
 				}
 			case "message_stop":
+				if !messageStarted {
+					sendStreamEvent(ctx, eventChan, StreamEvent{
+						Type:  EventError,
+						Error: &StreamProtocolError{Provider: "anthropic", Reason: reasonMessageStopNoStart},
+					})
+					return
+				}
+				for idx, block := range acc.blocks {
+					if !block.stopped {
+						sendStreamEvent(ctx, eventChan, StreamEvent{
+							Type:  EventError,
+							Error: &StreamProtocolError{Provider: "anthropic", BlockID: anthropicBlockID(idx), Reason: reasonMessageStopUnfinished},
+						})
+						return
+					}
+				}
+				response, refs := acc.finish()
+				terminalSeen = true
 				if !sendStreamEvent(ctx, eventChan, StreamEvent{
-					Type:     EventMessageStop,
-					Response: acc.finish(),
+					Type:        EventMessageStop,
+					Response:    response,
+					FinalBlocks: refs,
 				}) {
 					return
 				}
@@ -623,6 +756,11 @@ func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request)
 			sendStreamEvent(ctx, eventChan, StreamEvent{
 				Type:  EventError,
 				Error: err,
+			})
+		} else if !terminalSeen {
+			sendStreamEvent(ctx, eventChan, StreamEvent{
+				Type:  EventError,
+				Error: &StreamProtocolError{Provider: "anthropic", Reason: reasonStreamEndedEarly},
 			})
 		}
 	}()

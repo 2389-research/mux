@@ -1157,28 +1157,37 @@ func TestCreateMessageStream_InputJSONDelta(t *testing.T) {
 
 // TestAnthropicStreamAccumulatorTruncatedToolInput: input_json_delta
 // fragments cut off mid-JSON (a max_tokens stop during tool input leaves
-// inputRaw as partial JSON) must not produce a tool block in the finished
-// Response. The orchestrator executes whatever tool blocks the final Response
-// carries, so a block with substituted empty input would run a partial call
-// as if complete. Complete JSON retains the block with parsed input.
+// inputRaw as partial JSON) must fail stopBlock with a StreamProtocolError,
+// not produce a tool block in the finished Response. Executing a tool call
+// built from truncated or otherwise malformed streamed JSON was the bug;
+// silently dropping the block was scarcely better, since a caller could not
+// tell a genuine empty-argument call from data loss. Complete JSON still
+// retains the block with parsed input.
 func TestAnthropicStreamAccumulatorTruncatedToolInput(t *testing.T) {
 	truncated := newAnthropicStreamAccumulator("claude-sonnet-4-20250514")
-	truncated.startBlock(0, "tool_use", "toolu_1", "get_weather", "", "", "", "")
-	truncated.appendDelta(0, "input_json_delta", `{"location": "New `)
-	if err := truncated.stopBlock(0); err != nil {
-		t.Fatalf("stopBlock: %v", err)
+	if err := truncated.startBlock(0, "tool_use", "toolu_1", "get_weather", "", "", "", "", false); err != nil {
+		t.Fatalf("startBlock: %v", err)
 	}
-	if resp := truncated.finish(); len(resp.Content) != 0 {
-		t.Fatalf("expected truncated tool block to be dropped, got %+v", resp.Content)
+	if err := truncated.appendDelta(0, "input_json_delta", `{"location": "New `); err != nil {
+		t.Fatalf("appendDelta: %v", err)
+	}
+	err := truncated.stopBlock(0)
+	var protocol *StreamProtocolError
+	if !errors.As(err, &protocol) {
+		t.Fatalf("expected StreamProtocolError for truncated tool input, got %v", err)
 	}
 
 	complete := newAnthropicStreamAccumulator("claude-sonnet-4-20250514")
-	complete.startBlock(0, "tool_use", "toolu_2", "get_weather", "", "", "", "")
-	complete.appendDelta(0, "input_json_delta", `{"location":"New York"}`)
+	if err := complete.startBlock(0, "tool_use", "toolu_2", "get_weather", "", "", "", "", false); err != nil {
+		t.Fatalf("startBlock: %v", err)
+	}
+	if err := complete.appendDelta(0, "input_json_delta", `{"location":"New York"}`); err != nil {
+		t.Fatalf("appendDelta: %v", err)
+	}
 	if err := complete.stopBlock(0); err != nil {
 		t.Fatalf("stopBlock: %v", err)
 	}
-	resp := complete.finish()
+	resp, _ := complete.finish()
 	if len(resp.Content) != 1 {
 		t.Fatalf("expected complete tool block to be kept, got %+v", resp.Content)
 	}

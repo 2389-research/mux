@@ -36,4 +36,17 @@ type StreamEvent struct {
 	Block    *ContentBlock
 	Response *Response
 	Error    error
+
+	// BlockID identifies the content block this event concerns, stable
+	// across its start/delta*/stop sequence within one provider stream
+	// attempt (for example "anthropic:0"). It is local to this attempt: the
+	// orchestrator owns durable message/event identity separately. A
+	// metadata-free legacy provider client leaves it empty.
+	BlockID string
+	// DeltaKind says how to interpret Text on a content_block_delta event.
+	DeltaKind StreamDeltaKind
+	// FinalBlocks maps every block in the final Response.Content to the
+	// BlockID that produced it. Set once, on the terminal message_stop
+	// event.
+	FinalBlocks []StreamBlockRef
 }
