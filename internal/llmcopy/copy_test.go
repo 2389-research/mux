@@ -198,3 +198,29 @@ func TestCloneMessagesIndependentFromOriginal(t *testing.T) {
 		t.Fatalf("CloneMessages shares a ContentBlock with the original: got %q", messages[1].Blocks[0].ID)
 	}
 }
+
+// TestCloneBlockStructInInputIsShallow pins the one documented limit that
+// the serialization boundary does NOT catch. A channel or pointer in Input
+// survives to be rejected by json.Marshal, but a struct marshals cleanly
+// while its slice, map, and pointer fields stay shared with the original.
+// If this test ever fails because cloneValue learned to walk structs, the
+// package doc's limits section is now wrong and must be updated with it.
+func TestCloneBlockStructInInputIsShallow(t *testing.T) {
+	type payload struct {
+		Rows []string `json:"rows"`
+	}
+	block := llm.ContentBlock{
+		Type:  llm.ContentTypeToolUse,
+		Input: map[string]any{"p": payload{Rows: []string{"original"}}},
+	}
+	cloned := llmcopy.CloneBlock(block)
+
+	cloned.Input["p"].(payload).Rows[0] = "mutated"
+	if got := block.Input["p"].(payload).Rows[0]; got != "mutated" {
+		t.Fatalf("struct fields are no longer shared (got %q) - update the package doc's limits section", got)
+	}
+
+	if _, err := json.Marshal(block.Input); err != nil {
+		t.Fatalf("a struct in Input is expected to marshal cleanly, which is why no boundary catches this: %v", err)
+	}
+}

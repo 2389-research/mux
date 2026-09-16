@@ -15,6 +15,14 @@
 // (json.Marshal, at the point a snapshot is actually persisted) is what
 // rejects it. A successful clone is not proof a value can be serialized.
 //
+// A struct in Input is the one case that reasoning does not cover, so it
+// gets stated on its own: it is shallow-copied, and json.Marshal accepts
+// it. Its slice, map, and pointer fields stay shared with the original, so
+// mutating the clone reaches back into the source and no later boundary
+// catches it. Input is meant to hold decoded JSON, where a bare struct
+// cannot arise; a caller assembling a tool call by hand must not put one
+// there.
+//
 // Cloning walks the value with reflect rather than round-tripping through
 // json.Marshal/Unmarshal, which would silently turn json.Number and other
 // exact numeric encodings into float64 and lose precision above 2^53.
