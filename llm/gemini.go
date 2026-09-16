@@ -4,6 +4,7 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -67,7 +68,7 @@ func NewGeminiClientWithBaseURL(ctx context.Context, apiKey, model, baseURL stri
 }
 
 // convertGeminiRequest converts our Request to Gemini's content and config.
-func convertGeminiRequest(req *Request) ([]*genai.Content, *genai.GenerateContentConfig) {
+func convertGeminiRequest(req *Request) ([]*genai.Content, *genai.GenerateContentConfig, error) {
 	config := &genai.GenerateContentConfig{}
 
 	if req.MaxTokens > 0 && req.MaxTokens <= math.MaxInt32 {
@@ -114,17 +115,24 @@ func convertGeminiRequest(req *Request) ([]*genai.Content, *genai.GenerateConten
 	// Convert messages
 	contents := make([]*genai.Content, 0, len(req.Messages))
 	for _, msg := range req.Messages {
-		content := convertMessage(msg)
+		content, err := convertMessage(msg)
+		if err != nil {
+			return nil, nil, err
+		}
 		if content != nil {
 			contents = append(contents, content)
 		}
 	}
 
-	return contents, config
+	return contents, config, nil
 }
 
 // convertMessage converts a mux Message to Gemini Content.
-func convertMessage(msg Message) *genai.Content {
+//
+// A block carrying a Replay envelope is restored from its raw part JSON and
+// its normalized fields are ignored: a rebuilt part would lose the thought
+// signature, which Gemini rejects.
+func convertMessage(msg Message) (*genai.Content, error) {
 	role := genai.RoleUser
 	if msg.Role == RoleAssistant {
 		role = genai.RoleModel
@@ -139,6 +147,14 @@ func convertMessage(msg Message) *genai.Content {
 
 	// Handle blocks
 	for _, block := range msg.Blocks {
+		if block.Replay != nil {
+			restored, err := restoreGeminiPart(block.Replay)
+			if err != nil {
+				return nil, err
+			}
+			parts = append(parts, restored)
+			continue
+		}
 		switch block.Type {
 		case ContentTypeText:
 			parts = append(parts, &genai.Part{Text: block.Text})
@@ -160,17 +176,44 @@ func convertMessage(msg Message) *genai.Content {
 	}
 
 	if len(parts) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	return &genai.Content{
 		Role:  role,
 		Parts: parts,
+	}, nil
+}
+
+// restoreGeminiPart rebuilds a genai.Part from a replay envelope's raw JSON,
+// so the thought signature reaches the API as the exact bytes it sent.
+func restoreGeminiPart(replay *ProviderReplay) (*genai.Part, error) {
+	var part genai.Part
+	if err := json.Unmarshal(replay.Data, &part); err != nil {
+		return nil, fmt.Errorf("gemini: decoding replay part: %w", err)
 	}
+	return &part, nil
+}
+
+// geminiPartReplay wraps a part carrying a thought signature in a replay
+// envelope holding the part's own JSON. Gemini requires the signature back
+// unmodified on the first function call of every step of the current turn and
+// answers HTTP 400 without it, so the whole part is preserved rather than
+// rebuilt from normalized fields. Parts with no signature return nil and keep
+// the normalized path, which leaves ordinary text editable.
+func geminiPartReplay(part *genai.Part, model string) (*ProviderReplay, error) {
+	if len(part.ThoughtSignature) == 0 {
+		return nil, nil
+	}
+	data, err := json.Marshal(part)
+	if err != nil {
+		return nil, fmt.Errorf("gemini: preserving signed part: %w", err)
+	}
+	return &ProviderReplay{Provider: "gemini", Model: model, Data: data}, nil
 }
 
 // convertGeminiResponse converts Gemini's GenerateContentResponse to our Response.
-func convertGeminiResponse(resp *genai.GenerateContentResponse, model string) *Response {
+func convertGeminiResponse(resp *genai.GenerateContentResponse, model string) (*Response, error) {
 	result := &Response{
 		Model: model,
 	}
@@ -195,7 +238,7 @@ func convertGeminiResponse(resp *genai.GenerateContentResponse, model string) *R
 	result.StopReason = mapGeminiStopReason(reason, len(resp.FunctionCalls()) > 0)
 
 	if len(resp.Candidates) == 0 {
-		return result
+		return result, nil
 	}
 
 	candidate := resp.Candidates[0]
@@ -203,29 +246,52 @@ func convertGeminiResponse(resp *genai.GenerateContentResponse, model string) *R
 	// Extract content from candidate
 	if candidate.Content != nil {
 		for _, part := range candidate.Content.Parts {
+			replay, err := geminiPartReplay(part, model)
+			if err != nil {
+				return nil, err
+			}
+			// A part whose only payload is the signature has nothing to
+			// display, so it becomes a replay-only block.
+			if replay != nil && part.Text == "" && part.FunctionCall == nil {
+				result.Content = append(result.Content, ContentBlock{
+					Type:   ContentTypeReplay,
+					Replay: replay,
+				})
+				continue
+			}
+			// The signature belongs to the part, so exactly one block may
+			// own it or replay would send the part twice. When a part holds
+			// both text and a call, the call is what Gemini validates.
+			textReplay := replay
+			if part.FunctionCall != nil {
+				textReplay = nil
+			}
 			if part.Thought {
 				result.Content = append(result.Content, ContentBlock{
 					Type:     ContentTypeThinking,
 					Thinking: part.Text,
+					Replay:   textReplay,
 				})
 			} else if part.Text != "" {
 				result.Content = append(result.Content, ContentBlock{
-					Type: ContentTypeText,
-					Text: part.Text,
+					Type:   ContentTypeText,
+					Text:   part.Text,
+					Replay: textReplay,
 				})
 			}
 			if part.FunctionCall != nil {
 				result.Content = append(result.Content, ContentBlock{
-					Type:  ContentTypeToolUse,
-					ID:    part.FunctionCall.ID,
-					Name:  part.FunctionCall.Name,
-					Input: part.FunctionCall.Args,
+					Type:   ContentTypeToolUse,
+					ID:     part.FunctionCall.ID,
+					Name:   part.FunctionCall.Name,
+					Input:  part.FunctionCall.Args,
+					Replay: replay,
 				})
 			}
 		}
 	}
 
-	return result
+	return result, nil
 }
 
 // CreateMessage sends a message and returns the complete response.
@@ -243,14 +309,20 @@ func (g *GeminiClient) CreateMessage(ctx context.Context, req *Request) (*Respon
 	if err := validateGeminiSources(req); err != nil {
 		return nil, err
 	}
+	if err := validateReplay("gemini", model, req.Messages); err != nil {
+		return nil, err
+	}
 
-	contents, config := convertGeminiRequest(req)
+	contents, config, err := convertGeminiRequest(req)
+	if err != nil {
+		return nil, err
+	}
 	resp, err := g.client.Models.GenerateContent(ctx, model, contents, config)
 	if err != nil {
 		return nil, err
 	}
 
-	return convertGeminiResponse(resp, model), nil
+	return convertGeminiResponse(resp, model)
 }
 
 // CreateMessageStream sends a message and returns a channel of streaming events.
@@ -268,8 +340,14 @@ func (g *GeminiClient) CreateMessageStream(ctx context.Context, req *Request) (<
 	if err := validateGeminiSources(req); err != nil {
 		return nil, err
 	}
+	if err := validateReplay("gemini", model, req.Messages); err != nil {
+		return nil, err
+	}
 
-	contents, config := convertGeminiRequest(req)
+	contents, config, err := convertGeminiRequest(req)
+	if err != nil {
+		return nil, err
+	}
 
 	eventChan := make(chan StreamEvent, 100)
 
@@ -314,13 +392,19 @@ func (g *GeminiClient) CreateMessageStream(ctx context.Context, req *Request) (<
 						}
 					}
 					if part.FunctionCall != nil {
+						replay, err := geminiPartReplay(part, model)
+						if err != nil {
+							eventChan <- StreamEvent{Type: EventError, Error: err}
+							return
+						}
 						eventChan <- StreamEvent{
 							Type: EventContentStop,
 							Block: &ContentBlock{
-								Type:  ContentTypeToolUse,
-								ID:    part.FunctionCall.ID,
-								Name:  part.FunctionCall.Name,
-								Input: part.FunctionCall.Args,
+								Type:   ContentTypeToolUse,
+								ID:     part.FunctionCall.ID,
+								Name:   part.FunctionCall.Name,
+								Input:  part.FunctionCall.Args,
+								Replay: replay,
 							},
 						}
 					}
@@ -330,9 +414,14 @@ func (g *GeminiClient) CreateMessageStream(ctx context.Context, req *Request) (<
 
 		// Send final message stop with complete response
 		if lastResp != nil {
+			final, err := convertGeminiResponse(lastResp, model)
+			if err != nil {
+				eventChan <- StreamEvent{Type: EventError, Error: err}
+				return
+			}
 			eventChan <- StreamEvent{
 				Type:     EventMessageStop,
-				Response: convertGeminiResponse(lastResp, model),
+				Response: final,
 			}
 		} else {
 			eventChan <- StreamEvent{

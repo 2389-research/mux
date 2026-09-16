@@ -49,7 +49,7 @@ func TestConvertGeminiRequest_Basic(t *testing.T) {
 		},
 	}
 
-	contents, config := convertGeminiRequest(req)
+	contents, config := sigGeminiContents(t, req)
 
 	if config.MaxOutputTokens != 1024 {
 		t.Errorf("expected MaxOutputTokens 1024, got %d", config.MaxOutputTokens)
@@ -87,7 +87,7 @@ func TestConvertGeminiRequest_WithTools(t *testing.T) {
 		},
 	}
 
-	_, config := convertGeminiRequest(req)
+	_, config := sigGeminiContents(t, req)
 
 	if len(config.Tools) != 1 {
 		t.Fatalf("expected 1 tool, got %d", len(config.Tools))
@@ -115,7 +115,7 @@ func TestConvertGeminiRequest_MultipleTools(t *testing.T) {
 		},
 	}
 
-	_, config := convertGeminiRequest(req)
+	_, config := sigGeminiContents(t, req)
 
 	if len(config.Tools) != 1 {
 		t.Fatalf("expected 1 tool container, got %d", len(config.Tools))
@@ -127,7 +127,7 @@ func TestConvertGeminiRequest_MultipleTools(t *testing.T) {
 
 func TestConvertMessage_UserText(t *testing.T) {
 	msg := Message{Role: RoleUser, Content: "Hello, world!"}
-	content := convertMessage(msg)
+	content := sigGeminiContent(t, msg)
 
 	if content == nil {
 		t.Fatal("expected non-nil content")
@@ -145,7 +145,7 @@ func TestConvertMessage_UserText(t *testing.T) {
 
 func TestConvertMessage_AssistantText(t *testing.T) {
 	msg := Message{Role: RoleAssistant, Content: "I can help with that."}
-	content := convertMessage(msg)
+	content := sigGeminiContent(t, msg)
 
 	if content == nil {
 		t.Fatal("expected non-nil content")
@@ -162,7 +162,7 @@ func TestConvertMessage_TextBlock(t *testing.T) {
 			{Type: ContentTypeText, Text: "Block text content"},
 		},
 	}
-	content := convertMessage(msg)
+	content := sigGeminiContent(t, msg)
 
 	if content == nil {
 		t.Fatal("expected non-nil content")
@@ -187,7 +187,7 @@ func TestConvertMessage_ToolUseBlock(t *testing.T) {
 			},
 		},
 	}
-	content := convertMessage(msg)
+	content := sigGeminiContent(t, msg)
 
 	if content == nil {
 		t.Fatal("expected non-nil content")
@@ -222,7 +222,7 @@ func TestConvertMessage_ToolResultBlock(t *testing.T) {
 			},
 		},
 	}
-	content := convertMessage(msg)
+	content := sigGeminiContent(t, msg)
 
 	if content == nil {
 		t.Fatal("expected non-nil content")
@@ -257,7 +257,7 @@ func TestConvertMessage_ToolResultError(t *testing.T) {
 			},
 		},
 	}
-	content := convertMessage(msg)
+	content := sigGeminiContent(t, msg)
 
 	if content == nil {
 		t.Fatal("expected non-nil content")
@@ -272,7 +272,7 @@ func TestConvertMessage_ToolResultError(t *testing.T) {
 
 func TestConvertMessage_EmptyMessage(t *testing.T) {
 	msg := Message{Role: RoleUser}
-	content := convertMessage(msg)
+	content := sigGeminiContent(t, msg)
 
 	if content != nil {
 		t.Error("expected nil content for empty message")
@@ -292,7 +292,7 @@ func TestConvertMessage_MixedBlocks(t *testing.T) {
 			},
 		},
 	}
-	content := convertMessage(msg)
+	content := sigGeminiContent(t, msg)
 
 	if content == nil {
 		t.Fatal("expected non-nil content")
@@ -318,7 +318,7 @@ func TestConvertGeminiRequest_ConversationHistory(t *testing.T) {
 		},
 	}
 
-	contents, _ := convertGeminiRequest(req)
+	contents, _ := sigGeminiContents(t, req)
 
 	if len(contents) != 3 {
 		t.Fatalf("expected 3 contents, got %d", len(contents))
@@ -340,7 +340,7 @@ func TestConvertGeminiRequest_NoSystem(t *testing.T) {
 		Messages: []Message{NewUserMessage("Hello")},
 	}
 
-	_, config := convertGeminiRequest(req)
+	_, config := sigGeminiContents(t, req)
 
 	if config.SystemInstruction != nil {
 		t.Error("expected nil SystemInstruction when no system prompt provided")
@@ -353,7 +353,7 @@ func TestConvertGeminiRequest_NoTools(t *testing.T) {
 		Messages: []Message{NewUserMessage("Hello")},
 	}
 
-	_, config := convertGeminiRequest(req)
+	_, config := sigGeminiContents(t, req)
 
 	if len(config.Tools) != 0 {
 		t.Errorf("expected 0 tools, got %d", len(config.Tools))
@@ -366,7 +366,7 @@ func TestConvertGeminiRequest_NoTemperature(t *testing.T) {
 		Messages: []Message{NewUserMessage("Hello")},
 	}
 
-	_, config := convertGeminiRequest(req)
+	_, config := sigGeminiContents(t, req)
 
 	if config.Temperature != nil {
 		t.Error("expected nil Temperature when not provided")
@@ -379,7 +379,7 @@ func TestConvertGeminiRequest_NoMaxTokens(t *testing.T) {
 		Messages: []Message{NewUserMessage("Hello")},
 	}
 
-	_, config := convertGeminiRequest(req)
+	_, config := sigGeminiContents(t, req)
 
 	if config.MaxOutputTokens != 0 {
 		t.Errorf("expected 0 MaxOutputTokens when not provided, got %d", config.MaxOutputTokens)
@@ -395,7 +395,7 @@ func TestConvertMessage_ContentAndBlocks(t *testing.T) {
 			{Type: ContentTypeText, Text: "Text from block"},
 		},
 	}
-	content := convertMessage(msg)
+	content := sigGeminiContent(t, msg)
 
 	if content == nil {
 		t.Fatal("expected non-nil content")
@@ -417,7 +417,7 @@ func TestConvertMessage_ToolWithNilInput(t *testing.T) {
 			},
 		},
 	}
-	content := convertMessage(msg)
+	content := sigGeminiContent(t, msg)
 
 	if content == nil {
 		t.Fatal("expected non-nil content")
@@ -441,7 +441,7 @@ func TestConvertGeminiRequest_WithThinking(t *testing.T) {
 		Model: "gemini-2.5-pro", Messages: []Message{NewUserMessage("Think hard")},
 		Thinking: &ThinkingConfig{Enabled: true, Budget: 8000},
 	}
-	_, config := convertGeminiRequest(req)
+	_, config := sigGeminiContents(t, req)
 	if config.ThinkingConfig == nil {
 		t.Fatal("expected ThinkingConfig to be set")
 	}
@@ -457,7 +457,7 @@ func TestConvertGeminiRequest_WithoutThinking(t *testing.T) {
 	req := &Request{
 		Model: "gemini-2.0-flash", Messages: []Message{NewUserMessage("Hello")},
 	}
-	_, config := convertGeminiRequest(req)
+	_, config := sigGeminiContents(t, req)
 	if config.ThinkingConfig != nil {
 		t.Error("expected ThinkingConfig to be nil")
 	}
@@ -481,7 +481,7 @@ func TestConvertGeminiResponse_ThinkingParts(t *testing.T) {
 			PromptTokenCount: 10, CandidatesTokenCount: 50,
 		},
 	}
-	result := convertGeminiResponse(resp, "gemini-2.5-pro")
+	result := sigGeminiResult(t, resp, "gemini-2.5-pro")
 	if len(result.Content) != 2 {
 		t.Fatalf("expected 2 blocks, got %d", len(result.Content))
 	}
@@ -508,7 +508,7 @@ func TestConvertGeminiResponse_ThinkingTokens(t *testing.T) {
 			PromptTokenCount: 10, CandidatesTokenCount: 50, ThoughtsTokenCount: 200,
 		},
 	}
-	result := convertGeminiResponse(resp, "gemini-2.5-pro")
+	result := sigGeminiResult(t, resp, "gemini-2.5-pro")
 	if result.Usage.ThinkingTokens != 200 {
 		t.Errorf("expected ThinkingTokens 200, got %d", result.Usage.ThinkingTokens)
 	}
@@ -517,7 +517,7 @@ func TestConvertGeminiResponse_ThinkingTokens(t *testing.T) {
 func TestConvertGeminiResponse_EmptyCandidatesStopReason(t *testing.T) {
 	resp := &genai.GenerateContentResponse{}
 
-	result := convertGeminiResponse(resp, "gemini-2.5-pro")
+	result := sigGeminiResult(t, resp, "gemini-2.5-pro")
 	if result.StopReason != StopReasonOther {
 		t.Errorf("expected stop reason other for empty candidates, got %q", result.StopReason)
 	}
@@ -539,7 +539,7 @@ func TestGeminiConvertRequest_ImageBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	contents, _ := convertGeminiRequest(&Request{
+	contents, _ := sigGeminiContents(t, &Request{
 		Messages: []Message{NewUserMessageWithBlocks(img)},
 	})
 	if len(contents) != 1 || len(contents[0].Parts) != 1 {
@@ -562,7 +562,7 @@ func TestGeminiConvertRequest_PDFBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	contents, _ := convertGeminiRequest(&Request{
+	contents, _ := sigGeminiContents(t, &Request{
 		Messages: []Message{NewUserMessageWithBlocks(pdf)},
 	})
 	part := contents[0].Parts[0]
@@ -576,7 +576,7 @@ func TestGeminiConvertRequest_AudioBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	contents, _ := convertGeminiRequest(&Request{
+	contents, _ := sigGeminiContents(t, &Request{
 		Messages: []Message{NewUserMessageWithBlocks(audio)},
 	})
 	part := contents[0].Parts[0]
@@ -590,7 +590,7 @@ func TestGeminiConvertRequest_VideoBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	contents, _ := convertGeminiRequest(&Request{
+	contents, _ := sigGeminiContents(t, &Request{
 		Messages: []Message{NewUserMessageWithBlocks(video)},
 	})
 	part := contents[0].Parts[0]
@@ -643,7 +643,7 @@ func TestGeminiWireFormat_ImageBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	contents, _ := convertGeminiRequest(&Request{
+	contents, _ := sigGeminiContents(t, &Request{
 		Messages: []Message{NewUserMessageWithBlocks(img)},
 	})
 	body, err := json.Marshal(contents[0])
@@ -663,7 +663,7 @@ func TestGeminiWireFormat_VideoBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	contents, _ := convertGeminiRequest(&Request{
+	contents, _ := sigGeminiContents(t, &Request{
 		Messages: []Message{NewUserMessageWithBlocks(video)},
 	})
 	body, err := json.Marshal(contents[0])
@@ -683,7 +683,7 @@ func TestGeminiWireFormat_PDFBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	contents, _ := convertGeminiRequest(&Request{
+	contents, _ := sigGeminiContents(t, &Request{
 		Messages: []Message{NewUserMessageWithBlocks(pdf)},
 	})
 	body, err := json.Marshal(contents[0])
@@ -703,7 +703,7 @@ func TestGeminiWireFormat_AudioBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	contents, _ := convertGeminiRequest(&Request{
+	contents, _ := sigGeminiContents(t, &Request{
 		Messages: []Message{NewUserMessageWithBlocks(audio)},
 	})
 	body, err := json.Marshal(contents[0])

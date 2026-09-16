@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Callers should branch on `Response.StopReason` to handle truncation and filtering gracefully (e.g. show the partial answer, offer to continue), and use `errors.As` with `*llm.ErrProviderResponse` to detect genuine provider failures. The partial output of a `failed` result remains discarded with the error.
 
 ### Fixed
+- Anthropic extended thinking survives tool turns: `thinking` blocks keep their `signature` and `redacted_thinking` blocks keep their encrypted `data` through response conversion, history JSON, and the next request, on both the non-streaming and streaming paths. Streaming accumulates `signature_delta` fragments without routing them into displayed text. Both ride the existing `ProviderReplay` envelope, so replayed blocks reach the API byte-for-byte. A stream cut off before its signature arrives leaves the block unstamped rather than sending an invented signature.
+- Gemini thought signatures survive replayed function calls: a part carrying a `thoughtSignature` is preserved whole in a `ProviderReplay` envelope and sent back unmodified, instead of being rebuilt as a fresh function-call part with the signature dropped (which Gemini answers with HTTP 400). Parallel calls keep their per-part signatures, and parts without one stay on the normalized path.
 - OpenAI non-streaming responses now derive `StopReason` from the Responses API `status` and `incomplete_details.reason` (previously every response defaulted to `end_turn`); refusal output content overrides a completed response to `refusal`.
 - Chat Completions and Gemini responses with an empty choice/candidate list now report `StopReason` `other` instead of an empty string.
 
