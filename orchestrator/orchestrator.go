@@ -582,7 +582,7 @@ func (o *Orchestrator) executeTools(ctx context.Context, toolUses []llm.ContentB
 			Type:      llm.ContentTypeToolResult,
 			ToolUseID: use.ID,
 			Name:      use.Name, // Include tool name for Gemini compatibility
-			Text:      result.Output,
+			Text:      result.ModelText(),
 			IsError:   !result.Success,
 		})
 		o.eventBus.Publish(NewToolResultEvent(result))

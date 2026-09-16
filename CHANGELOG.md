@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - OpenAI non-streaming responses now derive `StopReason` from the Responses API `status` and `incomplete_details.reason` (previously every response defaulted to `end_turn`); refusal output content overrides a completed response to `refusal`.
 - Chat Completions and Gemini responses with an empty choice/candidate list now report `StopReason` `other` instead of an empty string.
+- Tool results that fail with a nil Go error (`Result{Success: false, Error: ..., Output: ""}`, as `tool.NewErrorResult` produces) now surface their `Error` text in the `tool_result` block sent to the model, instead of an empty string. `orchestrator.go`'s `executeTools` now reads tool output through the new `tool.Result.ModelText()` accessor (`Output` when set, else `Error` on failure) rather than `Output` alone. The MCP tool adapter (`mcp.ToolAdapter.Execute`) no longer duplicates a failing call's text into both `Output` and `Error` as a workaround for this bug — `Output` is now empty on failure and the text lives only in `Error`, matching the `ModelText` contract; code reading `Output` directly from a failed MCP `Result` will observe this change. See mux#jstq for related work preserving structured/multimodal MCP results.
 
 ## [0.9.0] - 2026-06-26
 

@@ -14,6 +14,7 @@ import (
 	"github.com/2389-research/mux/llm"
 	"github.com/2389-research/mux/orchestrator"
 	"github.com/2389-research/mux/session"
+	"github.com/2389-research/mux/skill"
 	"github.com/2389-research/mux/tool"
 )
 
@@ -2633,5 +2634,67 @@ func TestResume_CrossProcess(t *testing.T) {
 	}
 	if snap.Status != orchestrator.StatusComplete {
 		t.Errorf("final Status = %q, want %q", snap.Status, orchestrator.StatusComplete)
+	}
+}
+
+// TestLoadSkillUnknownNameErrorReachesNextRequest is an assembled regression test
+// for mux#5ez6: it wires the real skill.Registry's load_skill tool.Tool (not a
+// mocked Result) into an orchestrator and checks that calling it with an unknown
+// skill name puts skill/tool.go's "unknown skill: X" message into the tool_result
+// block of the very next request sent to the provider.
+func TestLoadSkillUnknownNameErrorReachesNextRequest(t *testing.T) {
+	skills := skill.NewRegistry()
+
+	client := &capturingLLMClient{
+		responses: []*llm.Response{
+			{
+				Content: []llm.ContentBlock{{
+					Type:  llm.ContentTypeToolUse,
+					ID:    "call-1",
+					Name:  "load_skill",
+					Input: map[string]any{"name": "nonexistent-skill"},
+				}},
+				StopReason: llm.StopReasonToolUse,
+			},
+			{
+				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
+				StopReason: llm.StopReasonEndTurn,
+			},
+		},
+	}
+
+	registry := tool.NewRegistry()
+	registry.Register(skills.Tool())
+	executor := tool.NewExecutor(registry)
+
+	orch := orchestrator.New(client, executor)
+	if err := orch.Run(context.Background(), "load a skill"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(client.requests) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(client.requests))
+	}
+
+	// requests[1] is what the provider would see next; find the tool_result
+	// block answering call-1.
+	nextReq := client.requests[1]
+	last := nextReq.Messages[len(nextReq.Messages)-1]
+	var found bool
+	for _, block := range last.Blocks {
+		if block.Type != llm.ContentTypeToolResult || block.ToolUseID != "call-1" {
+			continue
+		}
+		found = true
+		if !block.IsError {
+			t.Error("IsError = false, want true")
+		}
+		const want = "unknown skill: nonexistent-skill"
+		if block.Text != want {
+			t.Errorf("Text = %q, want %q", block.Text, want)
+		}
+	}
+	if !found {
+		t.Fatal("next request has no tool_result block for call-1")
 	}
 }
