@@ -174,3 +174,23 @@ Include those rows even though they assert nothing about your change.
 The useful shape is `frozen -> amended` per row. `REJECT -> valid` is the defect you are
 fixing, measured rather than argued; `valid -> REJECT` is a new restriction biting;
 `valid -> valid` on the source's own examples is your regression check.
+
+## Gemini's range-over-func stream needs no explicit Close (2026-09-16)
+
+Fixing mgpj (cancellable provider stream sends) touched five providers. Four
+build an explicit `stream := client....NewStreaming(...)` handle and need
+`defer stream.Close()`. Gemini does not: `for resp, err := range
+g.client.Models.GenerateContentStream(...)` is a range-over-func iterator,
+and the SDK's own iterator body runs `defer rs.rc.Close()` before it returns
+control on any exit, early return included. There is no handle to close.
+Confirmed by reading the genai SDK source, not assumed.
+
+The kata carried two prior "Handoff" comments claiming this fix already
+shipped, plus a stale sibling branch with a plausible-looking implementation.
+Both were wrong: the stale branch's OpenAI SSE test fixture omitted the
+`event:` line real OpenAI streaming sends (caught by checking this repo's own
+passing openai_test.go), and neither prior attempt left behind a red test
+that reproduced the leak before claiming done. Treat "someone already did
+this" claims and reference branches as leads, never as source of truth —
+reread the actual current code and actual currently-passing tests before
+trusting either.

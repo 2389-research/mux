@@ -387,28 +387,32 @@ func (g *GeminiClient) CreateMessageStream(ctx context.Context, req *Request) (<
 		defer func() {
 			if r := recover(); r != nil {
 				fmt.Fprintf(os.Stderr, "Error: panic recovered in Gemini CreateMessageStream: %v\n", r)
-				eventChan <- StreamEvent{
+				sendStreamEvent(ctx, eventChan, StreamEvent{
 					Type:  EventError,
 					Error: fmt.Errorf("panic in stream processing: %v", r),
-				}
+				})
 			}
 			close(eventChan)
 		}()
 
 		// Send message start
-		eventChan <- StreamEvent{
+		if !sendStreamEvent(ctx, eventChan, StreamEvent{
 			Type: EventMessageStart,
+		}) {
+			return
 		}
 
 		var lastResp *genai.GenerateContentResponse
 
-		// Iterate over the streaming response
+		// Iterate over the streaming response. Returning out of this range
+		// loop runs the iterator's own deferred cleanup (closing the HTTP
+		// response body), so no explicit stream handle needs closing here.
 		for resp, err := range g.client.Models.GenerateContentStream(ctx, model, contents, config) {
 			if err != nil {
-				eventChan <- StreamEvent{
+				sendStreamEvent(ctx, eventChan, StreamEvent{
 					Type:  EventError,
 					Error: err,
-				}
+				})
 				return
 			}
 
@@ -418,18 +422,20 @@ func (g *GeminiClient) CreateMessageStream(ctx context.Context, req *Request) (<
 			if len(resp.Candidates) > 0 && resp.Candidates[0].Content != nil {
 				for _, part := range resp.Candidates[0].Content.Parts {
 					if part.Text != "" {
-						eventChan <- StreamEvent{
+						if !sendStreamEvent(ctx, eventChan, StreamEvent{
 							Type: EventContentDelta,
 							Text: part.Text,
+						}) {
+							return
 						}
 					}
 					if part.FunctionCall != nil {
 						replay, err := geminiPartReplay(part, model)
 						if err != nil {
-							eventChan <- StreamEvent{Type: EventError, Error: err}
+							sendStreamEvent(ctx, eventChan, StreamEvent{Type: EventError, Error: err})
 							return
 						}
-						eventChan <- StreamEvent{
+						if !sendStreamEvent(ctx, eventChan, StreamEvent{
 							Type: EventContentStop,
 							Block: &ContentBlock{
 								Type:   ContentTypeToolUse,
@@ -438,6 +444,8 @@ func (g *GeminiClient) CreateMessageStream(ctx context.Context, req *Request) (<
 								Input:  part.FunctionCall.Args,
 								Replay: replay,
 							},
+						}) {
+							return
 						}
 					}
 				}
@@ -448,17 +456,17 @@ func (g *GeminiClient) CreateMessageStream(ctx context.Context, req *Request) (<
 		if lastResp != nil {
 			final, err := convertGeminiResponse(lastResp, model)
 			if err != nil {
-				eventChan <- StreamEvent{Type: EventError, Error: err}
+				sendStreamEvent(ctx, eventChan, StreamEvent{Type: EventError, Error: err})
 				return
 			}
-			eventChan <- StreamEvent{
+			sendStreamEvent(ctx, eventChan, StreamEvent{
 				Type:     EventMessageStop,
 				Response: final,
-			}
+			})
 		} else {
-			eventChan <- StreamEvent{
+			sendStreamEvent(ctx, eventChan, StreamEvent{
 				Type: EventMessageStop,
-			}
+			})
 		}
 	}()
 
