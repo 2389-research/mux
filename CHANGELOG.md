@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - OpenAI non-streaming responses now derive `StopReason` from the Responses API `status` and `incomplete_details.reason` (previously every response defaulted to `end_turn`); refusal output content overrides a completed response to `refusal`.
 - Chat Completions and Gemini responses with an empty choice/candidate list now report `StopReason` `other` instead of an empty string.
+- JSONL transcripts holding an entry larger than 64 KiB now load back. `agent.LoadJSONL` used `bufio.Scanner`'s default line limit, so a transcript carrying a large replay envelope or extended-thinking block saved without error and then failed to load with `bufio.Scanner: token too long` — an agent that could not be resumed from an intact file. The ceiling is now `agent.MaxTranscriptLineBytes` (16 MiB), matching what the MCP stdio transport already used for the same reason.
 
 ## [0.9.0] - 2026-06-26
 

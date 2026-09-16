@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -413,5 +414,35 @@ func TestTranscriptSaveFailurePreservesExistingFile(t *testing.T) {
 				t.Errorf("dir has %d entries after failed save, want 1: %v", len(entries), names)
 			}
 		})
+	}
+}
+
+// TestTranscriptJSONLRoundTripsLargeEntry covers a transcript entry whose single
+// JSONL line exceeds bufio.Scanner's 64 KiB default. Provider replay envelopes and
+// extended-thinking blocks both routinely produce entries that large, and the whole
+// point of this file is resume: a transcript that saves but will not load back is
+// the failure that matters.
+func TestTranscriptJSONLRoundTripsLargeEntry(t *testing.T) {
+	big := strings.Repeat("x", 100*1024)
+	tr := NewTranscript("large-entry")
+	tr.Append(llm.Message{
+		Role:   llm.RoleAssistant,
+		Blocks: []llm.ContentBlock{{Type: llm.ContentTypeThinking, Text: big}},
+	})
+
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	if err := tr.SaveToFileJSONL(path); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	got, err := LoadFromFileJSONL(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got.Len() != 1 {
+		t.Fatalf("entries: got %d want 1", got.Len())
+	}
+	if text := got.Entries[0].Content[0].Text; text != big {
+		t.Errorf("thinking text: got %d bytes want %d", len(text), len(big))
 	}
 }

@@ -14,6 +14,13 @@ import (
 	"github.com/2389-research/mux/llm"
 )
 
+// MaxTranscriptLineBytes is the per-line ceiling when reading JSONL transcripts.
+// One line carries one entry's entire content, and provider replay envelopes and
+// extended-thinking blocks routinely run past bufio.Scanner's 64 KiB default. That
+// default makes an otherwise intact transcript impossible to resume from, so this
+// matches the 16 MiB ceiling the MCP stdio transport uses for the same reason.
+const MaxTranscriptLineBytes = 16 * 1024 * 1024
+
 // TranscriptEntry represents a single entry in the transcript.
 type TranscriptEntry struct {
 	Timestamp time.Time          `json:"timestamp"`
@@ -146,6 +153,7 @@ func LoadJSONL(r io.Reader) (*Transcript, error) {
 	}
 
 	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), MaxTranscriptLineBytes)
 	lineNum := 0
 
 	for scanner.Scan() {
