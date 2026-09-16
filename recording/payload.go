@@ -197,7 +197,7 @@ func ValidatePayload(kind string, payload json.RawMessage) error {
 	if err := decodeStrict(payload, v); err != nil {
 		return &Error{Kind: InvalidRecord, Op: op, Cause: fmt.Errorf("kind %q: %w", kind, err)}
 	}
-	if err := validatePayloadFields(kind, v); err != nil {
+	if err := validatePayloadFields(kind, payload, v); err != nil {
 		return &Error{Kind: InvalidRecord, Op: op, Cause: fmt.Errorf("kind %q: %w", kind, err)}
 	}
 	return nil
@@ -211,8 +211,10 @@ func nonemptyMax(s string, max int) bool {
 // validatePayloadFields checks the semantic constraints from the payload
 // specification that strict struct decoding alone cannot express: enum
 // membership, SHA-256 shape, ID length bounds, and the few cross-field
-// rules such as PublicBlock's Type/Channel pairing.
-func validatePayloadFields(kind string, v any) error {
+// rules such as PublicBlock's Type/Channel pairing. It also takes the raw
+// payload: a decoded empty string cannot tell "absent" from "present but
+// empty", which the ToolResultPayload.EvidenceRef check below needs to know.
+func validatePayloadFields(kind string, payload json.RawMessage, v any) error {
 	switch p := v.(type) {
 	case *TurnStartedPayload:
 		if !nonemptyMax(p.InputID, 160) {
@@ -286,6 +288,13 @@ func validatePayloadFields(kind string, v any) error {
 		if p.Result.Name == "" {
 			return fmt.Errorf("result.name is required")
 		}
+		empty, err := evidenceRefPresentEmpty(payload)
+		if err != nil {
+			return fmt.Errorf("evidence_ref: %w", err)
+		}
+		if empty {
+			return fmt.Errorf("evidence_ref must not be empty when present")
+		}
 	case *ToolOutcomeUnknownPayload:
 		if p.Reason == "" {
 			return fmt.Errorf("reason is required")
@@ -342,6 +351,21 @@ func isToolOutcome(o string) bool {
 		return true
 	}
 	return false
+}
+
+// evidenceRefPresentEmpty reports whether payload's top-level evidence_ref
+// key is present with the JSON literal "". mux's own encoder can never
+// produce that shape (the field is omitempty), so this only bites raw JSON
+// from elsewhere; decodeStrict has already proven payload well-formed, so
+// an error here means the shapes have diverged, not that payload is bad.
+func evidenceRefPresentEmpty(payload json.RawMessage) (bool, error) {
+	var probe struct {
+		EvidenceRef *string `json:"evidence_ref"`
+	}
+	if err := json.Unmarshal(payload, &probe); err != nil {
+		return false, err
+	}
+	return probe.EvidenceRef != nil && *probe.EvidenceRef == "", nil
 }
 
 func isStopReason(r llm.StopReason) bool {

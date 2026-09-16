@@ -19,6 +19,12 @@ type goldenFixtureFile struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	Kind        string `json:"kind"` // "payload" or "record"
+	// PayloadKind is the kind argument to ValidatePayload for a
+	// "payload"-kind fixture. Most payload fixtures are deliberately
+	// synthetic scalars that were never meant to resemble a real payload
+	// kind, so an empty PayloadKind skips the semantic check and only the
+	// codec round-trip is pinned.
+	PayloadKind string `json:"payload_kind,omitempty"`
 	Input       string `json:"input"`
 	Output      string `json:"output"`
 	SHA256      string `json:"sha256"`
@@ -67,10 +73,18 @@ func TestGoldenFixtureFiles_MatchLiveCodec(t *testing.T) {
 				if string(got) != fx.Output {
 					t.Fatalf("canonical bytes drifted from persisted fixture:\n got:  %s\n want: %s", got, fx.Output)
 				}
+				if fx.PayloadKind != "" {
+					if err := ValidatePayload(fx.PayloadKind, got); err != nil {
+						t.Fatalf("ValidatePayload(%q): %v", fx.PayloadKind, err)
+					}
+				}
 			case "record":
 				rec, err := DecodeRecord([]byte(fx.Input))
 				if err != nil {
 					t.Fatalf("DecodeRecord: %v", err)
+				}
+				if err := ValidatePayload(rec.Kind, rec.Payload); err != nil {
+					t.Fatalf("ValidatePayload(%q): %v", rec.Kind, err)
 				}
 				got, err := EncodeRecord(rec)
 				if err != nil {

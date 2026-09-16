@@ -347,6 +347,23 @@ func TestValidatePayload_ToolResult(t *testing.T) {
 		err := ValidatePayload("tool.result", mustMarshal(t, p))
 		assertPayloadInvalid(t, err, "result.name is required")
 	})
+
+	// EvidenceRef is json:"evidence_ref,omitempty", so mustMarshal on the
+	// Go struct can never produce a present-but-empty key: these two cases
+	// go through raw JSON literals instead, the same way a host handing
+	// ValidatePayload bytes from elsewhere could.
+	t.Run("absent evidence ref is valid", func(t *testing.T) {
+		raw := json.RawMessage(`{"outcome":"succeeded","result":{"name":"tool-1","output":"ok","success":true}}`)
+		if err := ValidatePayload("tool.result", raw); err != nil {
+			t.Fatalf("absent evidence_ref must be accepted: %v", err)
+		}
+	})
+
+	t.Run("present but empty evidence ref is rejected", func(t *testing.T) {
+		raw := json.RawMessage(`{"outcome":"succeeded","result":{"name":"tool-1","output":"ok","success":true},"evidence_ref":""}`)
+		err := ValidatePayload("tool.result", raw)
+		assertPayloadInvalid(t, err, "evidence_ref must not be empty when present")
+	})
 }
 
 func TestValidatePayload_ToolOutcomeUnknown(t *testing.T) {

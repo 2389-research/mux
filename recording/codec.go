@@ -157,9 +157,7 @@ func validateRecordFraming(r Record) error {
 		return fmt.Errorf("execution_epoch must be nonzero")
 	}
 	if r.Kind == "" {
-		if _, ok := payloadKinds[r.Kind]; !ok {
-			return fmt.Errorf("kind is empty")
-		}
+		return fmt.Errorf("kind is empty")
 	}
 	if _, ok := payloadKinds[r.Kind]; !ok {
 		return fmt.Errorf("kind %q is not recognized", r.Kind)
