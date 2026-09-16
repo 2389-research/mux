@@ -67,3 +67,37 @@ as an unverifiable wrapper around worktree-isolated git operations. Four
 subagents hit this independently. Use `unset GOROOT && mise exec -- <cmd>`, or
 bare `go` after confirming `go version` reports go1.26.6. Hand the substitute to
 subagents in their prompt; otherwise each one rediscovers it and improvises.
+
+## Merging several branches that all edit CHANGELOG.md (2026-09-16)
+
+When a wave of branches each append a bullet to `## [Unreleased]`, expect every
+pair to conflict on CHANGELOG.md and do not read that as trouble. The conflicts
+have an empty base — both sides add where BASE has nothing — so a sequential
+merge resolves them by keeping both. `git merge-tree --write-tree --name-only
+<a> <b>` measures this in seconds; predicting it from file names gets it wrong.
+
+**Merge the branch that adds a whole new section LAST.** A branch adding, say,
+`### Security` sits at the end of `## [Unreleased]`. Merged early, it swallows
+every later addition that anchors at end-of-section: those bullets land under
+the new heading instead of their own, and nothing complains, because the merge
+is genuinely additive at the text level and wrong only in meaning. This bit us
+once — a `Fixed` entry landed under `Security`. After any additive resolution,
+check each bullet sits under the heading its own branch filed it under.
+
+## Go toolchain pinning and what govulncheck can see (2026-09-16)
+
+`GOTOOLCHAIN=auto` (the default) silently upgrades any `go` invocation to the
+`toolchain` line in go.mod, whatever is installed. Measured: against a go.mod
+declaring `go 1.25.0` + `toolchain go1.26.6`, a 1.25.0 binary reports
+`go1.26.6`. So pinning a CI job by Go version alone does NOT test that version —
+it needs `GOTOOLCHAIN=local`, which honours the base binary and ignores a higher
+`toolchain` directive as long as the `go` line is satisfied.
+
+The `toolchain` directive applies only to the main module. Nothing that requires
+mux as a dependency inherits it.
+
+govulncheck v1.8.0 itself requires Go >= 1.26 to run, so `make vulncheck` always
+executes under the pinned toolchain and scans that standard library — never the
+declared floor's. A floor below a stdlib advisory's fix threshold is therefore
+invisible to every gate in this repo. Say so in writing rather than implying CI
+covers it.
