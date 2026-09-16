@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -2696,5 +2697,225 @@ func TestLoadSkillUnknownNameErrorReachesNextRequest(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("next request has no tool_result block for call-1")
+	}
+}
+
+// recordingApprovalTool always requires approval and records the "target" param
+// of every call that actually ran, so per-call decisions on one tool name can be
+// told apart.
+type recordingApprovalTool struct {
+	name    string
+	targets *[]string
+}
+
+func (r *recordingApprovalTool) Name() string                         { return r.name }
+func (r *recordingApprovalTool) Description() string                  { return "needs approval" }
+func (r *recordingApprovalTool) RequiresApproval(map[string]any) bool { return true }
+func (r *recordingApprovalTool) Execute(_ context.Context, params map[string]any) (*tool.Result, error) {
+	target, _ := params["target"].(string)
+	*r.targets = append(*r.targets, target)
+	return tool.NewResult(r.name, true, "executed "+target, ""), nil
+}
+
+// A decision must apply to the tool call whose ID it names, even when an earlier
+// call in the batch never reaches its approval check. Here the first tool drops
+// the approved tool from the registry, so that one fails with ErrToolNotFound
+// before any approval runs; the explicitly denied third call must stay blocked.
+func TestResume_DecisionBindsToToolCallID_WhenEarlierToolDisappears(t *testing.T) {
+	store := session.NewFileStore(t.TempDir())
+	registry := tool.NewRegistry()
+	deployExecuted, nukeExecuted := false, false
+	registry.Register(&mockTool{name: "probe", execFunc: func(context.Context, map[string]any) (*tool.Result, error) {
+		registry.Unregister("deploy")
+		return tool.NewResult("probe", true, "probed", ""), nil
+	}})
+	registry.Register(&approvalTool{name: "deploy", executed: &deployExecuted})
+	registry.Register(&approvalTool{name: "nuke", executed: &nukeExecuted})
+	executor := tool.NewExecutor(registry)
+	client := &mockLLMClient{responses: []*llm.Response{
+		{Content: []llm.ContentBlock{
+			{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "probe", Input: map[string]any{}},
+			{Type: llm.ContentTypeToolUse, ID: "call-2", Name: "deploy", Input: map[string]any{}},
+			{Type: llm.ContentTypeToolUse, ID: "call-3", Name: "nuke", Input: map[string]any{}},
+		}, StopReason: llm.StopReasonToolUse},
+		{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}}, StopReason: llm.StopReasonEndTurn},
+	}}
+	cfg := orchestrator.Config{MaxIterations: 5, SessionStore: store, ApprovalMode: orchestrator.ApprovalSuspend}
+	orch := orchestrator.NewWithConfig(client, executor, cfg)
+
+	var susp *orchestrator.Suspended
+	if err := orch.Run(context.Background(), "ship"); !errors.As(err, &susp) {
+		t.Fatalf("Run err = %v, want *Suspended", err)
+	}
+
+	d := orchestrator.Decision{Approvals: map[string]bool{"call-2": true, "call-3": false}}
+	if err := orch.Resume(context.Background(), orch.SessionID(), d); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+
+	if nukeExecuted {
+		t.Error("denied call-3 executed; its decision came from another tool call")
+	}
+	if deployExecuted {
+		t.Error("deploy executed after being unregistered mid-batch")
+	}
+	// The model must see the denial, not a success and not a missing-tool error.
+	var denial *llm.ContentBlock
+	for _, m := range orch.Messages() {
+		for i, b := range m.Blocks {
+			if b.Type == llm.ContentTypeToolResult && b.ToolUseID == "call-3" {
+				denial = &m.Blocks[i]
+			}
+		}
+	}
+	if denial == nil {
+		t.Fatal("no tool_result for call-3 in history")
+	}
+	if !denial.IsError || !strings.Contains(denial.Text, tool.ErrApprovalDenied.Error()) {
+		t.Errorf("call-3 tool_result = {IsError:%v Text:%q}, want an %q error", denial.IsError, denial.Text, tool.ErrApprovalDenied)
+	}
+}
+
+// togglingApprovalTool's approval requirement can be flipped while a batch is
+// running, so anything that snapshots approval requirements up front goes stale.
+type togglingApprovalTool struct {
+	name     string
+	needs    *bool
+	executed *bool
+}
+
+func (g *togglingApprovalTool) Name() string                         { return g.name }
+func (g *togglingApprovalTool) Description() string                  { return "approval requirement varies" }
+func (g *togglingApprovalTool) RequiresApproval(map[string]any) bool { return *g.needs }
+func (g *togglingApprovalTool) Execute(context.Context, map[string]any) (*tool.Result, error) {
+	*g.executed = true
+	return tool.NewResult(g.name, true, "executed", ""), nil
+}
+
+// The binding must also hold when a tool's approval requirement changes rather
+// than the tool vanishing: gate needed approval when the batch suspended but not
+// when it ran, so it reaches no approval check, and the denied third call must
+// still be blocked.
+func TestResume_DecisionBindsToToolCallID_WhenApprovalRequirementChanges(t *testing.T) {
+	store := session.NewFileStore(t.TempDir())
+	registry := tool.NewRegistry()
+	gateNeedsApproval := true
+	gateExecuted, nukeExecuted := false, false
+	registry.Register(&mockTool{name: "probe", execFunc: func(context.Context, map[string]any) (*tool.Result, error) {
+		gateNeedsApproval = false
+		return tool.NewResult("probe", true, "probed", ""), nil
+	}})
+	registry.Register(&togglingApprovalTool{name: "gate", needs: &gateNeedsApproval, executed: &gateExecuted})
+	registry.Register(&approvalTool{name: "nuke", executed: &nukeExecuted})
+	executor := tool.NewExecutor(registry)
+	client := &mockLLMClient{responses: []*llm.Response{
+		{Content: []llm.ContentBlock{
+			{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "probe", Input: map[string]any{}},
+			{Type: llm.ContentTypeToolUse, ID: "call-2", Name: "gate", Input: map[string]any{}},
+			{Type: llm.ContentTypeToolUse, ID: "call-3", Name: "nuke", Input: map[string]any{}},
+		}, StopReason: llm.StopReasonToolUse},
+		{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}}, StopReason: llm.StopReasonEndTurn},
+	}}
+	cfg := orchestrator.Config{MaxIterations: 5, SessionStore: store, ApprovalMode: orchestrator.ApprovalSuspend}
+	orch := orchestrator.NewWithConfig(client, executor, cfg)
+
+	var susp *orchestrator.Suspended
+	if err := orch.Run(context.Background(), "ship"); !errors.As(err, &susp) {
+		t.Fatalf("Run err = %v, want *Suspended", err)
+	}
+
+	d := orchestrator.Decision{Approvals: map[string]bool{"call-2": true, "call-3": false}}
+	if err := orch.Resume(context.Background(), orch.SessionID(), d); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+
+	if nukeExecuted {
+		t.Error("denied call-3 executed; its decision came from another tool call")
+	}
+	if !gateExecuted {
+		t.Error("gate did not execute; it no longer required approval when it ran")
+	}
+}
+
+// Two calls to the same tool in one batch each resolve against their own ID, so
+// denying one and approving the other runs exactly the approved call.
+func TestResume_SameToolNameDistinctIDs_ApplyOwnDecisions(t *testing.T) {
+	store := session.NewFileStore(t.TempDir())
+	registry := tool.NewRegistry()
+	var targets []string
+	registry.Register(&recordingApprovalTool{name: "deploy", targets: &targets})
+	executor := tool.NewExecutor(registry)
+	client := &mockLLMClient{responses: []*llm.Response{
+		{Content: []llm.ContentBlock{
+			{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "deploy", Input: map[string]any{"target": "staging"}},
+			{Type: llm.ContentTypeToolUse, ID: "call-2", Name: "deploy", Input: map[string]any{"target": "prod"}},
+		}, StopReason: llm.StopReasonToolUse},
+		{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}}, StopReason: llm.StopReasonEndTurn},
+	}}
+	cfg := orchestrator.Config{MaxIterations: 5, SessionStore: store, ApprovalMode: orchestrator.ApprovalSuspend}
+	orch := orchestrator.NewWithConfig(client, executor, cfg)
+
+	var susp *orchestrator.Suspended
+	if err := orch.Run(context.Background(), "ship"); !errors.As(err, &susp) {
+		t.Fatalf("Run err = %v, want *Suspended", err)
+	}
+
+	d := orchestrator.Decision{Approvals: map[string]bool{"call-1": false, "call-2": true}}
+	if err := orch.Resume(context.Background(), orch.SessionID(), d); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+
+	if len(targets) != 1 || targets[0] != "prod" {
+		t.Errorf("executed targets = %v, want [prod]", targets)
+	}
+}
+
+// A decision binds only for the length of the replayed batch: the caller's own
+// approval func is back in place by the time Resume returns.
+func TestResume_RestoresCallerApprovalFunc(t *testing.T) {
+	store := session.NewFileStore(t.TempDir())
+	registry := tool.NewRegistry()
+	executed := false
+	registry.Register(&approvalTool{name: "deploy", executed: &executed})
+	executor := tool.NewExecutor(registry)
+	callerAsked := false
+	executor.SetApprovalFunc(func(context.Context, tool.Tool, map[string]any) (bool, error) {
+		callerAsked = true
+		return false, nil
+	})
+	client := &mockLLMClient{responses: []*llm.Response{
+		{Content: []llm.ContentBlock{{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "deploy", Input: map[string]any{}}}, StopReason: llm.StopReasonToolUse},
+		{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}}, StopReason: llm.StopReasonEndTurn},
+	}}
+	cfg := orchestrator.Config{MaxIterations: 5, SessionStore: store, ApprovalMode: orchestrator.ApprovalSuspend}
+	orch := orchestrator.NewWithConfig(client, executor, cfg)
+
+	var susp *orchestrator.Suspended
+	if err := orch.Run(context.Background(), "ship"); !errors.As(err, &susp) {
+		t.Fatalf("Run err = %v, want *Suspended", err)
+	}
+	if err := orch.Resume(context.Background(), orch.SessionID(), orchestrator.Approve(true)); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if !executed {
+		t.Fatal("approved tool did not execute on Resume")
+	}
+
+	// The decision approved; the caller's func denies. Exercising it tells the
+	// two apart, so a binding left behind would show up here.
+	fn := executor.ApprovalFunc()
+	if fn == nil {
+		t.Fatal("executor has no approval func after Resume")
+	}
+	deploy, ok := registry.Get("deploy")
+	if !ok {
+		t.Fatal("deploy missing from registry")
+	}
+	approved, err := fn(context.Background(), deploy, map[string]any{})
+	if err != nil {
+		t.Fatalf("restored approval func: %v", err)
+	}
+	if !callerAsked || approved {
+		t.Errorf("restored approval func: callerAsked=%v approved=%v, want true and false", callerAsked, approved)
 	}
 }

@@ -355,7 +355,7 @@ func (o *Orchestrator) runIterations(ctx context.Context, startIter int, prompt 
 					return o.suspend(ctx, *susp)
 				}
 			}
-			if err := o.executeTools(ctx, toolUses); err != nil {
+			if err := o.executeTools(ctx, toolUses, nil); err != nil {
 				return o.handleError(err)
 			}
 			if err := o.checkpoint(ctx, StatusRunning); err != nil {
@@ -545,9 +545,21 @@ func (o *Orchestrator) processResponse(resp *llm.Response) {
 	o.messages = append(o.messages, llm.Message{Role: llm.RoleAssistant, Blocks: resp.Content})
 }
 
-func (o *Orchestrator) executeTools(ctx context.Context, toolUses []llm.ContentBlock) error {
+// executeTools runs the pending batch in order, appending one tool_result per
+// call. A non-nil decision replays a resumed batch: the executor's approval func
+// is rebound to the exact ContentBlock.ID of each call immediately before that
+// call runs, so a decision can only ever answer the call it was made for. A call
+// that fails before its approval check — its tool was unregistered mid-batch,
+// say — therefore cannot shift a later call onto another call's decision.
+func (o *Orchestrator) executeTools(ctx context.Context, toolUses []llm.ContentBlock, decision *Decision) error {
 	if err := o.transition(StateExecutingTool); err != nil {
 		return err
+	}
+
+	if decision != nil {
+		// Hand the caller's approval func back on every exit path, error included.
+		prev := o.executor.ApprovalFunc()
+		defer o.executor.SetApprovalFunc(prev)
 	}
 
 	resultBlocks := make([]llm.ContentBlock, 0, len(toolUses))
@@ -560,6 +572,13 @@ func (o *Orchestrator) executeTools(ctx context.Context, toolUses []llm.ContentB
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
+		}
+
+		if decision != nil {
+			approved := decision.approves(use.ID)
+			o.executor.SetApprovalFunc(func(context.Context, tool.Tool, map[string]any) (bool, error) {
+				return approved, nil
+			})
 		}
 
 		result, err := o.executor.Execute(ctx, use.Name, use.Input)
@@ -702,10 +721,7 @@ func (o *Orchestrator) resumeCore(ctx context.Context, d Decision) error {
 		return o.handleError(err)
 	}
 
-	restore := o.installDecisionApproval(toolUses, d)
-	err := o.executeTools(ctx, toolUses)
-	restore()
-	if err != nil {
+	if err := o.executeTools(ctx, toolUses, &d); err != nil {
 		return o.handleError(err)
 	}
 	if err := o.checkpoint(ctx, StatusRunning); err != nil {
@@ -713,31 +729,6 @@ func (o *Orchestrator) resumeCore(ctx context.Context, d Decision) error {
 	}
 
 	return o.runIterations(ctx, o.iteration+1, "")
-}
-
-// installDecisionApproval sets a temporary approval func that resolves each
-// approval-required tool in toolUses (in batch order) against d, and returns a
-// closure that restores the previous approval func. executeTools invokes the
-// approval func only for tools whose RequiresApproval is true, in the same order
-// as toolUses, so an ordered queue of those tool-use IDs aligns 1:1 with the calls.
-func (o *Orchestrator) installDecisionApproval(toolUses []llm.ContentBlock, d Decision) func() {
-	queue := make([]string, 0, len(toolUses))
-	for _, use := range toolUses {
-		if o.executor.NeedsApproval(use.Name, use.Input) {
-			queue = append(queue, use.ID)
-		}
-	}
-	prev := o.executor.ApprovalFunc()
-	idx := 0
-	o.executor.SetApprovalFunc(func(_ context.Context, _ tool.Tool, _ map[string]any) (bool, error) {
-		id := ""
-		if idx < len(queue) {
-			id = queue[idx]
-		}
-		idx++
-		return d.approves(id), nil
-	})
-	return func() { o.executor.SetApprovalFunc(prev) }
 }
 
 // lastAssistantToolUses returns the tool_use blocks of the most recent assistant

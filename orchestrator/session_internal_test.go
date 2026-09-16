@@ -91,7 +91,7 @@ func TestFailedResultReachesHistory(t *testing.T) {
 	toolUses := []llm.ContentBlock{
 		{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "fail", Input: map[string]any{}},
 	}
-	if err := orch.executeTools(context.Background(), toolUses); err != nil {
+	if err := orch.executeTools(context.Background(), toolUses, nil); err != nil {
 		t.Fatalf("executeTools: %v", err)
 	}
 
