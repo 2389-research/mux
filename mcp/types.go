@@ -15,6 +15,47 @@ var (
 	ErrTransportClosed = errors.New("mcp: transport closed")
 )
 
+// errClientRunning rejects a second Start on a client that is already
+// connected or connecting.
+var errClientRunning = errors.New("client already running")
+
+// transportState is the lifecycle of a transport client. Each client owns
+// exactly one, changed only under that client's mutex.
+type transportState uint8
+
+const (
+	// transportIdle is a constructed client that has never been started.
+	transportIdle transportState = iota
+	// transportStarting is a client running the MCP handshake.
+	transportStarting
+	// transportRunning is a client whose handshake completed.
+	transportRunning
+	// transportClosed is terminal. Transport clients are single use: a closed
+	// client never reopens, so callers build a new one to reconnect. Restart
+	// would have to resurrect pipes, reader goroutines and the notification
+	// channel that Close already handed out and closed.
+	transportClosed
+)
+
+// transportError reports the error an operation must return for a transport in
+// the given state, or nil when the transport can accept the message. cause is
+// the terminal cause recorded when the transport closed. Callers decide
+// whether starting counts as ready: the stdio handshake writes while starting,
+// while the HTTP client publishes nothing until the handshake completes.
+func transportError(state transportState, cause error) error {
+	switch state {
+	case transportClosed:
+		if cause != nil {
+			return cause
+		}
+		return ErrTransportClosed
+	case transportIdle:
+		return ErrNotConnected
+	default:
+		return nil
+	}
+}
+
 var requestID uint64
 
 // Request is a JSON-RPC 2.0 request.
