@@ -138,13 +138,14 @@ func (o *OpenRouterClient) CreateMessageStream(ctx context.Context, req *Request
 	eventChan := make(chan StreamEvent, 100)
 
 	go func() {
+		defer stream.Close()
 		defer func() {
 			if r := recover(); r != nil {
 				fmt.Fprintf(os.Stderr, "Error: panic recovered in OpenRouter CreateMessageStream: %v\n", r)
-				eventChan <- StreamEvent{
+				sendStreamEvent(ctx, eventChan, StreamEvent{
 					Type:  EventError,
 					Error: fmt.Errorf("panic in stream processing: %v", r),
-				}
+				})
 			}
 			close(eventChan)
 		}()
@@ -152,8 +153,10 @@ func (o *OpenRouterClient) CreateMessageStream(ctx context.Context, req *Request
 		var acc openai.ChatCompletionAccumulator
 
 		// Send message start
-		eventChan <- StreamEvent{
+		if !sendStreamEvent(ctx, eventChan, StreamEvent{
 			Type: EventMessageStart,
+		}) {
+			return
 		}
 
 		for stream.Next() {
@@ -162,9 +165,11 @@ func (o *OpenRouterClient) CreateMessageStream(ctx context.Context, req *Request
 
 			// Emit text deltas
 			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
-				eventChan <- StreamEvent{
+				if !sendStreamEvent(ctx, eventChan, StreamEvent{
 					Type: EventContentDelta,
 					Text: chunk.Choices[0].Delta.Content,
+				}) {
+					return
 				}
 			}
 
@@ -176,7 +181,7 @@ func (o *OpenRouterClient) CreateMessageStream(ctx context.Context, req *Request
 					input = make(map[string]any)
 				}
 
-				eventChan <- StreamEvent{
+				if !sendStreamEvent(ctx, eventChan, StreamEvent{
 					Type: EventContentStop,
 					Block: &ContentBlock{
 						Type:  ContentTypeToolUse,
@@ -184,23 +189,25 @@ func (o *OpenRouterClient) CreateMessageStream(ctx context.Context, req *Request
 						Name:  toolCall.Name,
 						Input: input,
 					},
+				}) {
+					return
 				}
 			}
 		}
 
 		if err := stream.Err(); err != nil {
-			eventChan <- StreamEvent{
+			sendStreamEvent(ctx, eventChan, StreamEvent{
 				Type:  EventError,
 				Error: err,
-			}
+			})
 			return
 		}
 
 		// Final message with complete response
-		eventChan <- StreamEvent{
+		sendStreamEvent(ctx, eventChan, StreamEvent{
 			Type:     EventMessageStop,
 			Response: convertOpenAIResponse(&acc.ChatCompletion),
-		}
+		})
 	}()
 
 	return eventChan, nil

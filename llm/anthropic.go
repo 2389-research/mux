@@ -522,13 +522,14 @@ func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request)
 	eventChan := make(chan StreamEvent, 100)
 
 	go func() {
+		defer stream.Close()
 		defer func() {
 			if r := recover(); r != nil {
 				fmt.Fprintf(os.Stderr, "Error: panic recovered in CreateMessageStream: %v\n", r)
-				eventChan <- StreamEvent{
+				sendStreamEvent(ctx, eventChan, StreamEvent{
 					Type:  EventError,
 					Error: fmt.Errorf("panic in stream processing: %v", r),
-				}
+				})
 			}
 			close(eventChan)
 		}()
@@ -539,9 +540,11 @@ func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request)
 			switch event.Type {
 			case "message_start":
 				response := acc.start(&event.Message)
-				eventChan <- StreamEvent{
+				if !sendStreamEvent(ctx, eventChan, StreamEvent{
 					Type:     EventMessageStart,
 					Response: cloneResponse(response),
+				}) {
+					return
 				}
 			case "content_block_start":
 				se := StreamEvent{
@@ -557,7 +560,9 @@ func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request)
 						Name: event.ContentBlock.Name,
 					}
 				}
-				eventChan <- se
+				if !sendStreamEvent(ctx, eventChan, se) {
+					return
+				}
 			case "content_block_delta":
 				var text string
 				switch event.Delta.Type {
@@ -575,19 +580,23 @@ func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request)
 				} else {
 					acc.appendDelta(int(event.Index), event.Delta.Type, text)
 				}
-				eventChan <- StreamEvent{
+				if !sendStreamEvent(ctx, eventChan, StreamEvent{
 					Type:  EventContentDelta,
 					Index: int(event.Index),
 					Text:  text,
+				}) {
+					return
 				}
 			case "content_block_stop":
 				if err := acc.stopBlock(int(event.Index)); err != nil {
-					eventChan <- StreamEvent{Type: EventError, Error: err}
+					sendStreamEvent(ctx, eventChan, StreamEvent{Type: EventError, Error: err})
 					return
 				}
-				eventChan <- StreamEvent{
+				if !sendStreamEvent(ctx, eventChan, StreamEvent{
 					Type:  EventContentStop,
 					Index: int(event.Index),
+				}) {
+					return
 				}
 			case "message_delta":
 				se := StreamEvent{
@@ -597,20 +606,24 @@ func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request)
 				if event.Delta.StopReason != "" || event.Usage.OutputTokens > 0 {
 					se.Response = acc.mergeDelta(mapAnthropicStopReason(event.Delta.StopReason), Usage{OutputTokens: int(event.Usage.OutputTokens)})
 				}
-				eventChan <- se
+				if !sendStreamEvent(ctx, eventChan, se) {
+					return
+				}
 			case "message_stop":
-				eventChan <- StreamEvent{
+				if !sendStreamEvent(ctx, eventChan, StreamEvent{
 					Type:     EventMessageStop,
 					Response: acc.finish(),
+				}) {
+					return
 				}
 			}
 		}
 
 		if err := stream.Err(); err != nil {
-			eventChan <- StreamEvent{
+			sendStreamEvent(ctx, eventChan, StreamEvent{
 				Type:  EventError,
 				Error: err,
-			}
+			})
 		}
 	}()
 

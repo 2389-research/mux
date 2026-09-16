@@ -822,13 +822,14 @@ func (o *OpenAIClient) CreateMessageStream(ctx context.Context, req *Request) (<
 	eventChan := make(chan StreamEvent, 100)
 
 	go func() {
+		defer stream.Close()
 		defer func() {
 			if r := recover(); r != nil {
 				fmt.Fprintf(os.Stderr, "Error: panic recovered in OpenAI CreateMessageStream: %v\n", r)
-				eventChan <- StreamEvent{
+				sendStreamEvent(ctx, eventChan, StreamEvent{
 					Type:  EventError,
 					Error: fmt.Errorf("panic in stream processing: %v", r),
-				}
+				})
 			}
 			close(eventChan)
 		}()
@@ -846,11 +847,15 @@ func (o *OpenAIClient) CreateMessageStream(ctx context.Context, req *Request) (<
 			switch event.Type {
 			case "response.created":
 				messageStarted = true
-				eventChan <- StreamEvent{Type: EventMessageStart}
+				if !sendStreamEvent(ctx, eventChan, StreamEvent{Type: EventMessageStart}) {
+					return
+				}
 			case "response.output_text.delta":
-				eventChan <- StreamEvent{
+				if !sendStreamEvent(ctx, eventChan, StreamEvent{
 					Type: EventContentDelta,
 					Text: event.Delta,
+				}) {
+					return
 				}
 			case "response.output_item.added":
 				if event.Item.Type == "function_call" {
@@ -871,28 +876,34 @@ func (o *OpenAIClient) CreateMessageStream(ctx context.Context, req *Request) (<
 				}
 				toolCalls[event.ItemID] = toolCall
 				block := openAIStreamingToolCallBlock(event.ItemID, toolCall)
-				eventChan <- StreamEvent{
+				if !sendStreamEvent(ctx, eventChan, StreamEvent{
 					Type:  EventContentStop,
 					Block: block,
+				}) {
+					return
 				}
 			case "response.completed":
 				if err := openAIResponseError(&event.Response); err != nil {
-					eventChan <- StreamEvent{Type: EventError, Error: err}
+					sendStreamEvent(ctx, eventChan, StreamEvent{Type: EventError, Error: err})
 					return
 				}
 				if !messageStarted {
-					eventChan <- StreamEvent{Type: EventMessageStart}
+					if !sendStreamEvent(ctx, eventChan, StreamEvent{Type: EventMessageStart}) {
+						return
+					}
 				}
 				resp := convertOpenAIResponsesResponse(&event.Response, req.Model)
-				eventChan <- StreamEvent{
+				if !sendStreamEvent(ctx, eventChan, StreamEvent{
 					Type:     EventMessageStop,
 					Response: resp,
+				}) {
+					return
 				}
 			case "error":
-				eventChan <- StreamEvent{
+				sendStreamEvent(ctx, eventChan, StreamEvent{
 					Type:  EventError,
 					Error: fmt.Errorf("openai stream error: %s", event.Message),
-				}
+				})
 				return
 			case "response.failed":
 				err := openAIResponseError(&event.Response)
@@ -903,24 +914,24 @@ func (o *OpenAIClient) CreateMessageStream(ctx context.Context, req *Request) (<
 					// error (jqws) or fall through as a success.
 					err = fmt.Errorf("openai: stream reported %s with status %q", event.Type, event.Response.Status)
 				}
-				eventChan <- StreamEvent{
+				sendStreamEvent(ctx, eventChan, StreamEvent{
 					Type:  EventError,
 					Error: err,
-				}
+				})
 				return
 			case "response.incomplete":
 				if err := openAIResponseError(&event.Response); err != nil {
-					eventChan <- StreamEvent{Type: EventError, Error: err}
+					sendStreamEvent(ctx, eventChan, StreamEvent{Type: EventError, Error: err})
 					return
 				}
 				if event.Response.Status != responses.ResponseStatusIncomplete {
 					// Contradictory wire shape: the event attests
 					// truncation or filtering but the payload claims
 					// completion; neither can be trusted as a clean turn.
-					eventChan <- StreamEvent{
+					sendStreamEvent(ctx, eventChan, StreamEvent{
 						Type:  EventError,
 						Error: fmt.Errorf("openai: stream reported %s with status %q", event.Type, event.Response.Status),
-					}
+					})
 					return
 				}
 				// Truncation or content filtering: deliver the partial
@@ -930,21 +941,25 @@ func (o *OpenAIClient) CreateMessageStream(ctx context.Context, req *Request) (<
 				// (max_tokens / content_filter) + partial content, exactly
 				// as the other providers' streams deliver truncated turns.
 				if !messageStarted {
-					eventChan <- StreamEvent{Type: EventMessageStart}
+					if !sendStreamEvent(ctx, eventChan, StreamEvent{Type: EventMessageStart}) {
+						return
+					}
 				}
 				resp := convertOpenAIResponsesResponse(&event.Response, req.Model)
-				eventChan <- StreamEvent{
+				if !sendStreamEvent(ctx, eventChan, StreamEvent{
 					Type:     EventMessageStop,
 					Response: resp,
+				}) {
+					return
 				}
 			}
 		}
 
 		if err := stream.Err(); err != nil {
-			eventChan <- StreamEvent{
+			sendStreamEvent(ctx, eventChan, StreamEvent{
 				Type:  EventError,
 				Error: err,
-			}
+			})
 			return
 		}
 	}()
