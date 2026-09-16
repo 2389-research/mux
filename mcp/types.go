@@ -5,6 +5,7 @@ package mcp
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync/atomic"
 )
 
@@ -54,6 +55,18 @@ func transportError(state transportState, cause error) error {
 	default:
 		return nil
 	}
+}
+
+// handshakeInterrupted reports the error a handshake must return when the
+// transport left transportStarting underneath it. Close racing the handshake is
+// the expected case; any other state is a lifecycle bug, reported rather than
+// mistaken for success, since transportError treats a running transport as
+// ready.
+func handshakeInterrupted(state transportState, cause error) error {
+	if err := transportError(state, cause); err != nil {
+		return err
+	}
+	return fmt.Errorf("%w: handshake interrupted in state %d", ErrTransportClosed, state)
 }
 
 var requestID uint64

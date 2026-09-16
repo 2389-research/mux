@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -49,6 +50,9 @@ func TestStdioRestartAfterCloseRejected(t *testing.T) {
 	}
 	if c.cmd != first {
 		t.Fatal("rejected Start launched a second child process")
+	}
+	if first.ProcessState == nil {
+		t.Fatal("Close left the first child unreaped")
 	}
 }
 
@@ -159,8 +163,17 @@ func TestStdioReaderScanErrorFailsPendingCalls(t *testing.T) {
 // mux#vfwt: a child that stops reading its stdin used to swallow the caller's
 // deadline, because the write ran under the lifecycle mutex with no
 // cancellation of its own.
+//
+// The deadline bounds the caller's wait, not the frame: an ordinary per-call
+// timeout must leave the connection framed correctly and usable, since one
+// oversized argument is no reason to lose the MCP server for the session.
 func TestStdioBlockedWriteHonorsCallDeadline(t *testing.T) {
-	c := newStdioClient(ServerConfig{Command: "node", Args: []string{"testdata/blocked_stdin_server.js"}})
+	c := newStdioClient(ServerConfig{
+		Command: "node",
+		// The child drains stdin again 750ms after the handshake, well past the
+		// 50ms deadline below.
+		Args: []string{"testdata/blocked_stdin_server.js", "750"},
+	})
 	// Start under a context the test never cancels: releasing the write must
 	// not depend on killing the child through the Start context.
 	if err := c.Start(context.Background()); err != nil {
@@ -186,10 +199,21 @@ func TestStdioBlockedWriteHonorsCallDeadline(t *testing.T) {
 		t.Fatal("blocked write ignored the call deadline")
 	}
 
-	// An interrupted write leaves a truncated frame in the pipe, so the
-	// connection is finished rather than silently desynchronized.
-	if _, err := c.CallTool(context.Background(), "test_tool", nil); !errors.Is(err, ErrTransportClosed) {
-		t.Fatalf("call after interrupted write = %v, want ErrTransportClosed", err)
+	// The abandoned frame is still written in full, so the next call gets a
+	// real answer on a stream the server can still parse.
+	ctx, cancel = context.WithTimeout(context.Background(), watchdog)
+	defer cancel()
+	result, err := c.CallTool(ctx, "test_tool", nil)
+	if err != nil {
+		t.Fatalf("call after abandoned wait = %v, want success", err)
+	}
+	if len(result.Content) != 1 {
+		t.Fatalf("expected 1 content block, got %d", len(result.Content))
+	}
+	// The child reports how it parsed the stream: initialize, the initialized
+	// notification, the abandoned call and this one, none of them truncated.
+	if got := result.Content[0].Text; got != "frames=4 malformed=0" {
+		t.Fatalf("server parsed %q, want \"frames=4 malformed=0\"", got)
 	}
 }
 
@@ -201,6 +225,7 @@ func TestStdioCloseReleasesBlockedWrite(t *testing.T) {
 	if err := c.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	handshakeFrames := c.accepted.Load()
 
 	// No deadline: only Close can release this call.
 	done := make(chan error, 1)
@@ -208,7 +233,7 @@ func TestStdioCloseReleasesBlockedWrite(t *testing.T) {
 		_, err := c.CallTool(context.Background(), "test_tool", map[string]any{"payload": strings.Repeat("x", 4<<20)})
 		done <- err
 	}()
-	waitForWriteInFlight(t, c)
+	waitForFrameAccepted(t, c, handshakeFrames+1)
 
 	closed := make(chan error, 1)
 	go func() { closed <- c.Close() }()
@@ -230,22 +255,108 @@ func TestStdioCloseReleasesBlockedWrite(t *testing.T) {
 		t.Fatal("Close left the write blocked")
 	}
 
+	// Close is the one interruption that can truncate a frame, so nobody gets
+	// to write after it: the stream stays closed rather than desynchronized.
+	if _, err := c.CallTool(context.Background(), "test_tool", nil); !errors.Is(err, ErrTransportClosed) {
+		t.Fatalf("call after interrupted write = %v, want ErrTransportClosed", err)
+	}
+
 	if c.cmd.ProcessState == nil {
 		t.Fatal("child process was not reaped")
 	}
 }
 
-// waitForWriteInFlight blocks until a send holds the write gate, so a test can
-// act on a write that has already reached the pipe instead of guessing at a
-// sleep.
-func waitForWriteInFlight(t *testing.T, c *stdioClient) {
+// TestStdioAbandonChildReapsProcess covers the cleanup a Start performs when
+// Close beat it to the lifecycle: the child it already launched is killed and
+// reaped on the spot, never left behind.
+func TestStdioAbandonChildReapsProcess(t *testing.T) {
+	cmd := exec.Command("cat")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	abandonChild(cmd, stdin, stdout)
+
+	if cmd.ProcessState == nil {
+		t.Fatal("abandoned child was killed but never reaped")
+	}
+	if cmd.ProcessState.Success() {
+		t.Fatalf("abandoned child exited on its own terms: %v", cmd.ProcessState)
+	}
+}
+
+// TestStdioCloseRacingStart covers the concurrent lifecycle mux#s53f asks for:
+// Close landing while Start has a child launched but not yet published. Either
+// order is legal, but the client must end up closed with no surviving child.
+func TestStdioCloseRacingStart(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		c := newStdioClient(ServerConfig{Command: "cat"})
+		started := make(chan error, 1)
+		go func() { started <- c.Start(context.Background()) }()
+
+		// Close only once Start owns the lifecycle, so it lands in the window
+		// where a child may exist that no field points at yet.
+		waitForStarting(t, c)
+		if err := c.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+
+		select {
+		case err := <-started:
+			if err != nil && !errors.Is(err, ErrTransportClosed) {
+				t.Fatalf("Start racing Close = %v, want nil or ErrTransportClosed", err)
+			}
+		case <-time.After(watchdog):
+			t.Fatal("Start never returned after Close")
+		}
+
+		if _, err := c.CallTool(context.Background(), "test_tool", nil); !errors.Is(err, ErrTransportClosed) {
+			t.Fatalf("call after raced Start = %v, want ErrTransportClosed", err)
+		}
+
+		c.mu.Lock()
+		cmd := c.cmd
+		c.mu.Unlock()
+		if cmd != nil && cmd.ProcessState == nil {
+			t.Fatal("published child was not reaped")
+		}
+	}
+}
+
+// waitForStarting blocks until Start has claimed the lifecycle.
+func waitForStarting(t *testing.T, c *stdioClient) {
 	t.Helper()
 	deadline := time.Now().Add(watchdog)
 	for time.Now().Before(deadline) {
-		if len(c.writeGate) == 1 {
+		c.mu.Lock()
+		state := c.state
+		c.mu.Unlock()
+		if state != transportIdle {
+			return
+		}
+	}
+	t.Fatal("Start never claimed the lifecycle")
+}
+
+// waitForFrameAccepted blocks until the writer goroutine has taken ownership of
+// want frames, so a test can act on a write that has already reached the pipe
+// instead of guessing at a sleep.
+func waitForFrameAccepted(t *testing.T, c *stdioClient, want uint64) {
+	t.Helper()
+	deadline := time.Now().Add(watchdog)
+	for time.Now().Before(deadline) {
+		if c.accepted.Load() >= want {
 			return
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatal("no write reached the transport")
+	t.Fatalf("writer accepted %d frames, want %d", c.accepted.Load(), want)
 }

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -34,16 +35,27 @@ type stdioClient struct {
 	pending map[uint64]chan *Response
 	state   transportState
 	cause   error // terminal cause, recorded once when state becomes closed
-	reading bool  // a readResponses goroutine was launched
+	piping  bool  // the reader and writer goroutines were launched
 
 	// lifeCtx is canceled when the transport terminates, so pending calls and
 	// blocked writes learn about it from one signal.
 	lifeCtx    context.Context
 	lifeCancel context.CancelFunc
 
-	writeGate  chan struct{} // capacity 1: serializes writes without the lifecycle mutex
+	writes     chan *frame   // handoff to the writer goroutine; unbuffered, so frames keep their order
+	accepted   atomic.Uint64 // frames the writer has taken ownership of
+	writerDone chan struct{} // closed when writeFrames returns
 	readerDone chan struct{} // closed when readResponses returns
 	reapOnce   sync.Once
+}
+
+// frame is one JSON line on its way to the child. The writer goroutine owns a
+// frame from the moment it accepts one until the write finishes, and reports
+// the outcome on done, which is buffered so a caller that stopped waiting never
+// blocks the writer.
+type frame struct {
+	data []byte
+	done chan error
 }
 
 // newStdioClient creates a new MCP client using stdio transport.
@@ -54,7 +66,8 @@ func newStdioClient(config ServerConfig) *stdioClient {
 		pending:    make(map[uint64]chan *Response),
 		lifeCtx:    lifeCtx,
 		lifeCancel: lifeCancel,
-		writeGate:  make(chan struct{}, 1),
+		writes:     make(chan *frame),
+		writerDone: make(chan struct{}),
 		readerDone: make(chan struct{}),
 	}
 }
@@ -118,19 +131,17 @@ func (c *stdioClient) Start(ctx context.Context) error {
 	if c.state != transportStarting {
 		// Close raced this Start. Own the child we just launched instead of
 		// leaking it, and hand the caller the terminal error.
-		err := transportError(c.state, c.cause)
+		err := handshakeInterrupted(c.state, c.cause)
 		c.mu.Unlock()
-		_ = stdin.Close()
-		_ = stdout.Close()
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		abandonChild(cmd, stdin, stdout)
 		return err
 	}
 	c.cmd, c.stdin, c.stdout, c.scanner = cmd, stdin, stdout, scanner
-	c.reading = true
+	c.piping = true
 	c.mu.Unlock()
 
 	go c.readResponses()
+	go c.writeFrames()
 
 	if err := c.initialize(ctx); err != nil {
 		// initialize failed - tear down the goroutine and child process so we
@@ -142,13 +153,23 @@ func (c *stdioClient) Start(ctx context.Context) error {
 
 	c.mu.Lock()
 	if c.state != transportStarting {
-		err := transportError(c.state, c.cause)
+		err := handshakeInterrupted(c.state, c.cause)
 		c.mu.Unlock()
 		return err
 	}
 	c.state = transportRunning
 	c.mu.Unlock()
 	return nil
+}
+
+// abandonChild disposes of a child process that will never be published,
+// because Close terminated the client while Start was launching it. Killing and
+// reaping it here is what keeps a raced Start from leaking a process.
+func abandonChild(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser) {
+	_ = stdin.Close()
+	_ = stdout.Close()
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
 }
 
 // startFailed records err as the terminal cause and reports it: a client that
@@ -242,9 +263,12 @@ func (c *stdioClient) notify(ctx context.Context, method string, params any) err
 	return c.send(ctx, req)
 }
 
-// send writes one JSON frame to the child. Writes are serialized by writeGate
-// rather than the lifecycle mutex, so a child that stops reading its stdin
-// blocks only other writers - never Close.
+// send hands one JSON frame to the writer goroutine and waits for it to land.
+// The caller's context bounds only that wait: a frame the writer has accepted
+// is always written to completion, so a per-call deadline leaves the stream
+// correctly framed and the transport usable for the next call. Nothing here
+// holds the lifecycle mutex, so a child that stops reading its stdin blocks
+// only other writers - never Close.
 func (c *stdioClient) send(ctx context.Context, req *Request) error {
 	data, err := json.Marshal(req)
 	if err != nil {
@@ -252,46 +276,60 @@ func (c *stdioClient) send(ctx context.Context, req *Request) error {
 	}
 	data = append(data, '\n')
 
-	select {
-	case c.writeGate <- struct{}{}:
-		defer func() { <-c.writeGate }()
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-c.lifeCtx.Done():
-		return c.terminalError()
-	}
-
 	c.mu.Lock()
 	if err := transportError(c.state, c.cause); err != nil {
 		c.mu.Unlock()
 		return err
 	}
-	stdin := c.stdin
 	c.mu.Unlock()
 
-	// A caller that gives up mid-frame leaves a truncated JSON line in the
-	// pipe, which no later message can recover from, so an interrupted write
-	// ends the connection. Terminating also closes stdin, which releases the
-	// blocked Write below.
-	stop := context.AfterFunc(ctx, func() {
-		c.terminate(fmt.Errorf("%w: write canceled: %w", ErrTransportClosed, ctx.Err()))
-	})
-	defer stop()
-
-	n, err := stdin.Write(data)
-	switch {
-	case err != nil:
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-		// The pipe failed on its own (the child is gone, or Close raced us).
-		c.terminate(fmt.Errorf("%w: write: %w", ErrTransportClosed, err))
-		return c.terminalError()
-	case n < len(data):
-		c.terminate(fmt.Errorf("%w: %w", ErrTransportClosed, io.ErrShortWrite))
+	f := &frame{data: data, done: make(chan error, 1)}
+	select {
+	case c.writes <- f:
+	case <-ctx.Done():
+		// Nothing was handed over, so nothing is half-written.
+		return ctx.Err()
+	case <-c.lifeCtx.Done():
 		return c.terminalError()
 	}
-	return nil
+
+	select {
+	case err := <-f.done:
+		return err
+	case <-ctx.Done():
+		// The writer still owns this frame and finishes it; only the wait ends.
+		return ctx.Err()
+	case <-c.lifeCtx.Done():
+		return c.terminalError()
+	}
+}
+
+// writeFrames owns the child's stdin for the life of the transport. Frames are
+// written one at a time and to completion, so callers never truncate a JSON
+// line by giving up. A write blocked in a full pipe is released by Close, which
+// closes the pipe underneath it.
+func (c *stdioClient) writeFrames() {
+	defer close(c.writerDone)
+	for {
+		select {
+		case f := <-c.writes:
+			c.accepted.Add(1)
+			n, err := c.stdin.Write(f.data)
+			switch {
+			case err != nil:
+				// The pipe failed: the child is gone, or Close closed it.
+				c.terminate(fmt.Errorf("%w: write: %w", ErrTransportClosed, err))
+				f.done <- c.terminalError()
+			case n < len(f.data):
+				c.terminate(fmt.Errorf("%w: %w", ErrTransportClosed, io.ErrShortWrite))
+				f.done <- c.terminalError()
+			default:
+				f.done <- nil
+			}
+		case <-c.lifeCtx.Done():
+			return
+		}
+	}
 }
 
 func (c *stdioClient) readResponses() {
@@ -375,24 +413,31 @@ func (c *stdioClient) shutdown(cause error) {
 	c.reapOnce.Do(c.reap)
 }
 
-// reap waits for the reader goroutine to notice the closed pipe, then kills and
-// reaps the child. It runs once per client, outside the lifecycle mutex.
+// waitForExit waits for a transport goroutine to finish, warning instead of
+// blocking forever if it does not.
+func waitForExit(done <-chan struct{}, name string) {
+	select {
+	case <-done:
+	case <-time.After(shutdownTimeout):
+		fmt.Fprintf(os.Stderr, "mcp: warning: %s goroutine did not exit within timeout\n", name)
+	}
+}
+
+// reap waits for the transport goroutines to notice the closed pipes, then
+// kills and reaps the child. It runs once per client, outside the lifecycle
+// mutex.
 func (c *stdioClient) reap() {
 	c.mu.Lock()
-	cmd, reading := c.cmd, c.reading
+	cmd, piping := c.cmd, c.piping
 	c.mu.Unlock()
 
-	if reading {
-		// Wait for readResponses to exit (with timeout).
-		// Use a more robust timeout - 5 seconds should be sufficient
-		// for the scanner to detect the closed pipe and exit
-		select {
-		case <-c.readerDone:
-			// Clean exit
-		case <-time.After(shutdownTimeout):
-			// Timeout - goroutine may be stuck, but we'll kill the process anyway
-			fmt.Fprintf(os.Stderr, "mcp: warning: readResponses goroutine did not exit within timeout\n")
-		}
+	if piping {
+		// Wait for the transport goroutines to notice the closed pipes before
+		// killing the child, so nothing touches its descriptors afterwards.
+		// Five seconds is ample for a scanner to see EOF or a blocked write to
+		// fail; past that we kill the process anyway rather than hang Close.
+		waitForExit(c.readerDone, "readResponses")
+		waitForExit(c.writerDone, "writeFrames")
 	}
 
 	// Kill the process and reap it so it does not linger as a zombie.
