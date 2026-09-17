@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1271,6 +1272,7 @@ func TestConvertRequest_Temperature(t *testing.T) {
 func TestConvertRequest_TemperatureThinkingConflict(t *testing.T) {
 	one := 1.0
 	low := 0.2
+	high := 1.5
 	tests := []struct {
 		name        string
 		temperature *float64
@@ -1278,7 +1280,8 @@ func TestConvertRequest_TemperatureThinkingConflict(t *testing.T) {
 	}{
 		{name: "nil temperature is compatible", temperature: nil, wantErr: false},
 		{name: "temperature 1 (the default) is compatible", temperature: &one, wantErr: false},
-		{name: "non-default temperature conflicts", temperature: &low, wantErr: true},
+		{name: "non-default temperature below 1 conflicts", temperature: &low, wantErr: true},
+		{name: "non-default temperature above 1 conflicts", temperature: &high, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1591,35 +1594,46 @@ func TestAnthropicCreateMessageStream_RejectsAudio(t *testing.T) {
 }
 
 func TestAnthropicCreateMessage_TemperatureThinkingConflict(t *testing.T) {
-	temp := 0.2
-	c := NewAnthropicClient("fake-key", "")
-	req := &Request{
-		Messages:    []Message{NewUserMessage("hi")},
-		Temperature: &temp,
-		Thinking:    &ThinkingConfig{Enabled: true, Budget: 1024},
-	}
-	_, err := c.CreateMessage(context.Background(), req)
-	var conflict *ErrIncompatibleThinking
-	if !errors.As(err, &conflict) {
-		t.Fatalf("expected *ErrIncompatibleThinking, got %T: %v", err, err)
-	}
-	if conflict.Provider != "anthropic" || conflict.Temperature != 0.2 {
-		t.Errorf("err fields: %+v", conflict)
+	temperatures := []float64{0.2, 1.5}
+	for _, temp := range temperatures {
+		t.Run(fmt.Sprintf("temperature=%v", temp), func(t *testing.T) {
+			c := NewAnthropicClient("fake-key", "")
+			req := &Request{
+				Messages:    []Message{NewUserMessage("hi")},
+				Temperature: &temp,
+				Thinking:    &ThinkingConfig{Enabled: true, Budget: 1024},
+			}
+			_, err := c.CreateMessage(context.Background(), req)
+			var conflict *ErrIncompatibleThinking
+			if !errors.As(err, &conflict) {
+				t.Fatalf("expected *ErrIncompatibleThinking, got %T: %v", err, err)
+			}
+			if conflict.Provider != "anthropic" || conflict.Temperature != temp {
+				t.Errorf("err fields: %+v", conflict)
+			}
+		})
 	}
 }
 
 func TestAnthropicCreateMessageStream_TemperatureThinkingConflict(t *testing.T) {
-	temp := 0.2
-	c := NewAnthropicClient("fake-key", "")
-	req := &Request{
-		Messages:    []Message{NewUserMessage("hi")},
-		Temperature: &temp,
-		Thinking:    &ThinkingConfig{Enabled: true, Budget: 1024},
-	}
-	_, err := c.CreateMessageStream(context.Background(), req)
-	var conflict *ErrIncompatibleThinking
-	if !errors.As(err, &conflict) {
-		t.Fatalf("expected *ErrIncompatibleThinking, got %T: %v", err, err)
+	temperatures := []float64{0.2, 1.5}
+	for _, temp := range temperatures {
+		t.Run(fmt.Sprintf("temperature=%v", temp), func(t *testing.T) {
+			c := NewAnthropicClient("fake-key", "")
+			req := &Request{
+				Messages:    []Message{NewUserMessage("hi")},
+				Temperature: &temp,
+				Thinking:    &ThinkingConfig{Enabled: true, Budget: 1024},
+			}
+			_, err := c.CreateMessageStream(context.Background(), req)
+			var conflict *ErrIncompatibleThinking
+			if !errors.As(err, &conflict) {
+				t.Fatalf("expected *ErrIncompatibleThinking, got %T: %v", err, err)
+			}
+			if conflict.Provider != "anthropic" || conflict.Temperature != temp {
+				t.Errorf("err fields: %+v", conflict)
+			}
+		})
 	}
 }
 

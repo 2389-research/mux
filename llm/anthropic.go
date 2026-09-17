@@ -94,14 +94,21 @@ func anthropicBlockReplay(block anthropic.ContentBlockUnion, requestModel string
 
 // ErrIncompatibleThinking indicates a request combined an explicit,
 // non-default Temperature with enabled manual extended thinking. Anthropic
-// rejects this combination: on current-generation models any non-default
-// temperature, top_p, or top_k value errors on every request regardless of
-// thinking, and on older models temperature is incompatible with thinking
-// specifically. Temperature 1 (the API default) is unaffected either way, so
-// only a genuinely explicit override is rejected here — nil and 1 both
-// reach the API unchanged. See
-// https://platform.claude.com/docs/en/build-with-claude/thinking (Limits and
-// feature compatibility > Sampling parameters).
+// rejects that combination on every model generation, and it is the only
+// case convertRequest checks before the request reaches the wire.
+// Temperature 1 (the API default) is unaffected, so only a genuinely
+// explicit override is rejected here — nil and 1 both reach the API
+// unchanged.
+//
+// This does not cover Anthropic's separate, broader rule for
+// current-generation models: on those models any non-default temperature,
+// top_p, or top_k value errors on every request, regardless of whether
+// thinking is used at all. An explicit non-default Temperature on an
+// ordinary, non-thinking request against a current-generation model still
+// reaches the wire today and depends on the live API to reject it — that
+// case is a known gap, out of scope here the same way top_p and top_k are.
+// See https://platform.claude.com/docs/en/build-with-claude/thinking (Limits
+// and feature compatibility > Sampling parameters).
 type ErrIncompatibleThinking struct {
 	Provider    string
 	Temperature float64
