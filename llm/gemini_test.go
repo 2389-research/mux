@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -715,5 +717,184 @@ func TestGeminiWireFormat_AudioBytes(t *testing.T) {
 	}
 	if v := gjson.GetBytes(body, "parts.0.inlineData.data").String(); v == "" {
 		t.Errorf("data should be non-empty base64; body=%s", body)
+	}
+}
+
+// TestConvertGeminiResponse_BlockedPrompt covers mux#a2j0: a prompt Gemini
+// blocks before generation carries no candidates, only PromptFeedback. That
+// must surface as a typed, errors.As-detectable failure instead of the empty
+// successful Response the zero-candidate branch produces for an ordinary
+// empty turn.
+func TestConvertGeminiResponse_BlockedPrompt(t *testing.T) {
+	resp := sigGeminiResponse(t, `{"promptFeedback":{"blockReason":"SAFETY"}}`)
+	result, err := convertGeminiResponse(resp, "gemini-2.5-pro")
+	if result != nil {
+		t.Fatalf("expected no Response for a blocked prompt, got %+v", result)
+	}
+	var pe *ErrProviderResponse
+	if !errors.As(err, &pe) {
+		t.Fatalf("expected *ErrProviderResponse, got %T: %v", err, err)
+	}
+	if pe.Provider != "gemini" {
+		t.Errorf("expected provider gemini, got %q", pe.Provider)
+	}
+	if pe.Reason != "blocked: SAFETY" {
+		t.Errorf("expected reason %q, got %q", "blocked: SAFETY", pe.Reason)
+	}
+}
+
+// TestConvertGeminiResponse_BlockReasonUnspecifiedNotBlocked guards the
+// boundary the acceptance text draws: an explicit but meaningless
+// BLOCKED_REASON_UNSPECIFIED must not be treated as a block, or every
+// prompt carrying an empty-but-present PromptFeedback object would start
+// erroring. This is a genuinely distinct fixture from
+// TestConvertGeminiResponse_EmptyCandidatesStopReason (no PromptFeedback at
+// all): both must reach StopReasonOther, not an error.
+func TestConvertGeminiResponse_BlockReasonUnspecifiedNotBlocked(t *testing.T) {
+	resp := sigGeminiResponse(t, `{"promptFeedback":{"blockReason":"BLOCKED_REASON_UNSPECIFIED"}}`)
+	result, err := convertGeminiResponse(resp, "gemini-2.5-pro")
+	if err != nil {
+		t.Fatalf("unexpected error for an unspecified block reason: %v", err)
+	}
+	if result.StopReason != StopReasonOther {
+		t.Errorf("expected stop reason other, got %q", result.StopReason)
+	}
+}
+
+// TestConvertGeminiResponse_CandidateSafetyFinishIsNotBlocked confirms the
+// new prompt-level block check does not overreach into per-candidate content
+// filtering: a candidate whose own FinishReason is SAFETY (no PromptFeedback
+// at all) stays a successful Response carrying StopReasonContentFilter, per
+// the status policy documented on Response — content filtering is never an
+// error.
+func TestConvertGeminiResponse_CandidateSafetyFinishIsNotBlocked(t *testing.T) {
+	resp := sigGeminiResponse(t, `{"candidates":[{"finishReason":"SAFETY","content":{"role":"model","parts":[]}}]}`)
+	result, err := convertGeminiResponse(resp, "gemini-2.5-pro")
+	if err != nil {
+		t.Fatalf("candidate-level content filtering must not be an error: %v", err)
+	}
+	if result.StopReason != StopReasonContentFilter {
+		t.Errorf("expected stop reason content_filter, got %q", result.StopReason)
+	}
+}
+
+// TestConvertGeminiResponse_MaxTokensPartialText closes the acceptance gap
+// noted for mux#a2j0: MAX_TOKENS truncation already preserves partial text
+// today, since content extraction in convertGeminiResponse is never gated on
+// finish reason. This pins that behavior with a regression test rather than
+// a code change.
+func TestConvertGeminiResponse_MaxTokensPartialText(t *testing.T) {
+	resp := sigGeminiResponse(t, `{"candidates":[{"finishReason":"MAX_TOKENS","content":{"role":"model","parts":[{"text":"partial answer"}]}}]}`)
+	result, err := convertGeminiResponse(resp, "gemini-2.5-pro")
+	if err != nil {
+		t.Fatalf("unexpected error for max_tokens truncation: %v", err)
+	}
+	if result.StopReason != StopReasonMaxTokens {
+		t.Errorf("expected stop reason max_tokens, got %q", result.StopReason)
+	}
+	if result.TextContent() != "partial answer" {
+		t.Errorf("expected partial text preserved, got %q", result.TextContent())
+	}
+}
+
+// TestGeminiCreateMessageStream_BlockedPrompt covers the streaming half of
+// mux#a2j0: a blocked prompt must end the stream with a typed EventError
+// instead of an EventMessageStop carrying an empty successful Response.
+func TestGeminiCreateMessageStream_BlockedPrompt(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(`data: {"promptFeedback":{"blockReason":"SAFETY"}}` + "\n\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	client, err := NewGeminiClientWithBaseURL(context.Background(), "test-key", "gemini-2.5-pro", server.URL)
+	if err != nil {
+		t.Fatalf("NewGeminiClientWithBaseURL: %v", err)
+	}
+
+	events, err := client.CreateMessageStream(context.Background(), &Request{
+		Messages: []Message{NewUserMessage("blocked prompt")},
+	})
+	if err != nil {
+		t.Fatalf("CreateMessageStream: %v", err)
+	}
+
+	var gotError error
+	var gotStop bool
+	for event := range events {
+		switch event.Type {
+		case EventError:
+			gotError = event.Error
+		case EventMessageStop:
+			gotStop = true
+		}
+	}
+	if gotError == nil {
+		t.Fatal("expected an EventError for a blocked prompt, got none")
+	}
+	var pe *ErrProviderResponse
+	if !errors.As(gotError, &pe) {
+		t.Fatalf("expected *ErrProviderResponse, got %T: %v", gotError, gotError)
+	}
+	if pe.Provider != "gemini" || pe.Reason != "blocked: SAFETY" {
+		t.Errorf("err fields: %+v", pe)
+	}
+	if gotStop {
+		t.Error("a blocked prompt must not also emit a successful EventMessageStop")
+	}
+}
+
+// TestGeminiCreateMessageStream_TrailerChunkNotBlocked guards against the
+// false-positive mux#a2j0's streaming fix could introduce: a trailer/usage
+// chunk with zero candidates is normal at the end of an ordinary stream and
+// carries no PromptFeedback at all. Checking every chunk for a block reason
+// (rather than only the last-seen chunk) must not misfire on it.
+func TestGeminiCreateMessageStream_TrailerChunkNotBlocked(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(`data: {"candidates":[{"finishReason":"STOP","content":{"role":"model","parts":[{"text":"hi"}]}}]}` + "\n\n"))
+		flusher.Flush()
+		// A trailer chunk carrying only usage metadata: zero candidates, no
+		// PromptFeedback, exactly what a normal stream's final chunk looks
+		// like.
+		_, _ = w.Write([]byte(`data: {"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":1}}` + "\n\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	client, err := NewGeminiClientWithBaseURL(context.Background(), "test-key", "gemini-2.5-pro", server.URL)
+	if err != nil {
+		t.Fatalf("NewGeminiClientWithBaseURL: %v", err)
+	}
+
+	events, err := client.CreateMessageStream(context.Background(), &Request{
+		Messages: []Message{NewUserMessage("hello")},
+	})
+	if err != nil {
+		t.Fatalf("CreateMessageStream: %v", err)
+	}
+
+	var gotStop bool
+	for event := range events {
+		switch event.Type {
+		case EventError:
+			t.Fatalf("unexpected error event on an ordinary trailer chunk: %v", event.Error)
+		case EventMessageStop:
+			gotStop = true
+		}
+	}
+	if !gotStop {
+		t.Error("expected a successful EventMessageStop, got none")
 	}
 }

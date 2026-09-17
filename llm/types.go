@@ -167,12 +167,12 @@ type Request struct {
 // They carry StopReasonMaxTokens or StopReasonContentFilter with the partial
 // output preserved in Content — from CreateMessage and as the final stream
 // event. Only genuine failures are errors: a provider-reported failed status
-// (typed *ErrProviderResponse, detected with errors.As), transport failure,
-// or request validation. Callers that handle truncation gracefully should
-// branch on StopReason, not on err != nil. On streams the payload status
-// always governs: a response.completed SSE event carrying an incomplete
-// payload delivers partial success, while an incomplete event name with a
-// completed payload errors.
+// or a blocked prompt (typed *ErrProviderResponse, detected with errors.As),
+// transport failure, or request validation. Callers that handle truncation
+// gracefully should branch on StopReason, not on err != nil. On streams the
+// payload status always governs: a response.completed SSE event carrying an
+// incomplete payload delivers partial success, while an incomplete event
+// name with a completed payload errors.
 type Response struct {
 	ID         string         `json:"id"`
 	Content    []ContentBlock `json:"content"`
