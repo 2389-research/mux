@@ -1,0 +1,8 @@
+{
+  "name": "tool_intent_keys_sorted_large_int_html_escaped",
+  "description": "A realistic tool.intent payload: nested map keys sort lexically, the large integer survives, and HTML-sensitive runes in a string value are escaped per encoding/json's default behavior.",
+  "kind": "payload",
+  "payload_kind": "tool.intent",
+  "input": "{\"name\":\"search_web\",\"arguments\":{\"b\":2,\"a\":9007199254740993,\"query\":\"cats \u003cand\u003e dogs \u0026 birds\"},\"request_sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}",
+  "output": "{\"arguments\":{\"a\":9007199254740993,\"b\":2,\"query\":\"cats \\u003cand\\u003e dogs \\u0026 birds\"},\"name\":\"search_web\",\"request_sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}"
+}

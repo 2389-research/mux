@@ -1,0 +1,7 @@
+{
+  "name": "array_order_preserved",
+  "description": "Object keys sort lexically but array element order is never touched.",
+  "kind": "payload",
+  "input": "{\"z\":[3,1,2],\"a\":\"x\"}",
+  "output": "{\"a\":\"x\",\"z\":[3,1,2]}"
+}

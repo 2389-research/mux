@@ -1,0 +1,7 @@
+{
+  "name": "escaped_surrogate_pair_matches_literal_utf8",
+  "description": "The same emoji, spelled in JSON input as an escaped UTF-16 surrogate pair rather than literal UTF-8 bytes, decodes and re-encodes to the identical canonical bytes as the literal form.",
+  "kind": "payload",
+  "input": "{\"emoji\":\"\\uD83D\\uDE00\"}",
+  "output": "{\"emoji\":\"😀\"}"
+}

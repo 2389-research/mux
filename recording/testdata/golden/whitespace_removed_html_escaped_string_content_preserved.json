@@ -1,0 +1,7 @@
+{
+  "name": "whitespace_removed_html_escaped_string_content_preserved",
+  "description": "Whitespace outside strings disappears; HTML-sensitive runes are escaped; whitespace that is semantically part of a string value is preserved exactly.",
+  "kind": "payload",
+  "input": "{\n  \"html\" : \"\u003ca\u003e\u0026\u003c/a\u003e\",\n  \"note\": \"two  spaces\"\n}\n",
+  "output": "{\"html\":\"\\u003ca\\u003e\\u0026\\u003c/a\\u003e\",\"note\":\"two  spaces\"}"
+}

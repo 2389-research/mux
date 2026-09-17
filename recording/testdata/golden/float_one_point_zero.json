@@ -1,0 +1,7 @@
+{
+  "name": "float_one_point_zero",
+  "description": "1 and 1.0 are different JSON literals by contract and must stay distinguishable through the codec, not be numerically normalized.",
+  "kind": "payload",
+  "input": "{\"n\":1.0}",
+  "output": "{\"n\":1.0}"
+}
