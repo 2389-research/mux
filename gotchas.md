@@ -349,3 +349,38 @@ a `wantReason` column".
 The irony is that a thorough fallback hides more. Code careful enough to never end a stream
 silently is exactly the code where "did it error?" becomes a tautology. Assert which error,
 not whether.
+
+## kata JSON: label shape differs by subcommand, and priority can be null (2026-09-17)
+
+`kata ready --json` and `kata list --json` return `.labels` as an array of plain
+strings. Only `kata show <ref> --json` returns label objects with a `.label` field.
+A jq filter written against one shape dies against the other with
+`Cannot index string with string ("label")`. The portable form handles both:
+
+    [.labels[]? | if type=="object" then .label else . end] | join("|")
+
+`priority` is also `null` on some issues, and jq's `sort_by(.priority)` sorts null
+FIRST — so every unset-priority issue floats above real P1s and a "highest priority
+first" query silently returns the opposite. Use `sort_by(.priority // 99)`. Priority 0
+is the highest; null means unset, not urgent.
+
+Both traps are invisible from the output: the query returns rows, just the wrong ones.
+
+## A stopped workflow leaves its commits behind (2026-09-17)
+
+Killing a workflow mid-run removes nothing. Its agent worktrees and their commits
+survive, and the branches they pushed stay on `kata/<ref>-<slug>` names that the next
+run will pick again. An agent restarted on the same kata then opens its worktree and
+finds the fix already committed, with evidence files in the scratchpad timestamped
+minutes before it started — indistinguishable from work someone else finished.
+
+That happened on `29jh`, and two other katas in the same wave hit the older cousin of
+it: a stale branch ~60 merges behind main whose diff would have deleted ~9000 lines of
+shipped work, and a `needs-review` label left by a prior failed run. All three agents
+verified independently instead of trusting the artifact, because the prompt told them
+prior claims are leads and not truth. The rule held three for three; the cost was
+verification time on every one.
+
+Clean up after a killed run: `git worktree list` for `.claude/worktrees/wf_*` entries
+(`git worktree remove --force`, the commits stay reachable from the named branches),
+and delete the orphan `kata/` branches it left.
