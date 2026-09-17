@@ -898,3 +898,70 @@ func TestGeminiCreateMessageStream_TrailerChunkNotBlocked(t *testing.T) {
 		t.Error("expected a successful EventMessageStop, got none")
 	}
 }
+
+// TestGeminiCreateMessageStream_BlockedThenTrailerChunkStillErrors guards the
+// per-chunk PromptFeedback check itself, not just its outcome: per
+// geminiBlockedPromptError's doc comment, PromptFeedback is carried on
+// whichever chunk reports the block, not necessarily the last one seen. This
+// sends the block on the first chunk, then a second chunk shaped exactly
+// like TestGeminiCreateMessageStream_TrailerChunkNotBlocked's trailer — zero
+// candidates, no PromptFeedback — which becomes lastResp. The final
+// convertGeminiResponse(lastResp, model) fallback run after the loop sees no
+// PromptFeedback on that trailer and would report success on its own, so
+// this only passes when the in-loop check catches the block before the
+// trailer arrives.
+func TestGeminiCreateMessageStream_BlockedThenTrailerChunkStillErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(`data: {"promptFeedback":{"blockReason":"SAFETY"}}` + "\n\n"))
+		flusher.Flush()
+		// A trailer chunk carrying only usage metadata: zero candidates, no
+		// PromptFeedback, becoming lastResp — the same shape
+		// TestGeminiCreateMessageStream_TrailerChunkNotBlocked uses to prove
+		// trailers are a normal occurrence.
+		_, _ = w.Write([]byte(`data: {"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":0}}` + "\n\n"))
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	client, err := NewGeminiClientWithBaseURL(context.Background(), "test-key", "gemini-2.5-pro", server.URL)
+	if err != nil {
+		t.Fatalf("NewGeminiClientWithBaseURL: %v", err)
+	}
+
+	events, err := client.CreateMessageStream(context.Background(), &Request{
+		Messages: []Message{NewUserMessage("blocked prompt")},
+	})
+	if err != nil {
+		t.Fatalf("CreateMessageStream: %v", err)
+	}
+
+	var gotError error
+	var gotStop bool
+	for event := range events {
+		switch event.Type {
+		case EventError:
+			gotError = event.Error
+		case EventMessageStop:
+			gotStop = true
+		}
+	}
+	if gotError == nil {
+		t.Fatal("expected an EventError for a prompt blocked on a non-final chunk, got none")
+	}
+	var pe *ErrProviderResponse
+	if !errors.As(gotError, &pe) {
+		t.Fatalf("expected *ErrProviderResponse, got %T: %v", gotError, gotError)
+	}
+	if pe.Provider != "gemini" || pe.Reason != "blocked: SAFETY" {
+		t.Errorf("err fields: %+v", pe)
+	}
+	if gotStop {
+		t.Error("a blocked prompt must not also emit a successful EventMessageStop")
+	}
+}
