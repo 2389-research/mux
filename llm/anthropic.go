@@ -92,6 +92,25 @@ func anthropicBlockReplay(block anthropic.ContentBlockUnion, requestModel string
 	}
 }
 
+// ErrIncompatibleThinking indicates a request combined an explicit,
+// non-default Temperature with enabled manual extended thinking. Anthropic
+// rejects this combination: on current-generation models any non-default
+// temperature, top_p, or top_k value errors on every request regardless of
+// thinking, and on older models temperature is incompatible with thinking
+// specifically. Temperature 1 (the API default) is unaffected either way, so
+// only a genuinely explicit override is rejected here — nil and 1 both
+// reach the API unchanged. See
+// https://platform.claude.com/docs/en/build-with-claude/thinking (Limits and
+// feature compatibility > Sampling parameters).
+type ErrIncompatibleThinking struct {
+	Provider    string
+	Temperature float64
+}
+
+func (e *ErrIncompatibleThinking) Error() string {
+	return fmt.Sprintf("%s: temperature %v is incompatible with enabled manual thinking", e.Provider, e.Temperature)
+}
+
 // convertRequest converts our Request to Anthropic's MessageNewParams.
 //
 // A block carrying a Replay envelope is restored from its raw provider JSON
@@ -106,6 +125,9 @@ func convertRequest(req *Request) (anthropic.MessageNewParams, error) {
 
 	// Enable extended thinking if configured
 	if req.Thinking != nil && req.Thinking.Enabled {
+		if req.Temperature != nil && *req.Temperature != 1 {
+			return anthropic.MessageNewParams{}, &ErrIncompatibleThinking{Provider: "anthropic", Temperature: *req.Temperature}
+		}
 		if int64(req.MaxTokens) < int64(req.Thinking.Budget) {
 			params.MaxTokens = int64(req.Thinking.Budget)
 		}
@@ -114,6 +136,9 @@ func convertRequest(req *Request) (anthropic.MessageNewParams, error) {
 				BudgetTokens: int64(req.Thinking.Budget),
 			},
 		}
+	}
+	if req.Temperature != nil {
+		params.Temperature = param.NewOpt(*req.Temperature)
 	}
 
 	// Convert messages

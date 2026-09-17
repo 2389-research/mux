@@ -349,3 +349,23 @@ a `wantReason` column".
 The irony is that a thorough fallback hides more. Code careful enough to never end a stream
 silently is exactly the code where "did it error?" becomes a tautology. Assert which error,
 not whether.
+
+## A rejected worktree-safety command can hide inside a chain (2026-09-17)
+
+Working kata 29jh, a mutation-testing revert used `cp <snapshot> llm/anthropic.go` chained
+with an unrelated `git diff stash@{0}` in the same `&&`-joined Bash call. The harness's
+worktree-isolation check rejected the whole call up front ("names git in a form too complex
+to verify that it stays inside the worktree. Refusing to run it") because of the git
+invocation — and the `cp` never ran, even though it did not touch git at all and sat first
+in the chain. The tool call returned only the rejection text, no partial output, so nothing
+signaled that the revert was silently skipped.
+
+Re-running the intended test suite immediately after caught it: the mutated (broken)
+comparison was still active, so the mutation test kept failing where it should have turned
+green. Without that immediate re-check the file would have stayed mutated while every later
+step assumed it was clean.
+
+Treat a worktree-safety rejection as "none of this chain ran," not "the git part failed."
+Split file edits and git commands into separate Bash calls in this harness, and after any
+revert step — mutation testing especially — verify the file state directly rather than
+trusting that a prior command in the same call succeeded.
