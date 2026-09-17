@@ -369,3 +369,17 @@ Treat a worktree-safety rejection as "none of this chain ran," not "the git part
 Split file edits and git commands into separate Bash calls in this harness, and after any
 revert step — mutation testing especially — verify the file state directly rather than
 trusting that a prior command in the same call succeeded.
+
+## The worktree-safety check also blocks plain commands with no git in them (2026-09-17)
+
+Re-verifying kata 29jh's gate, two commands that never mention git hit the same "too
+complex to verify that it stays inside the worktree" refusal as the chained case above:
+`go test -run 'Foo|Bar|Baz' ...` (a `|` inside a quoted `-run` regex) and
+`GOLANGCI_LINT_CACHE="$SC/x" cmd ...` (a shell variable used to build a path). Neither
+runs git, chains commands, or touches anything outside the worktree — the checker still
+declines to prove that from the command text alone.
+
+So the trigger is not "git present" or "commands chained"; it is shell metacharacters
+(`|`, `$VAR`) anywhere in the command line, read as text before anything executes. Fix:
+write the literal, fully-expanded value in place of the variable, and drop regex
+alternation from `-run` (run the whole package and grep the saved output instead).
