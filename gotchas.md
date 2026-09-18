@@ -403,7 +403,10 @@ plain, `$`-free commands.
 ## kata JSON: label shape differs by subcommand, and priority can be null (2026-09-17)
 
 `kata ready --json` and `kata list --json` return `.labels` as an array of plain
-strings. Only `kata show <ref> --json` returns label objects with a `.label` field.
+strings, on each issue. `kata show <ref> --json` is different twice over: labels are
+objects with a `.label` field, AND they sit at the **top level** of the response, not
+under `.issue` — `.issue.labels` is absent, so a query for it returns empty and reads
+exactly like "no labels" rather than like a wrong path.
 A jq filter written against one shape dies against the other with
 `Cannot index string with string ("label")`. The portable form handles both:
 
