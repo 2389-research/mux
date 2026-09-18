@@ -437,3 +437,19 @@ verification time on every one.
 Clean up after a killed run: `git worktree list` for `.claude/worktrees/wf_*` entries
 (`git worktree remove --force`, the commits stay reachable from the named branches),
 and delete the orphan `kata/` branches it left.
+
+## A recovered panic still prints a full panic trace
+
+`tool.Executor` recovers a panicking before/after hook and reports it with
+`fmt.Fprintf(os.Stderr, "Warning: ...%s", ..., debug.Stack())`. `debug.Stack()` is
+called from inside the deferred recover, so the stack it captures still holds the
+`panic(...)` frames. The result: `TestExecutorAfterHookPanicDoesNotCrash` PASSES while
+writing a complete goroutine trace headed `panic(...)` to stderr. The recovery working
+and the recovery failing look identical in the output.
+
+This matters when the commit hook's full non-short race suite fails. Its output is
+thousands of lines, the trace is the most eye-catching thing in it, and it names a real
+test — so it reads like the cause. It usually isn't. Find the actual `--- FAIL:` line
+before believing it, and check the package's elapsed time: `tool` takes ~1.1s, so a
+`FAIL github.com/2389-research/mux/tool 0.108s` means the binary died before running
+the package, which is a different failure than any test in it.
