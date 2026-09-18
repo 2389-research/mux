@@ -777,9 +777,7 @@ func (o *OpenAIClient) CreateMessage(ctx context.Context, req *Request) (*Respon
 	if err != nil {
 		return nil, err
 	}
-	req.Messages = messages
-
-	params, err := convertOpenAIResponsesRequest(req)
+	params, err := convertOpenAIResponsesRequest(withMessages(req, messages))
 	if err != nil {
 		return nil, err
 	}
@@ -815,9 +813,7 @@ func (o *OpenAIClient) CreateMessageStream(ctx context.Context, req *Request) (<
 	if err != nil {
 		return nil, err
 	}
-	req.Messages = messages
-
-	params, err := convertOpenAIResponsesRequest(req)
+	params, err := convertOpenAIResponsesRequest(withMessages(req, messages))
 	if err != nil {
 		return nil, err
 	}

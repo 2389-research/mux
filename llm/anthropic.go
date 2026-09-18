@@ -296,9 +296,7 @@ func (a *AnthropicClient) CreateMessage(ctx context.Context, req *Request) (*Res
 	if err != nil {
 		return nil, err
 	}
-	req.Messages = messages
-
-	params, err := convertRequest(req)
+	params, err := convertRequest(withMessages(req, messages))
 	if err != nil {
 		return nil, err
 	}
@@ -579,9 +577,7 @@ func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request)
 	if err != nil {
 		return nil, err
 	}
-	req.Messages = messages
-
-	params, err := convertRequest(req)
+	params, err := convertRequest(withMessages(req, messages))
 	if err != nil {
 		return nil, err
 	}

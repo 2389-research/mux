@@ -39,10 +39,11 @@ type ProviderReplay struct {
 // identity mismatch is not a preflight failure: the raw provider APIs
 // themselves tolerate a stale envelope on a model switch, so mux warns to
 // stderr — naming both identities — and drops that block's envelope instead
-// of failing the whole request. A block without a normalized fallback (a
-// thinking or provider-item-only block) then contributes nothing to the
-// outgoing request; a block with one, such as a tool call, still reaches
-// the wire without its signature.
+// of failing the whole request. A block whose only payload was the envelope
+// (a ContentTypeReplay block) is omitted from the result entirely, so it
+// contributes nothing to the outgoing request; a block with a normalized
+// fallback, such as a thinking block or a tool call, still reaches the wire
+// without its signature.
 //
 // Identity is checked before structure, so a block that is both mismatched
 // and malformed is dropped with the warning rather than rejected: the block
@@ -50,10 +51,11 @@ type ProviderReplay struct {
 // payload that is not going to be sent would be the same over-strictness
 // this function exists to remove.
 //
-// The returned slice may alias messages: a message with nothing to drop
-// keeps its original Blocks slice, so callers must treat both the input and
-// the result as read-only after this call rather than assuming they are
-// independent. Blocks without Replay are ignored; a ContentTypeReplay block
+// The result is safe to feed back into validateReplay and is never mutated
+// in place: a message with nothing to drop keeps its original Blocks slice,
+// so the returned slice may alias messages (read-only on both sides), and a
+// message with a drop gets a fresh slice with the caller's own blocks left
+// untouched. Blocks without Replay are ignored; a ContentTypeReplay block
 // without a payload is rejected.
 func validateReplay(provider, model string, messages []Message) ([]Message, error) {
 	var result []Message
@@ -77,17 +79,44 @@ func validateReplay(provider, model string, messages []Message) ([]Message, erro
 	return result, nil
 }
 
+// withMessages returns a shallow copy of req whose Messages are the given
+// slice, so adapters can hand sanitized messages to a converter without
+// writing them back into the caller's *Request. The copy shares every other
+// field by value — the adapters only read them — so the caller sees no
+// mutation, and a *Request stays safe to send again (RetryClient re-uses the
+// same one on every attempt).
+func withMessages(req *Request, messages []Message) *Request {
+	clone := *req
+	clone.Messages = messages
+	return &clone
+}
+
 // validateReplayBlocks runs validateReplayBlock over one message's blocks.
 // It returns the input slice unchanged (changed=false) when nothing needed
-// dropping. Otherwise it clones the slice on first drop — leaving the
-// caller's original untouched — clears the mismatched blocks' Replay
-// pointers in the clone, and returns that.
+// dropping, so the common case allocates nothing.
+//
+// On the first drop it clones the slice — leaving the caller's original
+// untouched — and then builds the result block by block:
+//
+//   - A dropped block whose only payload was the envelope (a
+//     ContentTypeReplay block) is omitted from the result entirely. Clearing
+//     just its Replay pointer would leave a replay block with no payload,
+//     which this function rejects as a structural error — the drop's own
+//     output would then be invalid input to itself, and re-sending the
+//     sanitized messages would fail preflight with a defect the caller's
+//     history never contained.
+//   - A dropped block with a normalized fallback (a thinking or tool-call
+//     block that carried a signature) keeps its place with Replay cleared,
+//     so it still reaches the wire without its signature.
 func validateReplayBlocks(provider, model string, msgIdx int, blocks []ContentBlock) ([]ContentBlock, bool, error) {
 	var cloned []ContentBlock
 	for j, block := range blocks {
 		if block.Replay == nil {
 			if block.Type == ContentTypeReplay {
 				return nil, false, fmt.Errorf("message[%d].blocks[%d].replay: replay block has no payload", msgIdx, j)
+			}
+			if cloned != nil {
+				cloned = append(cloned, block)
 			}
 			continue
 		}
@@ -96,13 +125,20 @@ func validateReplayBlocks(provider, model string, msgIdx int, blocks []ContentBl
 			return nil, false, err
 		}
 		if !drop {
+			if cloned != nil {
+				cloned = append(cloned, block)
+			}
 			continue
 		}
 		if cloned == nil {
-			cloned = make([]ContentBlock, len(blocks))
-			copy(cloned, blocks)
+			cloned = make([]ContentBlock, 0, len(blocks))
+			cloned = append(cloned, blocks[:j]...)
 		}
-		cloned[j].Replay = nil
+		if block.Type == ContentTypeReplay {
+			continue // envelope-only block: nothing left to send
+		}
+		block.Replay = nil
+		cloned = append(cloned, block)
 	}
 	if cloned == nil {
 		return blocks, false, nil
