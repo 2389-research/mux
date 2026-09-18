@@ -292,9 +292,11 @@ func (a *AnthropicClient) CreateMessage(ctx context.Context, req *Request) (*Res
 	if err := validateRequest("anthropic", a.Capabilities(), req); err != nil {
 		return nil, err
 	}
-	if err := validateReplay("anthropic", req.Model, req.Messages); err != nil {
+	messages, err := validateReplay("anthropic", req.Model, req.Messages)
+	if err != nil {
 		return nil, err
 	}
+	req.Messages = messages
 
 	params, err := convertRequest(req)
 	if err != nil {
@@ -573,9 +575,11 @@ func (a *AnthropicClient) CreateMessageStream(ctx context.Context, req *Request)
 	if err := validateRequest("anthropic", a.Capabilities(), req); err != nil {
 		return nil, err
 	}
-	if err := validateReplay("anthropic", req.Model, req.Messages); err != nil {
+	messages, err := validateReplay("anthropic", req.Model, req.Messages)
+	if err != nil {
 		return nil, err
 	}
+	req.Messages = messages
 
 	params, err := convertRequest(req)
 	if err != nil {

@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -235,13 +234,23 @@ func TestGeminiSignedPartReplay_SecondRequestKeepsSignature(t *testing.T) {
 	}
 }
 
-func TestGeminiSignedPartReplay_ModelSwitchRejectsSignedPart(t *testing.T) {
+func TestGeminiSignedPartReplay_ModelSwitchDropsSignedPart(t *testing.T) {
 	var mu sync.Mutex
 	var requests int
+	var secondBody []byte
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		mu.Lock()
 		requests++
+		turn := requests
+		if turn == 2 {
+			secondBody = body
+		}
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(sigGeminiParallelCallsBody()))
@@ -261,26 +270,39 @@ func TestGeminiSignedPartReplay_ModelSwitchRejectsSignedPart(t *testing.T) {
 		t.Fatalf("first CreateMessage: %v", err)
 	}
 
-	_, err = client.CreateMessage(context.Background(), &Request{
+	// A model switch no longer rejects a signed-part history: it drops the
+	// mismatched part's signature and warns. Unlike a thinking-only block, a
+	// function call has a normalized fallback (name + args), so the call
+	// itself still reaches the wire, just unsigned.
+	if _, err := client.CreateMessage(context.Background(), &Request{
 		Model: "gemini-2.5-flash",
 		Messages: []Message{
 			NewUserMessage("read /a and /b"),
 			{Role: RoleAssistant, Blocks: first.Content},
 		},
-	})
-	var mismatch *ErrReplayMismatch
-	if !errors.As(err, &mismatch) {
-		t.Fatalf("want *ErrReplayMismatch, got %v", err)
-	}
-	if mismatch.Model != "gemini-2.5-flash" || mismatch.ReplayModel != "gemini-2.5-pro" {
-		t.Errorf("mismatch names the wrong identities: %+v", mismatch)
+	}); err != nil {
+		t.Fatalf("model switch must warn and drop, not error: %v", err)
 	}
 
 	mu.Lock()
 	total := requests
+	captured := secondBody
 	mu.Unlock()
-	if total != 1 {
-		t.Errorf("expected the rejected turn to send nothing, got %d requests", total)
+	if total != 2 {
+		t.Fatalf("expected 2 requests, got %d", total)
+	}
+
+	if sig := gjson.GetBytes(captured, "contents.1.parts.0.thoughtSignature"); sig.Exists() && sig.String() != "" {
+		t.Errorf("dropped signature reached the wire: %q; body=%s", sig.String(), captured)
+	}
+	if name := gjson.GetBytes(captured, "contents.1.parts.0.functionCall.name").String(); name != "read_file" {
+		t.Errorf("first call lost its name after the drop: %q; body=%s", name, captured)
+	}
+	if path := gjson.GetBytes(captured, "contents.1.parts.0.functionCall.args.path").String(); path != "/a" {
+		t.Errorf("first call lost its arguments after the drop: %q; body=%s", path, captured)
+	}
+	if path := gjson.GetBytes(captured, "contents.1.parts.1.functionCall.args.path").String(); path != "/b" {
+		t.Errorf("second parallel call did not survive: %q; body=%s", path, captured)
 	}
 }
 
@@ -317,7 +339,7 @@ func TestSigReplayPayloadCheck(t *testing.T) {
 					Data:     json.RawMessage(tc.data),
 				},
 			}}}}
-			err := validateReplay(tc.provider, "m", messages)
+			_, err := validateReplay(tc.provider, "m", messages)
 			if tc.wantErr && err == nil {
 				t.Fatalf("want an error for %s payload %s", tc.provider, tc.data)
 			}

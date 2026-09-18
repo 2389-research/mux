@@ -6,6 +6,7 @@ package llm
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 )
 
 // ContentTypeReplay identifies a block that carries a raw provider item in
@@ -30,58 +31,101 @@ type ProviderReplay struct {
 	// structural check in validateReplayBlock is provider-specific.
 }
 
-// ErrReplayMismatch indicates a replay envelope was carried into a request
-// for a different provider or model. The error names both identities:
-// the request's (Provider, Model) and the replay's (ReplayProvider,
-// ReplayModel). Provider/model migration is an explicit rejection, not a
-// silent drop of the raw item.
-type ErrReplayMismatch struct {
-	Provider, Model             string
-	ReplayProvider, ReplayModel string
-}
-
-func (e *ErrReplayMismatch) Error() string {
-	return fmt.Sprintf("replay identity mismatch: request is %s/%s but replay data is %s/%s",
-		e.Provider, e.Model, e.ReplayProvider, e.ReplayModel)
-}
-
 // validateReplay checks every block carrying a Replay envelope against the
-// request's provider/model identity and the payload's structural integrity.
-// It runs before any network call, so a mismatched or malformed replay
-// fails preflight with zero HTTP requests. Blocks without Replay are
-// ignored; a ContentTypeReplay block without a payload is rejected.
-func validateReplay(provider, model string, messages []Message) error {
-	for i, msg := range messages {
-		for j, block := range msg.Blocks {
-			if block.Replay == nil {
-				if block.Type == ContentTypeReplay {
-					return fmt.Errorf("message[%d].blocks[%d].replay: replay block has no payload", i, j)
-				}
-				continue
-			}
-			if err := validateReplayBlock(provider, model, i, j, block.Replay); err != nil {
-				return err
-			}
+// request's provider/model identity and the payload's structural integrity,
+// and returns the messages to actually send. Structural failures (empty
+// payload, invalid JSON, no type discriminator) have no safe normalized
+// fallback, so they still fail preflight with zero HTTP requests. An
+// identity mismatch is not a preflight failure: the raw provider APIs
+// themselves tolerate a stale envelope on a model switch, so mux warns to
+// stderr — naming both identities — and drops that block's envelope instead
+// of failing the whole request. A block without a normalized fallback (a
+// thinking or provider-item-only block) then contributes nothing to the
+// outgoing request; a block with one, such as a tool call, still reaches
+// the wire without its signature.
+//
+// Identity is checked before structure, so a block that is both mismatched
+// and malformed is dropped with the warning rather than rejected: the block
+// is going to be discarded either way, and failing the request over a
+// payload that is not going to be sent would be the same over-strictness
+// this function exists to remove.
+//
+// The returned slice may alias messages: a message with nothing to drop
+// keeps its original Blocks slice, so callers must treat both the input and
+// the result as read-only after this call rather than assuming they are
+// independent. Blocks without Replay are ignored; a ContentTypeReplay block
+// without a payload is rejected.
+func validateReplay(provider, model string, messages []Message) ([]Message, error) {
+	var result []Message
+	for i := range messages {
+		blocks, changed, err := validateReplayBlocks(provider, model, i, messages[i].Blocks)
+		if err != nil {
+			return nil, err
 		}
+		if !changed {
+			continue
+		}
+		if result == nil {
+			result = make([]Message, len(messages))
+			copy(result, messages)
+		}
+		result[i].Blocks = blocks
 	}
-	return nil
+	if result == nil {
+		return messages, nil
+	}
+	return result, nil
 }
 
-func validateReplayBlock(provider, model string, msgIdx, blockIdx int, replay *ProviderReplay) error {
+// validateReplayBlocks runs validateReplayBlock over one message's blocks.
+// It returns the input slice unchanged (changed=false) when nothing needed
+// dropping. Otherwise it clones the slice on first drop — leaving the
+// caller's original untouched — clears the mismatched blocks' Replay
+// pointers in the clone, and returns that.
+func validateReplayBlocks(provider, model string, msgIdx int, blocks []ContentBlock) ([]ContentBlock, bool, error) {
+	var cloned []ContentBlock
+	for j, block := range blocks {
+		if block.Replay == nil {
+			if block.Type == ContentTypeReplay {
+				return nil, false, fmt.Errorf("message[%d].blocks[%d].replay: replay block has no payload", msgIdx, j)
+			}
+			continue
+		}
+		drop, err := validateReplayBlock(provider, model, msgIdx, j, block.Replay)
+		if err != nil {
+			return nil, false, err
+		}
+		if !drop {
+			continue
+		}
+		if cloned == nil {
+			cloned = make([]ContentBlock, len(blocks))
+			copy(cloned, blocks)
+		}
+		cloned[j].Replay = nil
+	}
+	if cloned == nil {
+		return blocks, false, nil
+	}
+	return cloned, true, nil
+}
+
+// validateReplayBlock checks one block's replay envelope. It reports
+// whether the block's envelope should be dropped (an identity mismatch,
+// warned to stderr) rather than erroring; any returned error is a
+// structural failure with no drop-and-continue option.
+func validateReplayBlock(provider, model string, msgIdx, blockIdx int, replay *ProviderReplay) (drop bool, err error) {
 	field := fmt.Sprintf("message[%d].blocks[%d].replay.data", msgIdx, blockIdx)
 	if replay.Provider != provider || replay.Model != model {
-		return &ErrReplayMismatch{
-			Provider:       provider,
-			Model:          model,
-			ReplayProvider: replay.Provider,
-			ReplayModel:    replay.Model,
-		}
+		fmt.Fprintf(os.Stderr, "Warning: replay identity mismatch: request is %s/%s but replay data is %s/%s\n",
+			provider, model, replay.Provider, replay.Model)
+		return true, nil
 	}
 	if len(replay.Data) == 0 {
-		return fmt.Errorf("%s: replay data is empty", field)
+		return false, fmt.Errorf("%s: replay data is empty", field)
 	}
 	if !json.Valid(replay.Data) {
-		return fmt.Errorf("%s: replay data is not valid JSON", field)
+		return false, fmt.Errorf("%s: replay data is not valid JSON", field)
 	}
 	// Truncate the payload in every error below: opaque provider bytes must
 	// not leak into logs. The field path above identifies the block.
@@ -90,13 +134,16 @@ func validateReplayBlock(provider, model string, msgIdx, blockIdx int, replay *P
 	// by which field is set — so Gemini payloads are checked against the SDK
 	// struct instead. Every other provider's items carry one.
 	if provider == "gemini" {
-		return validateGeminiReplayPayload(field, replay.Data)
+		if err := validateGeminiReplayPayload(field, replay.Data); err != nil {
+			return false, err
+		}
+		return false, nil
 	}
 	var item struct {
 		Type string `json:"type"`
 	}
 	if err := json.Unmarshal(replay.Data, &item); err != nil || item.Type == "" {
-		return fmt.Errorf("%s: unsupported replay item payload: %.32q", field, replay.Data)
+		return false, fmt.Errorf("%s: unsupported replay item payload: %.32q", field, replay.Data)
 	}
-	return nil
+	return false, nil
 }
