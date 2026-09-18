@@ -262,6 +262,66 @@ func geminiBlockedPromptError(resp *genai.GenerateContentResponse) error {
 	return &ErrProviderResponse{Provider: "gemini", Reason: "blocked: " + string(fb.BlockReason)}
 }
 
+// geminiUsage converts Gemini's usage metadata to our Usage. Gemini reports
+// running totals for the whole response, so callers replace prior usage with
+// this value rather than summing it across chunks.
+func geminiUsage(meta *genai.GenerateContentResponseUsageMetadata) Usage {
+	return Usage{
+		InputTokens:    int(meta.PromptTokenCount),
+		OutputTokens:   int(meta.CandidatesTokenCount),
+		ThinkingTokens: int(meta.ThoughtsTokenCount),
+	}
+}
+
+// geminiPartBlocks maps one Gemini part to the content blocks it contributes.
+// Whole responses and streamed chunks both come through here, so a part means
+// the same thing however it arrived.
+func geminiPartBlocks(part *genai.Part, model string) ([]ContentBlock, error) {
+	replay, err := geminiPartReplay(part, model)
+	if err != nil {
+		return nil, err
+	}
+	// A part whose only payload is the signature has nothing to
+	// display, so it becomes a replay-only block.
+	if replay != nil && part.Text == "" && part.FunctionCall == nil {
+		return []ContentBlock{{
+			Type:   ContentTypeReplay,
+			Replay: replay,
+		}}, nil
+	}
+	// The signature belongs to the part, so exactly one block may
+	// own it or replay would send the part twice. When a part holds
+	// both text and a call, the call is what Gemini validates.
+	textReplay := replay
+	if part.FunctionCall != nil {
+		textReplay = nil
+	}
+	var blocks []ContentBlock
+	if part.Thought {
+		blocks = append(blocks, ContentBlock{
+			Type:     ContentTypeThinking,
+			Thinking: part.Text,
+			Replay:   textReplay,
+		})
+	} else if part.Text != "" {
+		blocks = append(blocks, ContentBlock{
+			Type:   ContentTypeText,
+			Text:   part.Text,
+			Replay: textReplay,
+		})
+	}
+	if part.FunctionCall != nil {
+		blocks = append(blocks, ContentBlock{
+			Type:   ContentTypeToolUse,
+			ID:     part.FunctionCall.ID,
+			Name:   part.FunctionCall.Name,
+			Input:  part.FunctionCall.Args,
+			Replay: replay,
+		})
+	}
+	return blocks, nil
+}
+
 // convertGeminiResponse converts Gemini's GenerateContentResponse to our Response.
 func convertGeminiResponse(resp *genai.GenerateContentResponse, model string) (*Response, error) {
 	result := &Response{
@@ -274,11 +334,7 @@ func convertGeminiResponse(resp *genai.GenerateContentResponse, model string) (*
 
 	// Usage metadata
 	if resp.UsageMetadata != nil {
-		result.Usage = Usage{
-			InputTokens:    int(resp.UsageMetadata.PromptTokenCount),
-			OutputTokens:   int(resp.UsageMetadata.CandidatesTokenCount),
-			ThinkingTokens: int(resp.UsageMetadata.ThoughtsTokenCount),
-		}
+		result.Usage = geminiUsage(resp.UsageMetadata)
 	}
 
 	if err := geminiBlockedPromptError(resp); err != nil {
@@ -300,52 +356,96 @@ func convertGeminiResponse(resp *genai.GenerateContentResponse, model string) (*
 	// Extract content from candidate
 	if candidate.Content != nil {
 		for _, part := range candidate.Content.Parts {
-			replay, err := geminiPartReplay(part, model)
+			blocks, err := geminiPartBlocks(part, model)
 			if err != nil {
 				return nil, err
 			}
-			// A part whose only payload is the signature has nothing to
-			// display, so it becomes a replay-only block.
-			if replay != nil && part.Text == "" && part.FunctionCall == nil {
-				result.Content = append(result.Content, ContentBlock{
-					Type:   ContentTypeReplay,
-					Replay: replay,
-				})
-				continue
-			}
-			// The signature belongs to the part, so exactly one block may
-			// own it or replay would send the part twice. When a part holds
-			// both text and a call, the call is what Gemini validates.
-			textReplay := replay
-			if part.FunctionCall != nil {
-				textReplay = nil
-			}
-			if part.Thought {
-				result.Content = append(result.Content, ContentBlock{
-					Type:     ContentTypeThinking,
-					Thinking: part.Text,
-					Replay:   textReplay,
-				})
-			} else if part.Text != "" {
-				result.Content = append(result.Content, ContentBlock{
-					Type:   ContentTypeText,
-					Text:   part.Text,
-					Replay: textReplay,
-				})
-			}
-			if part.FunctionCall != nil {
-				result.Content = append(result.Content, ContentBlock{
-					Type:   ContentTypeToolUse,
-					ID:     part.FunctionCall.ID,
-					Name:   part.FunctionCall.Name,
-					Input:  part.FunctionCall.Args,
-					Replay: replay,
-				})
-			}
+			result.Content = append(result.Content, blocks...)
 		}
 	}
 
 	return result, nil
+}
+
+// geminiStreamAccumulator builds the final streamed Response out of every
+// chunk GenerateContentStream yields (ac2b). Gemini chunks are incremental, so
+// keeping only the last one drops the text and tool calls that came before it,
+// and lets a usage-only trailer erase the content entirely.
+//
+// Rules:
+//   - Blocks are appended in the order their parts arrived, and adjacent text
+//     blocks are never merged, so part boundaries and the replay envelopes
+//     hanging off them survive.
+//   - Usage replaces prior usage only when a chunk actually carries it, since
+//     Gemini reports running totals rather than per-chunk deltas.
+//   - A finish reason is recorded only when a chunk states one: the zero value
+//     means "not stopped yet" and must never overwrite an explicit reason.
+//   - Function calls are appended as received and never deduplicated by name,
+//     because parallel calls repeat a name with distinct IDs.
+type geminiStreamAccumulator struct {
+	response     Response
+	finishReason genai.FinishReason
+}
+
+func newGeminiStreamAccumulator(model string) *geminiStreamAccumulator {
+	return &geminiStreamAccumulator{
+		response: Response{
+			Model:      model,
+			StopReason: StopReasonOther,
+		},
+	}
+}
+
+// add folds one streamed chunk into the accumulator, considering only the
+// first candidate.
+func (a *geminiStreamAccumulator) add(chunk *genai.GenerateContentResponse, model string) error {
+	if chunk == nil {
+		return nil
+	}
+	if chunk.ResponseID != "" {
+		a.response.ID = chunk.ResponseID
+	}
+	if chunk.UsageMetadata != nil {
+		a.response.Usage = geminiUsage(chunk.UsageMetadata)
+	}
+	if len(chunk.Candidates) == 0 {
+		return nil
+	}
+	candidate := chunk.Candidates[0]
+	if candidate == nil {
+		return nil
+	}
+	if candidate.FinishReason != "" {
+		a.finishReason = candidate.FinishReason
+	}
+	if candidate.Content == nil {
+		return nil
+	}
+	for _, part := range candidate.Content.Parts {
+		blocks, err := geminiPartBlocks(part, model)
+		if err != nil {
+			return err
+		}
+		a.response.Content = append(a.response.Content, blocks...)
+	}
+	return nil
+}
+
+// snapshot returns the accumulated Response. Its stop reason comes from the
+// last finish reason a chunk stated plus whether any tool call accumulated;
+// abnormal and token-limit reasons outrank the tool-use inference, matching
+// convertGeminiResponse.
+func (a *geminiStreamAccumulator) snapshot() Response {
+	response := a.response
+	hasTools := false
+	for _, block := range response.Content {
+		if block.Type == ContentTypeToolUse {
+			hasTools = true
+			break
+		}
+	}
+	response.StopReason = mapGeminiStopReason(string(a.finishReason), hasTools)
+	return response
 }
 
 // CreateMessage sends a message and returns the complete response.
@@ -429,6 +529,7 @@ func (g *GeminiClient) CreateMessageStream(ctx context.Context, req *Request) (<
 		}
 
 		var lastResp *genai.GenerateContentResponse
+		acc := newGeminiStreamAccumulator(model)
 
 		// Iterate over the streaming response. Returning out of this range
 		// loop runs the iterator's own deferred cleanup (closing the HTTP
@@ -451,6 +552,10 @@ func (g *GeminiClient) CreateMessageStream(ctx context.Context, req *Request) (<
 			}
 
 			lastResp = resp
+			if err := acc.add(resp, model); err != nil {
+				sendStreamEvent(ctx, eventChan, StreamEvent{Type: EventError, Error: err})
+				return
+			}
 
 			// Process each candidate's content
 			if len(resp.Candidates) > 0 && resp.Candidates[0].Content != nil {
@@ -486,16 +591,12 @@ func (g *GeminiClient) CreateMessageStream(ctx context.Context, req *Request) (<
 			}
 		}
 
-		// Send final message stop with complete response
+		// Send final message stop with the complete accumulated response
 		if lastResp != nil {
-			final, err := convertGeminiResponse(lastResp, model)
-			if err != nil {
-				sendStreamEvent(ctx, eventChan, StreamEvent{Type: EventError, Error: err})
-				return
-			}
+			final := acc.snapshot()
 			sendStreamEvent(ctx, eventChan, StreamEvent{
 				Type:     EventMessageStop,
-				Response: final,
+				Response: &final,
 			})
 		} else {
 			sendStreamEvent(ctx, eventChan, StreamEvent{
