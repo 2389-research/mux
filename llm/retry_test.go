@@ -4,6 +4,7 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -244,6 +245,32 @@ func TestRetryClient_FallbackStringMatching(t *testing.T) {
 	}
 	if resp.Content[0].Text != "ok" {
 		t.Errorf("expected 'ok', got %s", resp.Content[0].Text)
+	}
+}
+
+// TestRetryClient_DoesNotRetryOnGeminiBlockedPrompt is a regression test for
+// mux#a2j0: a blocked prompt is not a transient failure, and resending it
+// would just get blocked again. isRetryable's existing string-matching
+// fallback already returns false here (the message carries no retryable
+// status code), so this asserts current behavior rather than introducing new
+// retry.go logic.
+func TestRetryClient_DoesNotRetryOnGeminiBlockedPrompt(t *testing.T) {
+	inner := &failClient{
+		failCount:   5,
+		err:         &ErrProviderResponse{Provider: "gemini", Reason: "blocked: SAFETY"},
+		successResp: okResponse(),
+	}
+	rc := NewRetryClient(inner, fastRetryConfig())
+	_, err := rc.CreateMessage(context.Background(), &Request{Messages: []Message{NewUserMessage("hi")}})
+	if err == nil {
+		t.Fatal("expected error for a blocked prompt")
+	}
+	var pe *ErrProviderResponse
+	if !errors.As(err, &pe) {
+		t.Fatalf("expected *ErrProviderResponse, got %T: %v", err, err)
+	}
+	if inner.callCount != 1 {
+		t.Errorf("expected 1 call (no retry for a blocked prompt), got %d", inner.callCount)
 	}
 }
 

@@ -244,6 +244,24 @@ func geminiPartReplay(part *genai.Part, model string) (*ProviderReplay, error) {
 	return &ProviderReplay{Provider: "gemini", Model: model, Data: data}, nil
 }
 
+// geminiBlockedPromptError reports an error when Gemini blocked the prompt
+// before generation, per resp.PromptFeedback.BlockReason. A blocked prompt
+// produces no candidates, so this is checked ahead of the zero-candidate
+// fallback that would otherwise treat it as an ordinary empty turn — a
+// caller previously received an empty successful Response with no way to
+// tell "nothing to say" from "the provider refused this prompt". It backs
+// both call shapes: convertGeminiResponse checks the completed response, and
+// CreateMessageStream checks every chunk as it arrives, since PromptFeedback
+// is carried on whichever chunk reports the block, not necessarily the last
+// one seen.
+func geminiBlockedPromptError(resp *genai.GenerateContentResponse) error {
+	fb := resp.PromptFeedback
+	if fb == nil || fb.BlockReason == "" || fb.BlockReason == genai.BlockedReasonUnspecified {
+		return nil
+	}
+	return &ErrProviderResponse{Provider: "gemini", Reason: "blocked: " + string(fb.BlockReason)}
+}
+
 // convertGeminiResponse converts Gemini's GenerateContentResponse to our Response.
 func convertGeminiResponse(resp *genai.GenerateContentResponse, model string) (*Response, error) {
 	result := &Response{
@@ -261,6 +279,10 @@ func convertGeminiResponse(resp *genai.GenerateContentResponse, model string) (*
 			OutputTokens:   int(resp.UsageMetadata.CandidatesTokenCount),
 			ThinkingTokens: int(resp.UsageMetadata.ThoughtsTokenCount),
 		}
+	}
+
+	if err := geminiBlockedPromptError(resp); err != nil {
+		return nil, err
 	}
 
 	reason := ""
@@ -409,6 +431,14 @@ func (g *GeminiClient) CreateMessageStream(ctx context.Context, req *Request) (<
 		// response body), so no explicit stream handle needs closing here.
 		for resp, err := range g.client.Models.GenerateContentStream(ctx, model, contents, config) {
 			if err != nil {
+				sendStreamEvent(ctx, eventChan, StreamEvent{
+					Type:  EventError,
+					Error: err,
+				})
+				return
+			}
+
+			if err := geminiBlockedPromptError(resp); err != nil {
 				sendStreamEvent(ctx, eventChan, StreamEvent{
 					Type:  EventError,
 					Error: err,

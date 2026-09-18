@@ -68,7 +68,10 @@ func mapGeminiStopReason(reason string, hasTools bool) StopReason {
 		genai.FinishReasonRecitation,
 		genai.FinishReasonBlocklist,
 		genai.FinishReasonProhibitedContent,
-		genai.FinishReasonSPII:
+		genai.FinishReasonSPII,
+		genai.FinishReasonImageSafety,
+		genai.FinishReasonImageProhibitedContent,
+		genai.FinishReasonImageRecitation:
 		return StopReasonContentFilter
 	default:
 		return StopReasonOther

@@ -383,3 +383,20 @@ So the trigger is not "git present" or "commands chained"; it is shell metachara
 (`|`, `$VAR`) anywhere in the command line, read as text before anything executes. Fix:
 write the literal, fully-expanded value in place of the variable, and drop regex
 alternation from `-run` (run the whole package and grep the saved output instead).
+## `mise exec` commands fail when the same call also has a literal `$variable` (2026-09-17)
+
+Building on the GOROOT-wrapper gotcha above: even the correct `unset GOROOT && mise exec --
+<cmd>` form still gets refused with "too complex to verify... cannot be shown not to be
+git" once the same Bash call also contains a `$`-expansion — `echo "exit: $status"`,
+`${PIPESTATUS[0]}`, any of it. Six data points isolate it: two calls pairing `mise exec`
+with `$status` or `${PIPESTATUS[0]}` were refused; five calls using the identical `unset
+GOROOT && mise exec -- ...` prefix, redirecting with a plain `> file 2>&1` and reading the
+file back afterward via `cat`/`grep`/`wc` with no `$` anywhere in the call, all ran —
+including one that chained `cd`, the `mise exec` line, then `cat`, two literal `echo`s, and
+`wc -l < file`. So neither multiple statements nor a trailing read-back is the trigger;
+piping through `tee` failed too, but only ever in a call that also carried `${PIPESTATUS}`.
+
+Keep every `$variable` — fish's `$status` included — out of any Bash call that also invokes
+`mise exec`. The `mise exec` part is incidental: the entry above shows the
+same refusal with no mise involved, so the rule is about the metacharacter, not the command. Redirect with `> file 2>&1` as its own statement and inspect the file with
+plain, `$`-free commands.
