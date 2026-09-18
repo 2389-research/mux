@@ -6,7 +6,8 @@ package llm
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
+	"io"
+	"os"
 	"strings"
 	"testing"
 )
@@ -20,6 +21,31 @@ func replayTestBlock(provider, model, data string) ContentBlock {
 			Data:     json.RawMessage(data),
 		},
 	}
+}
+
+// captureStderr redirects os.Stderr for the duration of fn and returns
+// everything written to it. No other test in this package captures stderr,
+// so this stays a local helper rather than a shared one.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = orig }()
+
+	fn()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close pipe writer: %v", err)
+	}
+	captured, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read captured stderr: %v", err)
+	}
+	return string(captured)
 }
 
 func TestProviderReplay_JSONByteEquality(t *testing.T) {
@@ -42,23 +68,23 @@ func TestValidateReplay_MismatchedProvider(t *testing.T) {
 		replayTestBlock("anthropic", "claude-sonnet-4-20250514", `{"type":"reasoning","id":"rs1"}`),
 	}}}
 
-	err := validateReplay("openai", "gpt-5", messages)
-	if err == nil {
-		t.Fatal("expected error, got nil")
+	var result []Message
+	var err error
+	warning := captureStderr(t, func() {
+		result, err = validateReplay("openai", "gpt-5", messages)
+	})
+	if err != nil {
+		t.Fatalf("mismatch must warn and drop, not error: %v", err)
 	}
-	var mismatch *ErrReplayMismatch
-	if !errors.As(err, &mismatch) {
-		t.Fatalf("expected *ErrReplayMismatch, got %T: %v", err, err)
+	if result[0].Blocks[0].Replay != nil {
+		t.Fatalf("expected the mismatched block's replay envelope dropped, got %+v", result[0].Blocks[0].Replay)
 	}
-	if mismatch.Provider != "openai" || mismatch.Model != "gpt-5" {
-		t.Errorf("request identity: got %q/%q, want openai/gpt-5", mismatch.Provider, mismatch.Model)
+	if messages[0].Blocks[0].Replay == nil {
+		t.Fatal("validateReplay must not mutate the caller's original messages")
 	}
-	if mismatch.ReplayProvider != "anthropic" || mismatch.ReplayModel != "claude-sonnet-4-20250514" {
-		t.Errorf("replay identity: got %q/%q, want anthropic/claude-sonnet-4-20250514", mismatch.ReplayProvider, mismatch.ReplayModel)
-	}
-	for _, identity := range []string{"openai", "anthropic"} {
-		if !strings.Contains(mismatch.Error(), identity) {
-			t.Errorf("Error() %q must name identity %q", mismatch.Error(), identity)
+	for _, identity := range []string{"openai", "gpt-5", "anthropic", "claude-sonnet-4-20250514"} {
+		if !strings.Contains(warning, identity) {
+			t.Errorf("warning %q must name identity %q", warning, identity)
 		}
 	}
 }
@@ -68,24 +94,57 @@ func TestValidateReplay_MismatchedModel(t *testing.T) {
 		replayTestBlock("anthropic", "claude-sonnet-4-20250514", `{"type":"reasoning","id":"rs1"}`),
 	}}}
 
-	err := validateReplay("anthropic", "claude-opus-4-1-20250805", messages)
-	if err == nil {
-		t.Fatal("expected error, got nil")
+	var result []Message
+	var err error
+	warning := captureStderr(t, func() {
+		result, err = validateReplay("anthropic", "claude-opus-4-1-20250805", messages)
+	})
+	if err != nil {
+		t.Fatalf("mismatch must warn and drop, not error: %v", err)
 	}
-	var mismatch *ErrReplayMismatch
-	if !errors.As(err, &mismatch) {
-		t.Fatalf("expected *ErrReplayMismatch, got %T: %v", err, err)
+	if result[0].Blocks[0].Replay != nil {
+		t.Fatalf("expected the mismatched block's replay envelope dropped, got %+v", result[0].Blocks[0].Replay)
 	}
-	if mismatch.Provider != "anthropic" || mismatch.Model != "claude-opus-4-1-20250805" {
-		t.Errorf("request identity: got %q/%q, want anthropic/claude-opus-4-1-20250805", mismatch.Provider, mismatch.Model)
-	}
-	if mismatch.ReplayProvider != "anthropic" || mismatch.ReplayModel != "claude-sonnet-4-20250514" {
-		t.Errorf("replay identity: got %q/%q, want anthropic/claude-sonnet-4-20250514", mismatch.ReplayProvider, mismatch.ReplayModel)
+	if messages[0].Blocks[0].Replay == nil {
+		t.Fatal("validateReplay must not mutate the caller's original messages")
 	}
 	for _, identity := range []string{"claude-opus-4-1-20250805", "claude-sonnet-4-20250514"} {
-		if !strings.Contains(mismatch.Error(), identity) {
-			t.Errorf("Error() %q must name identity %q", mismatch.Error(), identity)
+		if !strings.Contains(warning, identity) {
+			t.Errorf("warning %q must name identity %q", warning, identity)
 		}
+	}
+}
+
+// TestValidateReplay_MismatchLeavesOtherMessagesAliased confirms the
+// copy-on-write contract: dropping a block clones only the message that
+// held it. A sibling message with nothing to drop keeps its original
+// Blocks backing array — proven here by mutating through the result and
+// observing the mutation land in the original, which a real clone would
+// not show. The touched message's original is proven independent instead:
+// its Replay pointer must survive the drop applied to the returned copy.
+func TestValidateReplay_MismatchLeavesOtherMessagesAliased(t *testing.T) {
+	messages := []Message{
+		{Role: RoleUser, Blocks: []ContentBlock{{Type: ContentTypeText, Text: "unrelated"}}},
+		{Role: RoleAssistant, Blocks: []ContentBlock{
+			replayTestBlock("anthropic", "claude-sonnet-4-20250514", `{"type":"reasoning","id":"rs1"}`),
+		}},
+	}
+
+	var result []Message
+	captureStderr(t, func() {
+		var err error
+		result, err = validateReplay("openai", "gpt-5", messages)
+		if err != nil {
+			t.Fatalf("mismatch must warn and drop, not error: %v", err)
+		}
+	})
+
+	result[0].Blocks[0].Text = "mutated through the result"
+	if messages[0].Blocks[0].Text != "mutated through the result" {
+		t.Errorf("untouched message must stay aliased to the original, got %q", messages[0].Blocks[0].Text)
+	}
+	if messages[1].Blocks[0].Replay == nil {
+		t.Fatal("dropping a block must not mutate the caller's original message")
 	}
 }
 
@@ -98,7 +157,7 @@ func TestValidateReplay_MatchingIdentityPasses(t *testing.T) {
 		{Role: RoleUser, Blocks: []ContentBlock{{Type: ContentTypeToolResult, ToolUseID: "call_1"}}},
 	}
 
-	if err := validateReplay("openai", "gpt-5", messages); err != nil {
+	if _, err := validateReplay("openai", "gpt-5", messages); err != nil {
 		t.Fatalf("expected nil, got %v", err)
 	}
 }
@@ -108,7 +167,7 @@ func TestValidateReplay_EmptyData(t *testing.T) {
 		replayTestBlock("gemini", "gemini-2.5-pro", ""),
 	}}}
 
-	err := validateReplay("gemini", "gemini-2.5-pro", messages)
+	_, err := validateReplay("gemini", "gemini-2.5-pro", messages)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -125,7 +184,7 @@ func TestValidateReplay_InvalidJSON(t *testing.T) {
 		replayTestBlock("openai", "gpt-5", `{"type":"reasoning",`),
 	}}}
 
-	err := validateReplay("openai", "gpt-5", messages)
+	_, err := validateReplay("openai", "gpt-5", messages)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -147,7 +206,7 @@ func TestValidateReplay_UnsupportedPayload(t *testing.T) {
 			messages := []Message{{Role: RoleAssistant, Blocks: []ContentBlock{
 				replayTestBlock("ollama", "qwen3", data),
 			}}}
-			err := validateReplay("ollama", "qwen3", messages)
+			_, err := validateReplay("ollama", "qwen3", messages)
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
@@ -164,7 +223,7 @@ func TestValidateReplay_NilReplayIgnored(t *testing.T) {
 		{Role: RoleUser, Content: "plain content"},
 	}
 
-	if err := validateReplay("openai", "gpt-5", messages); err != nil {
+	if _, err := validateReplay("openai", "gpt-5", messages); err != nil {
 		t.Fatalf("blocks without replay must pass, got %v", err)
 	}
 }
@@ -174,7 +233,7 @@ func TestValidateReplay_ReplayBlockWithoutPayload(t *testing.T) {
 		{Type: ContentTypeReplay},
 	}}}
 
-	err := validateReplay("openai", "gpt-5", messages)
+	_, err := validateReplay("openai", "gpt-5", messages)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
