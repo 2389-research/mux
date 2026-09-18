@@ -453,3 +453,27 @@ test — so it reads like the cause. It usually isn't. Find the actual `--- FAIL
 before believing it, and check the package's elapsed time: `tool` takes ~1.1s, so a
 `FAIL github.com/2389-research/mux/tool 0.108s` means the binary died before running
 the package, which is a different failure than any test in it.
+
+## A closed kata does not mean the fix is in main (2026-09-17)
+
+Kata ac2b was closed on 2026-09-13 with a full "close evidence" block: commit hash,
+branch, a linked PR, and a clean test run across 10 packages. Every claim in it was
+true. The fix was still not in main four days later, because the evidence cited
+`PR #34 opened` — and PR #34 was never merged. It is open right now.
+
+`make test` passing on a branch says the branch is good; it says nothing about where
+the branch went. The failure is silent in both directions: the tracker shows the work
+done, and main quietly keeps the bug. Here that bug dropped every Gemini stream chunk
+but the last, so a streamed turn recorded empty assistant history and skipped a tool
+call the same turn ran fine unstreamed.
+
+Verify a closed kata by content, not by paper. `git log --oneline main | grep <ref>`
+proves a merge; a symbol from the fix showing up in `git grep` on main proves the code
+arrived. Best of all, run the kata's own test against main — that catches a fix that
+landed and was later reverted or rewritten, which a merge commit does not.
+
+Corollary for the rescue: a stale branch may not be cherry-pickable. ac2b's fix was
+four days behind a mapping layer that had since grown replay envelopes, so taking its
+side of the conflict would have reverted shipped work. Read what the conflict is
+*about* before resolving it — rebuilding the idea on current main beat replaying the
+diff.
