@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1225,6 +1226,90 @@ func TestConvertRequest_WithThinkingBumpsMaxTokens(t *testing.T) {
 	}
 }
 
+// TestConvertRequest_Temperature guards against the nil-vs-explicit-zero bug
+// class: an explicit Temperature of 0 must be forwarded as a present
+// "temperature":0, never treated as "not set" alongside true nil.
+func TestConvertRequest_Temperature(t *testing.T) {
+	zero := 0.0
+	low := 0.2
+	one := 1.0
+	tests := []struct {
+		name        string
+		temperature *float64
+		wantValid   bool
+		wantValue   float64
+	}{
+		{name: "nil is omitted", temperature: nil, wantValid: false},
+		{name: "explicit zero is forwarded", temperature: &zero, wantValid: true, wantValue: 0},
+		{name: "explicit 0.2 is forwarded", temperature: &low, wantValid: true, wantValue: 0.2},
+		{name: "explicit 1 is forwarded", temperature: &one, wantValid: true, wantValue: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &Request{
+				Model:       "claude-sonnet-4-20250514",
+				Messages:    []Message{NewUserMessage("hi")},
+				Temperature: tt.temperature,
+			}
+			params := sigConvertRequest(t, req)
+			if got := params.Temperature.Valid(); got != tt.wantValid {
+				t.Fatalf("Temperature.Valid() = %v, want %v", got, tt.wantValid)
+			}
+			if tt.wantValid && params.Temperature.Value != tt.wantValue {
+				t.Errorf("Temperature.Value = %v, want %v", params.Temperature.Value, tt.wantValue)
+			}
+		})
+	}
+}
+
+// TestConvertRequest_TemperatureThinkingConflict guards Anthropic's
+// documented sampling-parameter rule: an explicit non-default temperature is
+// never valid alongside manual extended thinking. Temperature 1 (the API
+// default) and nil (unset) both reach the server unchanged; only an explicit
+// non-1 value must be rejected before any network call.
+// See https://platform.claude.com/docs/en/build-with-claude/thinking (Limits
+// and feature compatibility > Sampling parameters).
+func TestConvertRequest_TemperatureThinkingConflict(t *testing.T) {
+	one := 1.0
+	low := 0.2
+	high := 1.5
+	tests := []struct {
+		name        string
+		temperature *float64
+		wantErr     bool
+	}{
+		{name: "nil temperature is compatible", temperature: nil, wantErr: false},
+		{name: "temperature 1 (the default) is compatible", temperature: &one, wantErr: false},
+		{name: "non-default temperature below 1 conflicts", temperature: &low, wantErr: true},
+		{name: "non-default temperature above 1 conflicts", temperature: &high, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &Request{
+				Model:       "claude-opus-4-6-20250414",
+				MaxTokens:   4096,
+				Messages:    []Message{NewUserMessage("Think")},
+				Thinking:    &ThinkingConfig{Enabled: true, Budget: 1024},
+				Temperature: tt.temperature,
+			}
+			_, err := convertRequest(req)
+			if !tt.wantErr {
+				if err != nil {
+					t.Fatalf("convertRequest: %v", err)
+				}
+				return
+			}
+			var conflict *ErrIncompatibleThinking
+			if !errors.As(err, &conflict) {
+				t.Fatalf("expected *ErrIncompatibleThinking, got %T: %v", err, err)
+			}
+			if conflict.Provider != "anthropic" || conflict.Temperature != *tt.temperature {
+				t.Errorf("err fields: %+v", conflict)
+			}
+		})
+	}
+}
+
 func TestConvertResponse_ThinkingBlock(t *testing.T) {
 	msg := &anthropic.Message{
 		ID:    "msg_123",
@@ -1508,6 +1593,50 @@ func TestAnthropicCreateMessageStream_RejectsAudio(t *testing.T) {
 	}
 }
 
+func TestAnthropicCreateMessage_TemperatureThinkingConflict(t *testing.T) {
+	temperatures := []float64{0.2, 1.5}
+	for _, temp := range temperatures {
+		t.Run(fmt.Sprintf("temperature=%v", temp), func(t *testing.T) {
+			c := NewAnthropicClient("fake-key", "")
+			req := &Request{
+				Messages:    []Message{NewUserMessage("hi")},
+				Temperature: &temp,
+				Thinking:    &ThinkingConfig{Enabled: true, Budget: 1024},
+			}
+			_, err := c.CreateMessage(context.Background(), req)
+			var conflict *ErrIncompatibleThinking
+			if !errors.As(err, &conflict) {
+				t.Fatalf("expected *ErrIncompatibleThinking, got %T: %v", err, err)
+			}
+			if conflict.Provider != "anthropic" || conflict.Temperature != temp {
+				t.Errorf("err fields: %+v", conflict)
+			}
+		})
+	}
+}
+
+func TestAnthropicCreateMessageStream_TemperatureThinkingConflict(t *testing.T) {
+	temperatures := []float64{0.2, 1.5}
+	for _, temp := range temperatures {
+		t.Run(fmt.Sprintf("temperature=%v", temp), func(t *testing.T) {
+			c := NewAnthropicClient("fake-key", "")
+			req := &Request{
+				Messages:    []Message{NewUserMessage("hi")},
+				Temperature: &temp,
+				Thinking:    &ThinkingConfig{Enabled: true, Budget: 1024},
+			}
+			_, err := c.CreateMessageStream(context.Background(), req)
+			var conflict *ErrIncompatibleThinking
+			if !errors.As(err, &conflict) {
+				t.Fatalf("expected *ErrIncompatibleThinking, got %T: %v", err, err)
+			}
+			if conflict.Provider != "anthropic" || conflict.Temperature != temp {
+				t.Errorf("err fields: %+v", conflict)
+			}
+		})
+	}
+}
+
 // Wire-format snapshot tests: marshal the SDK params produced by convertRequest
 // and assert the resulting JSON matches Anthropic's documented Messages API
 // shape. These guard against silent SDK regressions where a struct field
@@ -1608,5 +1737,56 @@ func TestAnthropicWireFormat_PDFURL(t *testing.T) {
 	}
 	if v := gjson.GetBytes(body, "messages.0.content.0.source.url").String(); v != "https://example.com/x.pdf" {
 		t.Errorf("source.url: got %q; body=%s", v, body)
+	}
+}
+
+func TestAnthropicWireFormat_TemperatureAbsentWhenNil(t *testing.T) {
+	params := sigConvertRequest(t, &Request{
+		Messages: []Message{NewUserMessage("hi")},
+	})
+	body, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if gjson.GetBytes(body, "temperature").Exists() {
+		t.Errorf("temperature should be absent when nil; body=%s", body)
+	}
+}
+
+func TestAnthropicWireFormat_TemperaturePresentWhenExplicitZero(t *testing.T) {
+	zero := 0.0
+	params := sigConvertRequest(t, &Request{
+		Messages:    []Message{NewUserMessage("hi")},
+		Temperature: &zero,
+	})
+	body, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got := gjson.GetBytes(body, "temperature")
+	if !got.Exists() {
+		t.Fatalf("temperature should be present for explicit zero; body=%s", body)
+	}
+	if got.String() != "0" {
+		t.Errorf("temperature: got %s want 0; body=%s", got.String(), body)
+	}
+}
+
+func TestAnthropicWireFormat_TemperaturePresentWithExactValue(t *testing.T) {
+	low := 0.2
+	params := sigConvertRequest(t, &Request{
+		Messages:    []Message{NewUserMessage("hi")},
+		Temperature: &low,
+	})
+	body, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got := gjson.GetBytes(body, "temperature")
+	if !got.Exists() {
+		t.Fatalf("temperature should be present; body=%s", body)
+	}
+	if got.Float() != 0.2 {
+		t.Errorf("temperature: got %v want 0.2; body=%s", got.Float(), body)
 	}
 }
