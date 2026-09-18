@@ -22,10 +22,17 @@ import (
 const MaxTranscriptLineBytes = 16 * 1024 * 1024
 
 // TranscriptEntry represents a single entry in the transcript.
+//
+// Content and Text mirror llm.Message's two independent payload fields:
+// Content carries Message.Blocks (structured content, under the historical
+// "content" JSON key) and Text carries Message.Content (plain text, under
+// "text"). They round-trip separately - neither is derived from the other -
+// because a single message can carry both (mux#bq4e).
 type TranscriptEntry struct {
 	Timestamp time.Time          `json:"timestamp"`
 	Role      string             `json:"role"`
 	Content   []llm.ContentBlock `json:"content"`
+	Text      string             `json:"text,omitempty"`
 }
 
 // Transcript holds conversation history that can be saved and restored.
@@ -55,6 +62,7 @@ func FromMessages(agentID string, messages []llm.Message) *Transcript {
 			Timestamp: time.Now(),
 			Role:      string(msg.Role),
 			Content:   msg.Blocks,
+			Text:      msg.Content,
 		})
 	}
 	return t
@@ -65,8 +73,9 @@ func (t *Transcript) ToMessages() []llm.Message {
 	messages := make([]llm.Message, len(t.Entries))
 	for i, entry := range t.Entries {
 		messages[i] = llm.Message{
-			Role:   llm.Role(entry.Role),
-			Blocks: entry.Content,
+			Role:    llm.Role(entry.Role),
+			Blocks:  entry.Content,
+			Content: entry.Text,
 		}
 	}
 	return messages
@@ -78,6 +87,7 @@ func (t *Transcript) Append(msg llm.Message) {
 		Timestamp: time.Now(),
 		Role:      string(msg.Role),
 		Content:   msg.Blocks,
+		Text:      msg.Content,
 	})
 	t.UpdatedAt = time.Now()
 }
@@ -132,11 +142,13 @@ func (t *Transcript) SaveJSONL(w io.Writer) error {
 			Timestamp time.Time          `json:"timestamp"`
 			Role      string             `json:"role"`
 			Content   []llm.ContentBlock `json:"content"`
+			Text      string             `json:"text,omitempty"`
 		}{
 			Type:      "message",
 			Timestamp: entry.Timestamp,
 			Role:      entry.Role,
 			Content:   entry.Content,
+			Text:      entry.Text,
 		}
 		if err := encoder.Encode(line); err != nil {
 			return fmt.Errorf("encode entry: %w", err)
@@ -190,6 +202,7 @@ func LoadJSONL(r io.Reader) (*Transcript, error) {
 				Timestamp time.Time          `json:"timestamp"`
 				Role      string             `json:"role"`
 				Content   []llm.ContentBlock `json:"content"`
+				Text      string             `json:"text"`
 			}
 			if err := json.Unmarshal(line, &entry); err != nil {
 				return nil, fmt.Errorf("line %d: parse message: %w", lineNum, err)
@@ -198,6 +211,7 @@ func LoadJSONL(r io.Reader) (*Transcript, error) {
 				Timestamp: entry.Timestamp,
 				Role:      entry.Role,
 				Content:   entry.Content,
+				Text:      entry.Text,
 			})
 
 		default:

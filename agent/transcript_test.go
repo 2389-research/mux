@@ -5,8 +5,10 @@ package agent
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -90,6 +92,62 @@ func TestTranscriptAppend(t *testing.T) {
 	}
 	if !tr.UpdatedAt.After(originalUpdatedAt) {
 		t.Error("UpdatedAt should be updated after Append")
+	}
+}
+
+// TestTranscriptTextRoundTrip is the issue's own reproduction (mux#bq4e):
+// llm.NewUserMessage and NewAssistantMessage store their text in
+// Message.Content, not Message.Blocks, and ordinary Run/Continue prompts go
+// through exactly that constructor. A message mixing Content and Blocks
+// must round-trip both independently — neither dropped nor folded into the
+// other as a duplicate text block.
+func TestTranscriptTextRoundTrip(t *testing.T) {
+	want := []llm.Message{
+		llm.NewUserMessage("critical user instruction"),
+		llm.NewAssistantMessage("plain assistant reply"),
+		{
+			Role:    llm.RoleUser,
+			Content: "content prefix",
+			Blocks: []llm.ContentBlock{
+				{Type: llm.ContentTypeText, Text: "block suffix"},
+				{Type: llm.ContentTypeToolResult, ToolUseID: "call_1", Name: "read", Text: "result"},
+			},
+		},
+	}
+
+	tr := FromMessages("test-agent", want[:2])
+	tr.Append(want[2])
+
+	if got := tr.ToMessages(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("ToMessages (no serialization) =\n%#v\nwant\n%#v", got, want)
+	}
+
+	codecs := []struct {
+		name string
+		save func(*Transcript, io.Writer) error
+		load func(io.Reader) (*Transcript, error)
+	}{
+		{"JSON", (*Transcript).SaveJSON, LoadJSON},
+		{"JSONL", (*Transcript).SaveJSONL, LoadJSONL},
+	}
+
+	for _, codec := range codecs {
+		t.Run(codec.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := codec.save(tr, &buf); err != nil {
+				t.Fatalf("save: %v", err)
+			}
+
+			loaded, err := codec.load(&buf)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+
+			got := loaded.ToMessages()
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("round trip =\n%#v\nwant\n%#v", got, want)
+			}
+		})
 	}
 }
 
@@ -211,6 +269,13 @@ func TestTranscriptSaveLoadFileJSONL(t *testing.T) {
 	}
 }
 
+// TestAgentSaveRestoreTranscript exercises the actual acceptance path named
+// by mux#bq4e: a real Agent's Run() output (the plain-text Message.Content
+// path every ordinary prompt uses) must survive SaveTranscript -> serialize
+// -> deserialize -> RestoreTranscript into a fresh Agent, in both the JSON
+// and JSONL formats. A length check alone is not enough: it is exactly how
+// this bug shipped unnoticed, since a message that loses its Content but
+// keeps its slot still passes a count comparison.
 func TestAgentSaveRestoreTranscript(t *testing.T) {
 	registry := tool.NewRegistry()
 	client := &mockLLMClient{
@@ -225,8 +290,13 @@ func TestAgentSaveRestoreTranscript(t *testing.T) {
 		LLMClient: client,
 	})
 
-	// Run to create some history
-	agent.Run(ctx, "hello")
+	// Run to create some history: the user turn goes through
+	// llm.NewUserMessage, so it carries Content, not Blocks.
+	if err := agent.Run(ctx, "hello"); err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+
+	want := agent.Messages()
 
 	// Save transcript
 	tr := agent.SaveTranscript()
@@ -234,22 +304,42 @@ func TestAgentSaveRestoreTranscript(t *testing.T) {
 		t.Errorf("transcript AgentID = %q, want %q", tr.AgentID, agent.ID())
 	}
 
-	// Create new agent and restore
-	agent2 := New(Config{
-		Name:      "test-agent-2",
-		Registry:  registry,
-		LLMClient: client,
-	})
-
-	err := agent2.RestoreTranscript(tr)
-	if err != nil {
-		t.Fatalf("RestoreTranscript error: %v", err)
+	codecs := []struct {
+		name string
+		save func(*Transcript, io.Writer) error
+		load func(io.Reader) (*Transcript, error)
+	}{
+		{"JSON", (*Transcript).SaveJSON, LoadJSON},
+		{"JSONL", (*Transcript).SaveJSONL, LoadJSONL},
 	}
 
-	// Verify messages restored
-	messages := agent2.Messages()
-	if len(messages) != len(agent.Messages()) {
-		t.Errorf("restored messages len = %d, want %d", len(messages), len(agent.Messages()))
+	for _, codec := range codecs {
+		t.Run(codec.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := codec.save(tr, &buf); err != nil {
+				t.Fatalf("save: %v", err)
+			}
+
+			loaded, err := codec.load(&buf)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+
+			// Restore into a fresh agent - the real acceptance path.
+			agent2 := New(Config{
+				Name:      "test-agent-2",
+				Registry:  registry,
+				LLMClient: client,
+			})
+			if err := agent2.RestoreTranscript(loaded); err != nil {
+				t.Fatalf("RestoreTranscript error: %v", err)
+			}
+
+			got := agent2.Messages()
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("restored messages =\n%#v\nwant\n%#v", got, want)
+			}
+		})
 	}
 }
 
