@@ -363,9 +363,11 @@ func (g *GeminiClient) CreateMessage(ctx context.Context, req *Request) (*Respon
 	if err := validateGeminiSources(req); err != nil {
 		return nil, err
 	}
-	if err := validateReplay("gemini", model, req.Messages); err != nil {
+	messages, err := validateReplay("gemini", model, req.Messages)
+	if err != nil {
 		return nil, err
 	}
+	req.Messages = messages
 
 	contents, config, err := convertGeminiRequest(req)
 	if err != nil {
@@ -394,9 +396,11 @@ func (g *GeminiClient) CreateMessageStream(ctx context.Context, req *Request) (<
 	if err := validateGeminiSources(req); err != nil {
 		return nil, err
 	}
-	if err := validateReplay("gemini", model, req.Messages); err != nil {
+	messages, err := validateReplay("gemini", model, req.Messages)
+	if err != nil {
 		return nil, err
 	}
+	req.Messages = messages
 
 	contents, config, err := convertGeminiRequest(req)
 	if err != nil {
