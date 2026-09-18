@@ -773,11 +773,11 @@ func (o *OpenAIClient) CreateMessage(ctx context.Context, req *Request) (*Respon
 	if err := validateOpenAISources("openai", true, req); err != nil {
 		return nil, err
 	}
-	if err := validateReplay("openai", req.Model, req.Messages); err != nil {
+	messages, err := validateReplay("openai", req.Model, req.Messages)
+	if err != nil {
 		return nil, err
 	}
-
-	params, err := convertOpenAIResponsesRequest(req)
+	params, err := convertOpenAIResponsesRequest(withMessages(req, messages))
 	if err != nil {
 		return nil, err
 	}
@@ -809,11 +809,11 @@ func (o *OpenAIClient) CreateMessageStream(ctx context.Context, req *Request) (<
 	if err := validateOpenAISources("openai", false, req); err != nil {
 		return nil, err
 	}
-	if err := validateReplay("openai", req.Model, req.Messages); err != nil {
+	messages, err := validateReplay("openai", req.Model, req.Messages)
+	if err != nil {
 		return nil, err
 	}
-
-	params, err := convertOpenAIResponsesRequest(req)
+	params, err := convertOpenAIResponsesRequest(withMessages(req, messages))
 	if err != nil {
 		return nil, err
 	}
