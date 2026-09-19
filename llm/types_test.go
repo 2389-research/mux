@@ -541,3 +541,36 @@ func TestNewVideoFromFile_WrongExtension(t *testing.T) {
 		t.Fatal("expected error for non-video extension")
 	}
 }
+
+// TestContentBlock_UnmarshalJSON_NullLeavesReceiverUntouched pins that a JSON
+// "null" behaves exactly as encoding/json's default decoder treats a null into
+// a struct: it succeeds and leaves the receiver's fields alone. ContentBlock
+// declares a custom UnmarshalJSON so Input decodes with UseNumber; that method
+// must not change any other observable decode behavior.
+func TestContentBlock_UnmarshalJSON_NullLeavesReceiverUntouched(t *testing.T) {
+	block := ContentBlock{Type: ContentTypeText, Text: "keep me", ID: "id-1"}
+	if err := json.Unmarshal([]byte("null"), &block); err != nil {
+		t.Fatalf("unmarshal null: %v", err)
+	}
+	if block.Type != ContentTypeText || block.Text != "keep me" || block.ID != "id-1" {
+		t.Fatalf("null clobbered the block: %#v", block)
+	}
+}
+
+// TestContentBlock_UnmarshalJSON_NullSliceElementZeroValue pins the other
+// reachable null shape: a null element inside a blocks array decodes to the
+// zero-value block, the same result the default decoder produced before
+// ContentBlock had its own UnmarshalJSON.
+func TestContentBlock_UnmarshalJSON_NullSliceElementZeroValue(t *testing.T) {
+	var blocks []ContentBlock
+	if err := json.Unmarshal([]byte(`[null]`), &blocks); err != nil {
+		t.Fatalf("unmarshal [null]: %v", err)
+	}
+	if len(blocks) != 1 {
+		t.Fatalf("expected 1 block, got %d", len(blocks))
+	}
+	got := blocks[0]
+	if got.Type != "" || got.Text != "" || got.ID != "" || got.Input != nil {
+		t.Fatalf("null element should decode to the zero block, got %#v", got)
+	}
+}

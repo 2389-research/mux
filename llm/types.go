@@ -131,7 +131,11 @@ func (b *ContentBlock) UnmarshalJSON(data []byte) error {
 	type plain ContentBlock
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
-	var decoded plain
+	// Decode through a pointer so a JSON "null" leaves b untouched, which is
+	// what encoding/json's default struct decoder does with null. Decoding
+	// straight into a plain value would zero the receiver instead, changing
+	// the observable behavior of every existing decode for no reason.
+	var decoded *plain
 	if err := dec.Decode(&decoded); err != nil {
 		return err
 	}
@@ -139,7 +143,10 @@ func (b *ContentBlock) UnmarshalJSON(data []byte) error {
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return fmt.Errorf("llm: trailing content after content block JSON")
 	}
-	*b = ContentBlock(decoded)
+	if decoded == nil {
+		return nil
+	}
+	*b = ContentBlock(*decoded)
 	return nil
 }
 
