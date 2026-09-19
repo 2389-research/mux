@@ -104,8 +104,36 @@ func (e *Executor) Registry() *Registry {
 	return nil
 }
 
+// ExecuteOption customizes one Execute call without touching the executor's own
+// configuration, so a per-call fact cannot leak into a concurrent or nested call.
+type ExecuteOption func(*executeOptions)
+
+// executeOptions carries the per-call overrides an ExecuteOption sets.
+type executeOptions struct {
+	// decision, when set, is the approval answer for this call alone. It takes
+	// precedence over the executor's approval func for this call only; a call
+	// that passes no option — a nested Execute, say — still consults the func.
+	decision *bool
+}
+
+// WithApprovalDecision answers this call's approval check with the given
+// decision instead of consulting the executor's approval func. It binds the
+// answer to the call it is passed to: unlike SetApprovalFunc, the override is
+// not executor-wide state, so a tool that calls back into the same executor
+// during its own Execute does not inherit the answer.
+func WithApprovalDecision(approved bool) ExecuteOption {
+	return func(o *executeOptions) {
+		o.decision = &approved
+	}
+}
+
 // Execute runs a tool by name with the given parameters.
-func (e *Executor) Execute(ctx context.Context, toolName string, params map[string]any) (*Result, error) {
+func (e *Executor) Execute(ctx context.Context, toolName string, params map[string]any, opts ...ExecuteOption) (*Result, error) {
+	var options executeOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
+
 	t, ok := e.source.Get(toolName)
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", ErrToolNotFound, toolName)
@@ -113,12 +141,18 @@ func (e *Executor) Execute(ctx context.Context, toolName string, params map[stri
 
 	// Check approval
 	if t.RequiresApproval(params) {
-		if e.approvalFunc == nil {
+		approved := false
+		switch {
+		case options.decision != nil:
+			approved = *options.decision
+		case e.approvalFunc == nil:
 			return nil, fmt.Errorf("%w: %s", ErrApprovalRequired, toolName)
-		}
-		approved, err := e.approvalFunc(ctx, t, params)
-		if err != nil {
-			return nil, fmt.Errorf("approval check failed: %w", err)
+		default:
+			ok, err := e.approvalFunc(ctx, t, params)
+			if err != nil {
+				return nil, fmt.Errorf("approval check failed: %w", err)
+			}
+			approved = ok
 		}
 		if !approved {
 			return nil, fmt.Errorf("%w: %s", ErrApprovalDenied, toolName)

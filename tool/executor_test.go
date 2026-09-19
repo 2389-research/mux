@@ -4,6 +4,7 @@ package tool_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/2389-research/mux/tool"
@@ -57,4 +58,44 @@ func (a *approvalProbe) Description() string                  { return "probe" }
 func (a *approvalProbe) RequiresApproval(map[string]any) bool { return a.needs }
 func (a *approvalProbe) Execute(context.Context, map[string]any) (*tool.Result, error) {
 	return tool.NewResult(a.name, true, "ok", ""), nil
+}
+
+// The per-call approval option answers only the call it is passed to: the
+// executor's own approval func is untouched, so a later call — including a
+// nested one made from inside the first call's Execute — still consults it.
+func TestExecutor_WithApprovalDecision_IsPerCall(t *testing.T) {
+	registry := tool.NewRegistry()
+	registry.Register(&approvalProbe{name: "outer", needs: true})
+	registry.Register(&approvalProbe{name: "inner", needs: true})
+	exec := tool.NewExecutor(registry)
+	asked := 0
+	exec.SetApprovalFunc(func(_ context.Context, _ tool.Tool, _ map[string]any) (bool, error) {
+		asked++
+		return false, nil
+	})
+
+	// The override approves this one call without consulting, or altering, the
+	// executor-wide func.
+	if _, err := exec.Execute(context.Background(), "outer", nil, tool.WithApprovalDecision(true)); err != nil {
+		t.Fatalf("Execute(outer) with approve override: %v", err)
+	}
+	if asked != 0 {
+		t.Errorf("executor approval func asked %d times during an overridden call, want 0", asked)
+	}
+
+	// A call with no override falls through to the func, which denies.
+	_, err := exec.Execute(context.Background(), "inner", nil)
+	if !errors.Is(err, tool.ErrApprovalDenied) {
+		t.Fatalf("Execute(inner) err = %v, want ErrApprovalDenied", err)
+	}
+	if asked != 1 {
+		t.Errorf("executor approval func asked %d times, want 1", asked)
+	}
+
+	// A deny override blocks the call even when the func would allow it.
+	exec.SetApprovalFunc(func(context.Context, tool.Tool, map[string]any) (bool, error) { return true, nil })
+	_, err = exec.Execute(context.Background(), "inner", nil, tool.WithApprovalDecision(false))
+	if !errors.Is(err, tool.ErrApprovalDenied) {
+		t.Fatalf("Execute(inner) with deny override err = %v, want ErrApprovalDenied", err)
+	}
 }

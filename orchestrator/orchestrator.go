@@ -555,20 +555,17 @@ func (o *Orchestrator) processResponse(resp *llm.Response) {
 // call, on every exit path: a cancelled batch fills the calls it cut off with
 // ToolCancelledText rather than orphaning the assistant tool_use message, and a
 // call whose result is already in history is carried forward instead of run a
-// second time. A non-nil decision replays a resumed batch: the executor's
-// approval func is rebound to the exact ContentBlock.ID of each call immediately
-// before that call runs, so a decision can only ever answer the call it was made
+// second time. A non-nil decision replays a resumed batch: each call is handed
+// its own approval answer as a per-call Execute option resolved from that call's
+// exact ContentBlock.ID, so a decision can only ever answer the call it was made
 // for. A call that fails before its approval check — its tool was unregistered
-// mid-batch, say — therefore cannot shift a later call onto another call's decision.
+// mid-batch, say — therefore cannot shift a later call onto another call's
+// decision. The option is not executor-wide state, so a nested tool call made
+// during a call's own Execute resolves against the caller's approval func and
+// its own identity instead of inheriting the outer call's answer.
 func (o *Orchestrator) executeTools(ctx context.Context, toolUses []llm.ContentBlock, decision *Decision) error {
 	if err := o.transition(StateExecutingTool); err != nil {
 		return err
-	}
-
-	if decision != nil {
-		// Hand the caller's approval func back on every exit path, error included.
-		prev := o.executor.ApprovalFunc()
-		defer o.executor.SetApprovalFunc(prev)
 	}
 
 	recorded := o.takeRecordedResults(toolUses)
@@ -601,14 +598,12 @@ func (o *Orchestrator) executeTools(ctx context.Context, toolUses []llm.ContentB
 			continue
 		}
 
+		var opts []tool.ExecuteOption
 		if decision != nil {
-			approved := decision.approves(use.ID)
-			o.executor.SetApprovalFunc(func(context.Context, tool.Tool, map[string]any) (bool, error) {
-				return approved, nil
-			})
+			opts = append(opts, tool.WithApprovalDecision(decision.approves(use.ID)))
 		}
 
-		result, err := o.executor.Execute(ctx, use.Name, use.Input)
+		result, err := o.executor.Execute(ctx, use.Name, use.Input, opts...)
 		if err != nil {
 			resultBlocks = append(resultBlocks, llm.ContentBlock{
 				Type:      llm.ContentTypeToolResult,
