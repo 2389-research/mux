@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -1020,6 +1021,74 @@ func TestAuditGeminiStreamAccumulates(t *testing.T) {
 	}
 	if final.StopReason != StopReasonEndTurn {
 		t.Errorf("stop reason %q, want end_turn", final.StopReason)
+	}
+}
+
+// TestGeminiStreamThoughtParts reproduces mux#d6rh: the live delta path in
+// CreateMessageStream classified parts by hand, so a thought part streamed as
+// answer text to consumers that concatenate deltas, even though the final
+// accumulated response (ac2b) already separated it. Every part must go through
+// the same mapper as the non-streaming path.
+func TestGeminiStreamThoughtParts(t *testing.T) {
+	s := geminiSSEServer(t,
+		`{"candidates":[{"content":{"role":"model","parts":[{"text":"reasoning","thought":true}]}}]}`,
+		`{"candidates":[{"content":{"role":"model","parts":[{"text":"answer"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":6}}`,
+	)
+	defer s.Close()
+	c, err := NewGeminiClientWithBaseURL(context.Background(), "key", "gemini-test", s.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ch, err := c.CreateMessageStream(context.Background(), &Request{Messages: []Message{NewUserMessage("hi")}})
+	if err != nil {
+		t.Fatalf("CreateMessageStream: %v", err)
+	}
+	var deltas []string
+	var deltaKinds []StreamDeltaKind
+	var streamedThinking string
+	var final *Response
+	for e := range ch {
+		if e.Error != nil {
+			t.Fatalf("stream error: %v", e.Error)
+		}
+		switch e.Type {
+		case EventContentDelta:
+			deltas = append(deltas, e.Text)
+			deltaKinds = append(deltaKinds, e.DeltaKind)
+		case EventContentStop:
+			if e.Block != nil && e.Block.Type == ContentTypeThinking {
+				streamedThinking += e.Block.Thinking
+			}
+		case EventMessageStop:
+			final = e.Response
+		}
+	}
+
+	streamed := strings.Join(deltas, "")
+	if strings.Contains(streamed, "reasoning") {
+		t.Errorf("thought text leaked into EventContentDelta: deltas %q kinds %v", deltas, deltaKinds)
+	}
+	if streamed != "answer" {
+		t.Errorf("streamed text = %q, want %q", streamed, "answer")
+	}
+	if streamedThinking != "reasoning" {
+		t.Errorf("streamed thinking = %q, want %q", streamedThinking, "reasoning")
+	}
+	if final == nil {
+		t.Fatal("no EventMessageStop response")
+	}
+	if final.TextContent() != "answer" {
+		t.Errorf("final text = %q, want %q", final.TextContent(), "answer")
+	}
+	var finalThinking string
+	for _, b := range final.Content {
+		if b.Type == ContentTypeThinking {
+			finalThinking += b.Thinking
+		}
+	}
+	if finalThinking != "reasoning" {
+		t.Errorf("final thinking = %q, want %q", finalThinking, "reasoning")
 	}
 }
 

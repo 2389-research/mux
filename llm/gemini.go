@@ -557,33 +557,25 @@ func (g *GeminiClient) CreateMessageStream(ctx context.Context, req *Request) (<
 				return
 			}
 
-			// Process each candidate's content
+			// Process each candidate's content through the same mapper the
+			// non-streaming path uses, so a part means the same thing whether
+			// it arrived whole or in a chunk. Only text becomes a live text
+			// delta; a thought part emits a thinking block instead of leaking
+			// reasoning into the consumer's answer text (d6rh).
 			if len(resp.Candidates) > 0 && resp.Candidates[0].Content != nil {
 				for _, part := range resp.Candidates[0].Content.Parts {
-					if part.Text != "" {
-						if !sendStreamEvent(ctx, eventChan, StreamEvent{
-							Type: EventContentDelta,
-							Text: part.Text,
-						}) {
-							return
-						}
+					blocks, err := geminiPartBlocks(part, model)
+					if err != nil {
+						sendStreamEvent(ctx, eventChan, StreamEvent{Type: EventError, Error: err})
+						return
 					}
-					if part.FunctionCall != nil {
-						replay, err := geminiPartReplay(part, model)
-						if err != nil {
-							sendStreamEvent(ctx, eventChan, StreamEvent{Type: EventError, Error: err})
-							return
+					for i := range blocks {
+						block := blocks[i]
+						event := StreamEvent{Type: EventContentStop, Block: &block}
+						if block.Type == ContentTypeText {
+							event = StreamEvent{Type: EventContentDelta, Text: block.Text}
 						}
-						if !sendStreamEvent(ctx, eventChan, StreamEvent{
-							Type: EventContentStop,
-							Block: &ContentBlock{
-								Type:   ContentTypeToolUse,
-								ID:     part.FunctionCall.ID,
-								Name:   part.FunctionCall.Name,
-								Input:  part.FunctionCall.Args,
-								Replay: replay,
-							},
-						}) {
+						if !sendStreamEvent(ctx, eventChan, event) {
 							return
 						}
 					}
