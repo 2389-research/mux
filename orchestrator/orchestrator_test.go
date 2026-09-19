@@ -2594,6 +2594,133 @@ func TestRun_CheckpointsWithStore(t *testing.T) {
 	}
 }
 
+// failingCompleteStore delegates to a real Store but fails the StatusComplete
+// save, recording the orchestrator state observed at that moment.
+type failingCompleteStore struct {
+	orchestrator.Store
+	err              error
+	completeAttempts int
+	stateAtSave      orchestrator.State
+	stateProbe       func() orchestrator.State
+}
+
+func (s *failingCompleteStore) Save(ctx context.Context, snap *orchestrator.Snapshot) error {
+	if snap.Status == orchestrator.StatusComplete {
+		s.completeAttempts++
+		if s.stateProbe != nil {
+			s.stateAtSave = s.stateProbe()
+		}
+		if s.err != nil {
+			return s.err
+		}
+	}
+	return s.Store.Save(ctx, snap)
+}
+
+// collectEvents drains ch without blocking once it is closed.
+func collectEvents(ch <-chan orchestrator.Event) []orchestrator.Event {
+	var out []orchestrator.Event
+	for e := range ch {
+		out = append(out, e)
+	}
+	return out
+}
+
+func countEvent(events []orchestrator.Event, typ orchestrator.EventType) int {
+	n := 0
+	for _, e := range events {
+		if e.Type == typ {
+			n++
+		}
+	}
+	return n
+}
+
+// TestCheckpointFailureDoesNotAnnounceSuccess is the assembled regression for
+// mux#t0av: a failed final checkpoint must surface the persistence error, leave
+// the orchestrator in StateError, and publish no EventComplete.
+func TestCheckpointFailureDoesNotAnnounceSuccess(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		entry func(o *orchestrator.Orchestrator) error
+	}{
+		{"Run", func(o *orchestrator.Orchestrator) error { return o.Run(context.Background(), "hi") }},
+		{"Continue", func(o *orchestrator.Orchestrator) error { return o.Continue(context.Background(), "hi") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			diskFull := errors.New("disk full")
+			store := &failingCompleteStore{Store: session.NewFileStore(t.TempDir()), err: diskFull}
+			executor := tool.NewExecutor(tool.NewRegistry())
+			orch := orchestrator.NewWithConfig(&mockLLMClient{}, executor, orchestrator.Config{
+				MaxIterations: 5,
+				SessionStore:  store,
+			})
+			events := orch.Subscribe()
+
+			err := tc.entry(orch)
+			if !errors.Is(err, diskFull) {
+				t.Fatalf("%s err = %v, want it to wrap %v", tc.name, err, diskFull)
+			}
+			if got := orch.State(); got != orchestrator.StateError {
+				t.Errorf("State = %q, want %q", got, orchestrator.StateError)
+			}
+			got := collectEvents(events)
+			if n := countEvent(got, orchestrator.EventComplete); n != 0 {
+				t.Errorf("EventComplete published %d times on persistence failure", n)
+			}
+			if n := countEvent(got, orchestrator.EventError); n != 1 {
+				t.Errorf("EventError published %d times, want 1", n)
+			}
+		})
+	}
+}
+
+// TestCompletionCheckpointOrder pins the durable boundary: the StatusComplete
+// snapshot must be written while the runtime state is still non-terminal, and a
+// successful run must publish exactly one EventComplete.
+func TestCompletionCheckpointOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		entry func(o *orchestrator.Orchestrator) error
+	}{
+		{"Run", func(o *orchestrator.Orchestrator) error { return o.Run(context.Background(), "hi") }},
+		{"Continue", func(o *orchestrator.Orchestrator) error { return o.Continue(context.Background(), "hi") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &failingCompleteStore{Store: session.NewFileStore(t.TempDir())}
+			var orch *orchestrator.Orchestrator
+			store.stateProbe = func() orchestrator.State { return orch.State() }
+			executor := tool.NewExecutor(tool.NewRegistry())
+			orch = orchestrator.NewWithConfig(&mockLLMClient{}, executor, orchestrator.Config{
+				MaxIterations: 5,
+				SessionStore:  store,
+			})
+			events := orch.Subscribe()
+
+			if err := tc.entry(orch); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			if store.completeAttempts != 1 {
+				t.Fatalf("StatusComplete saved %d times, want 1", store.completeAttempts)
+			}
+			if store.stateAtSave == orchestrator.StateComplete {
+				t.Errorf("StatusComplete snapshot saved while state was already %q; persistence must precede publication", store.stateAtSave)
+			}
+			got := collectEvents(events)
+			if n := countEvent(got, orchestrator.EventComplete); n != 1 {
+				t.Errorf("EventComplete published %d times, want exactly 1", n)
+			}
+			snap, err := store.Load(context.Background(), orch.SessionID())
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if snap.Status != orchestrator.StatusComplete {
+				t.Errorf("persisted Status = %q, want %q", snap.Status, orchestrator.StatusComplete)
+			}
+		})
+	}
+}
+
 func TestResume_CrossProcess(t *testing.T) {
 	dir := t.TempDir()
 	const prompt = "ship"

@@ -386,13 +386,18 @@ func (o *Orchestrator) runIterations(ctx context.Context, startIter int, prompt 
 			}
 		}
 
+		// Persist the complete snapshot before announcing success. The runtime
+		// stays non-terminal (Streaming) during the save: if persistence fails,
+		// handleError can still reach StateError, and no subscriber has been told
+		// the run is durable. Only a successful save permits StateComplete and
+		// the completion event.
+		if err := o.checkpoint(ctx, StatusComplete); err != nil {
+			return o.handleError(fmt.Errorf("checkpoint failed: %w", err))
+		}
 		if err := o.transition(StateComplete); err != nil {
 			return o.handleError(err)
 		}
 		o.eventBus.Publish(NewCompleteEvent(resp.TextContent()))
-		if err := o.checkpoint(ctx, StatusComplete); err != nil {
-			return o.handleError(fmt.Errorf("checkpoint failed: %w", err))
-		}
 		return nil
 	}
 
