@@ -4,7 +4,6 @@ package llm
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 
@@ -175,8 +174,10 @@ func (o *OpenRouterClient) CreateMessageStream(ctx context.Context, req *Request
 
 			// Check for completed tool calls
 			if toolCall, ok := acc.JustFinishedToolCall(); ok {
-				var input map[string]any
-				if err := json.Unmarshal([]byte(toolCall.Arguments), &input); err != nil {
+				// Decoding preserves numeric literal text, so a large
+				// integer in the arguments does not round through float64.
+				input, err := decodeToolInputObject([]byte(toolCall.Arguments))
+				if err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: failed to parse tool call arguments for %s: %v\n", toolCall.Name, err)
 					input = make(map[string]any)
 				}

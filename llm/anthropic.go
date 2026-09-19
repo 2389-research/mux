@@ -59,12 +59,18 @@ func NewAnthropicClientWithBaseURL(apiKey, model, baseURL string) *AnthropicClie
 // envelope would silently discard them; and a history with no thinking in it
 // has to survive a model switch, which an envelope would fail pre-flight.
 //
-// Their normalized fields are not byte-exact, though. ToolUse.Input is a
-// map[string]any, so every JSON number decodes as a float64 and an integer past
-// 2^53 rebuilds rounded: a wire input of 10000000000000001 replays as
-// 10000000000000000. That predates replay envelopes and is unchanged by them.
-// It is worth knowing because Anthropic invalidates the signature on every
-// later thinking block when an earlier tool_use input changes.
+// Their normalized fields are not byte-exact for every payload, but numbers in
+// a tool_use input now are. ToolUse.Input is still a map[string]any, and every
+// JSON number decode path mux owns uses json.Decoder.UseNumber, so an integer
+// past 2^53 keeps its literal text as a json.Number instead of becoming a
+// float64: a wire input of 10000000000000001 stays 10000000000000001 through
+// history, persistence, and the next request. This matters because Anthropic
+// invalidates the signature on every later thinking block when an earlier
+// tool_use input changes, so a silently rounded ID would corrupt downstream
+// reasoning. (Gemini is the one exception: the genai SDK decodes its
+// function-call args to float64 before mux sees them and exposes no raw JSON
+// to re-decode, so a large integer in a Gemini call can still round. See
+// decodeToolInputObject.)
 //
 // Anything else in a replay payload is rejected rather than sent as an empty
 // block.
@@ -168,8 +174,16 @@ func convertRequest(req *Request) (anthropic.MessageNewParams, error) {
 			case ContentTypeText:
 				content = append(content, anthropic.NewTextBlock(block.Text))
 			case ContentTypeToolUse:
-				// Serialize assistant's tool_use blocks for conversation history
-				content = append(content, anthropic.NewToolUseBlock(block.ID, block.Input, block.Name))
+				// Serialize assistant's tool_use blocks for conversation
+				// history. The input is handed over as raw JSON: the SDK
+				// shims encoding/json and would render a stdlib json.Number
+				// as a quoted string, but passes a json.RawMessage through
+				// verbatim, keeping a large integer exact.
+				input, err := toolInputParam(block.Input)
+				if err != nil {
+					return anthropic.MessageNewParams{}, err
+				}
+				content = append(content, anthropic.NewToolUseBlock(block.ID, input, block.Name))
 			case ContentTypeToolResult:
 				content = append(content, anthropic.NewToolResultBlock(block.ToolUseID, block.Text, block.IsError))
 			case ContentTypeImage:
@@ -293,12 +307,16 @@ func convertResponse(msg *anthropic.Message, requestModel string) *Response {
 				Replay: replay,
 			})
 		case "tool_use":
-			// Unmarshal the raw JSON input to map[string]any
+			// Decode the raw JSON input preserving numeric literal text, so a
+			// large integer survives instead of rounding through float64.
 			var input map[string]any
 			if block.Input != nil {
-				if err := json.Unmarshal(block.Input, &input); err != nil {
+				decoded, err := decodeToolInputObject(block.Input)
+				if err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: failed to parse tool input for %s: %v\n", block.Name, err)
 					input = make(map[string]any)
+				} else {
+					input = decoded
 				}
 			}
 			resp.Content = append(resp.Content, ContentBlock{

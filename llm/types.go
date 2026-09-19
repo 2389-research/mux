@@ -3,7 +3,11 @@
 package llm
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"mime"
 	"os"
 	"path/filepath"
@@ -105,6 +109,38 @@ func NewAssistantMessage(text string) Message {
 // blocks. Use this when assembling multimodal messages (text + image, PDF, etc.).
 func NewUserMessageWithBlocks(blocks ...ContentBlock) Message {
 	return Message{Role: RoleUser, Blocks: blocks}
+}
+
+// UnmarshalJSON decodes a ContentBlock preserving the numeric literal text of
+// every number inside Input.
+//
+// Without this, the persistence boundaries that decode a ContentBlock — the
+// session store's snapshot and the agent transcript's JSON and JSONL codecs —
+// would go through encoding/json's default interface{} decode and turn a
+// large integer into a float64, rounding it. A snapshot written with
+// 10000000000000001 would reload as 10000000000000000, and mux would then
+// send the rounded value back to the provider on the next turn. Anthropic
+// invalidates the signature on every thinking block after a changed tool_use
+// input, so that silent rounding can corrupt reasoning with no error raised
+// anywhere.
+//
+// Every other field keeps the default behavior; only numbers reached through
+// the interface-typed Input tree are affected, and json.Number marshals back
+// to its original literal text.
+func (b *ContentBlock) UnmarshalJSON(data []byte) error {
+	type plain ContentBlock
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var decoded plain
+	if err := dec.Decode(&decoded); err != nil {
+		return err
+	}
+	// Reject trailing content after the object, as json.Unmarshal does.
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("llm: trailing content after content block JSON")
+	}
+	*b = ContentBlock(decoded)
+	return nil
 }
 
 // ContentBlock represents a piece of content in a message.

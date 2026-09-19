@@ -3,7 +3,6 @@
 package llm
 
 import (
-	"encoding/json"
 	"fmt"
 )
 
@@ -67,13 +66,15 @@ func parseStreamToolInput(provider, blockID, raw string) (map[string]any, error)
 	if raw == "" {
 		return nil, &StreamProtocolError{Provider: provider, BlockID: blockID, Reason: reasonInvalidToolInput}
 	}
-	var input map[string]any
-	if err := json.Unmarshal([]byte(raw), &input); err != nil {
+	// Decode preserving numeric literal text, so a large integer in a
+	// streamed tool input does not round through float64.
+	input, err := decodeToolInputObject([]byte(raw))
+	if err != nil {
 		return nil, &StreamProtocolError{Provider: provider, BlockID: blockID, Reason: reasonInvalidToolInput}
 	}
 	if input == nil {
-		// json.Unmarshal of a JSON "null" into a map succeeds and leaves it
-		// nil without error; {} is required, so reject explicitly.
+		// A JSON "null" decodes into a nil map without error; {} is
+		// required, so reject explicitly.
 		return nil, &StreamProtocolError{Provider: provider, BlockID: blockID, Reason: reasonInvalidToolInput}
 	}
 	return input, nil

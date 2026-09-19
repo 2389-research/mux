@@ -5,6 +5,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -28,9 +29,31 @@ func (t *CalculatorTool) Name() string                         { return "calcula
 func (t *CalculatorTool) Description() string                  { return "Add two numbers" }
 func (t *CalculatorTool) RequiresApproval(map[string]any) bool { return false }
 func (t *CalculatorTool) Execute(_ context.Context, p map[string]any) (*tool.Result, error) {
-	a, _ := p["a"].(float64)
-	b, _ := p["b"].(float64)
+	// Tool input numbers arrive as json.Number, not float64: mux decodes
+	// every tool-call argument object with UseNumber so a large integer
+	// survives without rounding through float64.
+	a, err := toolInputFloat(p["a"])
+	if err != nil {
+		return tool.NewErrorResult("calculator", err.Error()), nil
+	}
+	b, err := toolInputFloat(p["b"])
+	if err != nil {
+		return tool.NewErrorResult("calculator", err.Error()), nil
+	}
 	return tool.NewResult("calculator", true, fmt.Sprintf("%.0f + %.0f = %.0f", a, b, a+b), ""), nil
+}
+
+// toolInputFloat reads a numeric tool argument, accepting the json.Number a
+// decoded input carries and a float64 a caller-built input may still hold.
+func toolInputFloat(v any) (float64, error) {
+	switch n := v.(type) {
+	case json.Number:
+		return n.Float64()
+	case float64:
+		return n, nil
+	default:
+		return 0, fmt.Errorf("expected a number, got %T", v)
+	}
 }
 
 // InputSchema provides the JSON schema for this tool's input.

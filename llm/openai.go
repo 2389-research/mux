@@ -248,7 +248,10 @@ func convertResponsesInput(messages []Message) (responses.ResponseInputParam, er
 					items = append(items, responseMessage(role, block.Text))
 				}
 			case ContentTypeToolUse:
-				argsJSON, _ := json.Marshal(block.Input)
+				argsJSON, err := marshalToolInput(block.Input)
+				if err != nil {
+					return nil, fmt.Errorf("encoding tool input: %w", err)
+				}
 				items = append(items, responses.ResponseInputItemParamOfFunctionCall(string(argsJSON), block.ID, block.Name))
 			case ContentTypeToolResult:
 				items = append(items, responses.ResponseInputItemParamOfFunctionCallOutput(block.ToolUseID, block.Text))
@@ -552,7 +555,11 @@ func convertAssistantMessage(msg Message) openai.ChatCompletionMessageParamUnion
 		case ContentTypeText:
 			textContent = block.Text
 		case ContentTypeToolUse:
-			argsJSON, _ := json.Marshal(block.Input)
+			argsJSON, err := marshalToolInput(block.Input)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to encode tool input for %s: %v\n", block.Name, err)
+				continue
+			}
 			toolCalls = append(toolCalls, openai.ChatCompletionMessageToolCallUnionParam{
 				OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
 					ID: block.ID,
@@ -614,8 +621,10 @@ func convertOpenAIResponse(resp *openai.ChatCompletion) *Response {
 
 	// Tool calls
 	for _, tc := range choice.Message.ToolCalls {
-		var input map[string]any
-		if err := json.Unmarshal([]byte(tc.Function.Arguments), &input); err != nil {
+		// Decoding preserves numeric literal text, so a large integer in the
+		// arguments does not round through float64.
+		input, err := decodeToolInputObject([]byte(tc.Function.Arguments))
+		if err != nil {
 			// Truncated or malformed arguments (e.g. finish_reason "length"
 			// mid-JSON): drop the tool block entirely. Emitting it would let
 			// the orchestrator execute a partial call with empty input as if
@@ -706,8 +715,10 @@ func convertOpenAIResponsesResponse(resp *responses.Response, requestModel strin
 		case "function_call":
 			// v3 made item.Arguments a tagged union (OfString / OfResponseToolSearchCallArguments).
 			// For function_call items the arguments are a JSON-encoded string in OfString.
-			var input map[string]any
-			if err := json.Unmarshal([]byte(item.Arguments.OfString), &input); err != nil {
+			// Decoding preserves numeric literal text, so a large integer in
+			// the arguments does not round through float64.
+			input, err := decodeToolInputObject([]byte(item.Arguments.OfString))
+			if err != nil {
 				// Truncated or malformed arguments (e.g. output cut off by
 				// max_output_tokens mid-JSON): drop the tool block entirely.
 				// Emitting it would let the orchestrator execute a partial
@@ -976,8 +987,10 @@ func openAIStreamingToolCallBlock(itemID string, toolCall struct {
 	name      string
 	arguments string
 }) *ContentBlock {
-	var input map[string]any
-	if err := json.Unmarshal([]byte(toolCall.arguments), &input); err != nil {
+	// Decoding preserves numeric literal text, so a large integer in the
+	// accumulated arguments does not round through float64.
+	input, err := decodeToolInputObject([]byte(toolCall.arguments))
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to parse tool call arguments for %s: %v\n", toolCall.name, err)
 		input = make(map[string]any)
 	}
