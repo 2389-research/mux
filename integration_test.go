@@ -6,7 +6,11 @@ package mux_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -14,6 +18,7 @@ import (
 	"github.com/2389-research/mux/agent"
 	"github.com/2389-research/mux/coordinator"
 	"github.com/2389-research/mux/llm"
+	"github.com/2389-research/mux/mcp"
 	"github.com/2389-research/mux/orchestrator"
 	"github.com/2389-research/mux/permission"
 	"github.com/2389-research/mux/tool"
@@ -230,59 +235,270 @@ func TestMultiAgentCoordination(t *testing.T) {
 	}
 }
 
-// TestMCPAgentIntegration tests integration between MCP tools and agent execution.
+// mcpScriptedLLM is a scripted llm.Client for the assembled MCP test. Its first
+// call asks for the echo tool; every later call validates that the request
+// carries the exact tool_result correlated to that call before ending the turn.
+//
+// It deliberately reports a mismatch by making the next provider call fail,
+// rather than only recording it: if the orchestrator mis-correlated the result,
+// the conversation must not continue as if it had succeeded.
+type mcpScriptedLLM struct {
+	nonce  string
+	toolID string
+
+	mu         sync.Mutex
+	calls      int
+	resultSeen *llm.ContentBlock
+}
+
+func (m *mcpScriptedLLM) CreateMessage(_ context.Context, req *llm.Request) (*llm.Response, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.calls++
+	if m.calls == 1 {
+		return &llm.Response{
+			Content: []llm.ContentBlock{{
+				Type:  llm.ContentTypeToolUse,
+				ID:    m.toolID,
+				Name:  "echo",
+				Input: map[string]any{"message": m.nonce},
+			}},
+			StopReason: llm.StopReasonToolUse,
+		}, nil
+	}
+
+	block := lastToolResult(req.Messages)
+	if block == nil {
+		return nil, fmt.Errorf("provider call %d saw no tool_result for %s", m.calls, m.toolID)
+	}
+	m.resultSeen = block
+	if block.ToolUseID != m.toolID {
+		return nil, fmt.Errorf("tool_result is correlated to %q, want %q", block.ToolUseID, m.toolID)
+	}
+	if block.Text != m.nonce {
+		return nil, fmt.Errorf("tool_result carries %q, want echoed nonce %q", block.Text, m.nonce)
+	}
+	if block.IsError {
+		return nil, fmt.Errorf("tool_result is marked an error: %q", block.Text)
+	}
+
+	return &llm.Response{
+		Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "echoed " + block.Text}},
+		StopReason: llm.StopReasonEndTurn,
+	}, nil
+}
+
+func (m *mcpScriptedLLM) CreateMessageStream(ctx context.Context, req *llm.Request) (<-chan llm.StreamEvent, error) {
+	resp, err := m.CreateMessage(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	ch := make(chan llm.StreamEvent, 1)
+	ch <- llm.StreamEvent{Type: llm.EventMessageStop, Response: resp}
+	close(ch)
+	return ch, nil
+}
+
+func (m *mcpScriptedLLM) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
+
+// resultBlock returns the tool_result the second provider call observed, if any.
+func (m *mcpScriptedLLM) resultBlock() *llm.ContentBlock {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.resultSeen
+}
+
+// lastToolResult finds the trailing tool_result block across history, scanning
+// from the newest message so it reports exactly what the provider would read.
+func lastToolResult(messages []llm.Message) *llm.ContentBlock {
+	for i := len(messages) - 1; i >= 0; i-- {
+		for j := len(messages[i].Blocks) - 1; j >= 0; j-- {
+			if messages[i].Blocks[j].Type == llm.ContentTypeToolResult {
+				return &messages[i].Blocks[j]
+			}
+		}
+	}
+	return nil
+}
+
+// TestMCPAgentIntegration drives the assembled agent -> orchestrator -> real MCP
+// server path. It launches the echo server as an actual child process over
+// stdio, discovers its tool, registers it with an agent, and runs one agent turn
+// that calls it. The assertions cover the parts a mock cannot: that a separate
+// process answered the JSON-RPC call, that the echoed nonce arrived exactly
+// correlated to the request, and that shutdown closes the transport.
+//
+// This proves the local protocol path, not live provider compatibility; that is
+// what TestLiveProviderEcho (build tag `live`) covers.
 func TestMCPAgentIntegration(t *testing.T) {
-	t.Skip("Skipping MCP integration test - requires external MCP server")
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 
-	// This test demonstrates how MCP and Agent would integrate
-	// In practice, this requires a real MCP server process
+	serverPath := buildEchoServer(ctx, t)
+	echoLog := filepath.Join(t.TempDir(), "echo.log")
 
-	// registry := tool.NewRegistry()
-	//
-	// // Create MCP client (would need real server)
-	// mcpConfig := mcp.ServerConfig{
-	// 	Name:      "test-server",
-	// 	Transport: "stdio",
-	// 	Command:   "node",
-	// 	Args:      []string{"test-mcp-server.js"},
-	// }
-	//
-	// mcpClient := mcp.NewClient(mcpConfig)
-	// ctx := context.Background()
-	//
-	// if err := mcpClient.Start(ctx); err != nil {
-	// 	t.Fatalf("failed to start MCP client: %v", err)
-	// }
-	// defer mcpClient.Close()
-	//
-	// // List tools from MCP server
-	// mcpTools, err := mcpClient.ListTools(ctx)
-	// if err != nil {
-	// 	t.Fatalf("failed to list MCP tools: %v", err)
-	// }
-	//
-	// // Wrap MCP tools and register them
-	// for _, mcpTool := range mcpTools {
-	// 	wrapped := &mcpToolWrapper{
-	// 		client: mcpClient,
-	// 		info:   mcpTool,
-	// 	}
-	// 	registry.Register(wrapped)
-	// }
-	//
-	// // Create agent with MCP tools
-	// mockLLM := &mockLLM{...}
-	// agent := agent.New(agent.Config{
-	// 	Name:      "mcp-agent",
-	// 	Registry:  registry,
-	// 	LLMClient: mockLLM,
-	// })
-	//
-	// // Run agent task using MCP tools
-	// err = agent.Run(ctx, "Use MCP tools to complete task")
-	// if err != nil {
-	// 	t.Fatalf("agent execution failed: %v", err)
-	// }
+	client, err := mcp.NewClient(mcp.ServerConfig{
+		Name:      "echo",
+		Transport: "stdio",
+		Command:   serverPath,
+		Env:       map[string]string{"MUX_ECHO_SERVER_LOG": echoLog},
+	})
+	if err != nil {
+		t.Fatalf("create MCP client: %v", err)
+	}
+	if err := client.Start(ctx); err != nil {
+		t.Fatalf("start MCP client: %v", err)
+	}
+
+	infos, err := client.ListTools(ctx)
+	if err != nil {
+		t.Fatalf("list MCP tools: %v", err)
+	}
+	if len(infos) != 1 || infos[0].Name != "echo" {
+		t.Fatalf("expected exactly the echo tool, got %+v", infos)
+	}
+
+	// The MCP adapter requires approval by default; ModeAuto is the explicit
+	// decision to let this agent's tool run.
+	registry := tool.NewRegistry()
+	registry.Register(mcp.NewToolAdapter(infos[0], client))
+	checker := permission.NewChecker(permission.ModeAuto)
+
+	nonce := randomNonce(t)
+	toolID := "call_" + nonce
+	llmClient := &mcpScriptedLLM{nonce: nonce, toolID: toolID}
+
+	mcpAgent := agent.New(agent.Config{
+		Name:         "mcp-agent",
+		Registry:     registry,
+		LLMClient:    llmClient,
+		AllowedTools: []string{"echo"},
+		ApprovalFunc: func(ctx context.Context, tl tool.Tool, params map[string]any) (bool, error) {
+			return checker.Check(ctx, tl.Name(), params)
+		},
+	})
+	events := mcpAgent.Subscribe()
+
+	if err := mcpAgent.Run(ctx, "Echo the nonce "+nonce); err != nil {
+		t.Fatalf("agent run failed: %v", err)
+	}
+
+	if seen := llmClient.resultBlock(); seen == nil {
+		t.Fatal("the second provider call never received a tool_result")
+	} else if seen.Text != nonce {
+		t.Fatalf("tool_result text = %q, want echoed nonce %q", seen.Text, nonce)
+	}
+
+	// The child process itself recorded the nonce: this is what distinguishes a
+	// real process call from in-process state that only looks like one.
+	logged, err := os.ReadFile(echoLog)
+	if err != nil {
+		t.Fatalf("read echo server log: %v", err)
+	}
+	if got := strings.TrimSpace(string(logged)); got != nonce {
+		t.Fatalf("echo server recorded %q, want exactly one nonce %q", got, nonce)
+	}
+
+	assertMCPHistory(t, mcpAgent.Messages(), toolID, nonce)
+	assertMCPEvents(t, collectEvents(events), toolID)
+
+	// Protocol-level negative cases: the server rejects a bad call rather than
+	// answering it, so a future fixture that quietly returns values for
+	// anything cannot make the assembled path look healthy.
+	if _, err := client.CallTool(ctx, "does_not_exist", map[string]any{}); err == nil {
+		t.Error("calling an unknown MCP tool returned no error")
+	}
+	if _, err := client.CallTool(ctx, "echo", map[string]any{"message": ""}); err == nil {
+		t.Error("echo with an empty message returned no error")
+	}
+
+	// Close is terminal: a closed client refuses further calls rather than
+	// silently reusing or leaking the child process.
+	if err := client.Close(); err != nil {
+		t.Fatalf("close MCP client: %v", err)
+	}
+	if _, err := client.ListTools(ctx); !errors.Is(err, mcp.ErrTransportClosed) {
+		t.Fatalf("ListTools after Close = %v, want %v", err, mcp.ErrTransportClosed)
+	}
+}
+
+// collectEvents drains the events already published to the subscription. The
+// orchestrator publishes synchronously during Run, and the bus buffers events,
+// so after Run returns everything is available without racing.
+func collectEvents(events <-chan orchestrator.Event) []orchestrator.Event {
+	var collected []orchestrator.Event
+	for {
+		select {
+		case e, ok := <-events:
+			if !ok {
+				return collected
+			}
+			collected = append(collected, e)
+		default:
+			return collected
+		}
+	}
+}
+
+// assertMCPHistory checks the provider-visible history pairs the assistant
+// tool_use with exactly one correlated tool_result carrying the nonce.
+func assertMCPHistory(t *testing.T, messages []llm.Message, toolID, nonce string) {
+	t.Helper()
+
+	var toolUses, toolResults int
+	for _, msg := range messages {
+		for _, block := range msg.Blocks {
+			switch block.Type {
+			case llm.ContentTypeToolUse:
+				if block.ID == toolID {
+					toolUses++
+				}
+			case llm.ContentTypeToolResult:
+				toolResults++
+				if block.ToolUseID != toolID {
+					t.Errorf("tool_result correlated to %q, want %q", block.ToolUseID, toolID)
+				}
+				if block.Text != nonce {
+					t.Errorf("tool_result text = %q, want %q", block.Text, nonce)
+				}
+			}
+		}
+	}
+	if toolUses != 1 {
+		t.Errorf("history holds %d tool_use blocks for %s, want 1", toolUses, toolID)
+	}
+	if toolResults != 1 {
+		t.Errorf("history holds %d tool_result blocks, want 1", toolResults)
+	}
+}
+
+// assertMCPEvents checks the run published the tool call and a successful result
+// carrying the nonce.
+func assertMCPEvents(t *testing.T, events []orchestrator.Event, toolID string) {
+	t.Helper()
+
+	var (
+		gotCall, gotResult bool
+	)
+	for _, e := range events {
+		switch e.Type {
+		case orchestrator.EventToolCall:
+			if e.ToolID == toolID && e.ToolName == "echo" {
+				gotCall = true
+			}
+		case orchestrator.EventToolResult:
+			if e.Result != nil && e.Result.ToolName == "echo" && e.Result.Success {
+				gotResult = true
+			}
+		}
+	}
+	if !gotCall {
+		t.Errorf("no tool call event for %s", toolID)
+	}
+	if !gotResult {
+		t.Error("no successful tool result event for echo")
+	}
 }
 
 // TestPermissionApprovalFlow tests the full permission system with approval flows.

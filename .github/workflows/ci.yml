@@ -32,8 +32,12 @@ jobs:
       - name: go build
         run: go build ./...
 
-      - name: go test -race
-        run: go test -race -timeout=300s ./...
+      - name: go test -race (integration)
+        # The root suite is behind the integration build tag; without it every
+        # assembled case is skipped and CI would pass while running less than
+        # the canonical local suite (make test). Keep the two invocations in
+        # sync.
+        run: go test -race -tags=integration -timeout=300s ./...
 
   test-floor:
     name: test (race, go 1.25.0 floor)
@@ -67,8 +71,12 @@ jobs:
       - name: go build
         run: go build ./...
 
-      - name: go test -race
-        run: go test -race -timeout=300s ./...
+      - name: go test -race (integration)
+        # The root suite is behind the integration build tag; without it every
+        # assembled case is skipped and CI would pass while running less than
+        # the canonical local suite (make test). Keep the two invocations in
+        # sync.
+        run: go test -race -tags=integration -timeout=300s ./...
 
   lint:
     name: golangci-lint
