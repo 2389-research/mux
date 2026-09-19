@@ -9,6 +9,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/2389-research/mux/hooks"
@@ -215,60 +216,49 @@ func (a *Agent) Parent() *Agent {
 
 var (
 	ErrInvalidChildTools = errors.New("child cannot have tools parent doesn't have")
+	// ErrInvalidChildConfig marks a child Config that SpawnChild cannot turn
+	// into a working agent. The message names the offending field.
+	ErrInvalidChildConfig = errors.New("invalid child configuration")
 )
 
 // SpawnChild creates a child agent with inherited configuration.
-// Child tools are restricted to parent's allowed tools.
-// Child denied tools accumulate (union of parent and child denied).
+//
+// Inheritance is not implicit per field: deriveChildConfig applies the policy
+// declared in ConfigFieldChildPolicies. In summary, a child inherits Registry,
+// LLMClient, HookManager and AllowedTools when it omits them, unions
+// DeniedTools with the parent's, and inherits the parent's ApprovalFunc when it
+// is nil (so an inherited approval-gated tool remains usable). Name,
+// SystemPrompt, MaxIterations, Stream, ThinkingSettings, SessionStore,
+// ApprovalMode and Skills are never inherited; the caller restates them.
+//
+// Child tools requested explicitly must be a subset of the parent's allowed
+// tools, or SpawnChild returns ErrInvalidChildTools. A child whose
+// ApprovalMode is ApprovalSuspend must also set SessionStore, or SpawnChild
+// returns ErrInvalidChildConfig. On error the child is not created, not
+// recorded on the parent, and no SubagentStart hook fires.
+//
 // Fires SubagentStart hook if a hook manager is configured.
 func (a *Agent) SpawnChild(cfg Config) (*Agent, error) {
-	// First, prepare the child config while holding a read lock
+	// Derive the effective child config under the parent read lock so the
+	// parent's configuration cannot change mid-derivation.
 	a.mu.RLock()
-	// Inherit registry if not specified
-	if cfg.Registry == nil {
-		cfg.Registry = a.config.Registry
-	}
-
-	// Inherit LLM client if not specified
-	if cfg.LLMClient == nil {
-		cfg.LLMClient = a.config.LLMClient
-	}
-
-	// Inherit hook manager if not specified
-	if cfg.HookManager == nil {
-		cfg.HookManager = a.hookManager
-	}
-
-	// Empty AllowedTools = inherit parent's allowed tools
-	if len(cfg.AllowedTools) == 0 {
-		cfg.AllowedTools = make([]string, len(a.config.AllowedTools))
-		copy(cfg.AllowedTools, a.config.AllowedTools)
-	} else {
-		// Validate child tools are subset of parent tools (if parent has restrictions)
-		if len(a.config.AllowedTools) > 0 {
-			if err := a.validateChildTools(cfg.AllowedTools); err != nil {
-				a.mu.RUnlock()
-				return nil, err
-			}
-		}
-	}
-
-	// Merge denied tools (union)
-	cfg.DeniedTools = unionStrings(a.config.DeniedTools, cfg.DeniedTools)
-
-	// Create child ID
-	childID := a.id + "." + cfg.Name
+	childCfg, err := a.deriveChildConfig(cfg)
 	parentID := a.id
 	hookMgr := a.hookManager
 	a.mu.RUnlock()
+	if err != nil {
+		return nil, err
+	}
+
+	childID := parentID + "." + childCfg.Name
 
 	// Initialize child without holding parent lock (expensive operation)
 	child := &Agent{
 		id:          childID,
-		config:      cfg,
+		config:      childCfg,
 		parent:      a,
 		children:    make([]*Agent, 0),
-		hookManager: cfg.HookManager,
+		hookManager: childCfg.HookManager,
 	}
 	child.init()
 
@@ -282,7 +272,7 @@ func (a *Agent) SpawnChild(cfg Config) (*Agent, error) {
 		event := &hooks.SubagentStartEvent{
 			ParentID: parentID,
 			ChildID:  childID,
-			Name:     cfg.Name,
+			Name:     childCfg.Name,
 		}
 		// Fire hook with background context since SpawnChild doesn't take ctx
 		//nolint:errcheck // SubagentStart is notification-only
@@ -290,6 +280,72 @@ func (a *Agent) SpawnChild(cfg Config) (*Agent, error) {
 	}
 
 	return child, nil
+}
+
+// deriveChildConfig applies every Config field's child policy (see
+// ConfigFieldChildPolicies) and validates the result. The caller must hold the
+// parent read lock. It returns ErrInvalidChildTools or ErrInvalidChildConfig
+// for a child that cannot be constructed.
+func (a *Agent) deriveChildConfig(cfg Config) (Config, error) {
+	// Registry: inherit-if-nil.
+	if cfg.Registry == nil {
+		cfg.Registry = a.config.Registry
+	}
+
+	// LLMClient: inherit-if-nil.
+	if cfg.LLMClient == nil {
+		cfg.LLMClient = a.config.LLMClient
+	}
+
+	// HookManager: inherit-if-nil.
+	if cfg.HookManager == nil {
+		cfg.HookManager = a.hookManager
+	}
+
+	// ApprovalFunc: inherit-if-nil. An inherited approval-gated tool stays
+	// usable because the parent's callback travels with it. Disabling an
+	// inherited callback requires a separately designed explicit policy; it is
+	// deliberately not expressible here.
+	if cfg.ApprovalFunc == nil {
+		cfg.ApprovalFunc = a.config.ApprovalFunc
+	}
+
+	// AllowedTools: inherit-if-empty; an explicit list must be a parent subset.
+	if len(cfg.AllowedTools) == 0 {
+		cfg.AllowedTools = make([]string, len(a.config.AllowedTools))
+		copy(cfg.AllowedTools, a.config.AllowedTools)
+	} else if len(a.config.AllowedTools) > 0 {
+		if err := a.validateChildTools(cfg.AllowedTools); err != nil {
+			return Config{}, err
+		}
+	}
+
+	// DeniedTools: union; the parent's denials cannot be removed.
+	cfg.DeniedTools = unionStrings(a.config.DeniedTools, cfg.DeniedTools)
+
+	// ApprovalMode: caller-restates. Suspend without a store would panic in
+	// child.init() via orchestrator.NewWithConfig, so reject it here.
+	if cfg.ApprovalMode == orchestrator.ApprovalSuspend && cfg.SessionStore == nil {
+		return Config{}, fmt.Errorf("%w: ApprovalSuspend requires a SessionStore", ErrInvalidChildConfig)
+	}
+
+	return cloneConfigValues(cfg), nil
+}
+
+// cloneConfigValues copies the slice and pointer fields that must not be shared
+// with the caller's Config value.
+func cloneConfigValues(cfg Config) Config {
+	if cfg.AllowedTools != nil {
+		cfg.AllowedTools = append([]string(nil), cfg.AllowedTools...)
+	}
+	if cfg.DeniedTools != nil {
+		cfg.DeniedTools = append([]string(nil), cfg.DeniedTools...)
+	}
+	if cfg.ThinkingSettings != nil {
+		settings := *cfg.ThinkingSettings
+		cfg.ThinkingSettings = &settings
+	}
+	return cfg
 }
 
 // validateChildTools ensures child's tools are a subset of parent's allowed tools.
