@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -2587,6 +2589,9 @@ func TestRun_CheckpointsWithStore(t *testing.T) {
 	if snap.Status != orchestrator.StatusComplete {
 		t.Errorf("final snapshot Status = %q, want %q", snap.Status, orchestrator.StatusComplete)
 	}
+	if snap.Version != orchestrator.SnapshotVersion {
+		t.Errorf("checkpointed Version = %d, want %d", snap.Version, orchestrator.SnapshotVersion)
+	}
 }
 
 func TestResume_CrossProcess(t *testing.T) {
@@ -2917,5 +2922,97 @@ func TestResume_RestoresCallerApprovalFunc(t *testing.T) {
 	}
 	if !callerAsked || approved {
 		t.Errorf("restored approval func: callerAsked=%v approved=%v, want true and false", callerAsked, approved)
+	}
+}
+
+// badSnapshotStore is a Store that hands back whatever snapshot its test wants,
+// standing in for a non-FileStore backend, a migration, or the planned HTTP
+// resume API: a producer the orchestrator does not control.
+type badSnapshotStore struct {
+	snap *orchestrator.Snapshot
+}
+
+func (s *badSnapshotStore) Save(context.Context, *orchestrator.Snapshot) error { return nil }
+func (s *badSnapshotStore) Load(context.Context, string) (*orchestrator.Snapshot, error) {
+	return s.snap, nil
+}
+func (s *badSnapshotStore) List(context.Context) ([]string, error) { return nil, nil }
+func (s *badSnapshotStore) Delete(context.Context, string) error   { return nil }
+
+// TestResume_RejectsInvalidStoredSnapshot: validation cannot live only in
+// FileStore, because Resume accepts any Store. A snapshot that violates the
+// Status/Suspension invariant must be refused before the orchestrator adopts its
+// session ID, messages, or counters.
+func TestResume_RejectsInvalidStoredSnapshot(t *testing.T) {
+	cases := []struct {
+		name string
+		snap *orchestrator.Snapshot
+	}{
+		{"suspended with no pending calls", &orchestrator.Snapshot{
+			Version: orchestrator.SnapshotVersion, SessionID: "session-http", Status: orchestrator.StatusSuspended,
+			Suspension: &orchestrator.Suspension{Reason: orchestrator.ReasonApprovalRequired},
+		}},
+		{"running with a suspension", &orchestrator.Snapshot{
+			Version: orchestrator.SnapshotVersion, SessionID: "session-http", Status: orchestrator.StatusRunning,
+			Suspension: &orchestrator.Suspension{Reason: orchestrator.ReasonApprovalRequired,
+				Pending: []orchestrator.PendingToolCall{{ID: "call-1", Name: "deploy"}}},
+		}},
+		{"unknown status", &orchestrator.Snapshot{
+			Version: orchestrator.SnapshotVersion, SessionID: "session-http", Status: orchestrator.Status("paused"),
+		}},
+		{"unsupported version", &orchestrator.Snapshot{
+			Version: orchestrator.SnapshotVersion + 1, SessionID: "session-http", Status: orchestrator.StatusSuspended,
+			Suspension: &orchestrator.Suspension{Reason: orchestrator.ReasonApprovalRequired,
+				Pending: []orchestrator.PendingToolCall{{ID: "call-1", Name: "deploy"}}},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &badSnapshotStore{snap: tc.snap}
+			orch := orchestrator.NewWithConfig(&mockLLMClient{}, tool.NewExecutor(tool.NewRegistry()),
+				orchestrator.Config{MaxIterations: 5, SessionStore: store, ApprovalMode: orchestrator.ApprovalSuspend})
+
+			err := orch.Resume(context.Background(), "session-http", orchestrator.Approve(true))
+			if err == nil {
+				t.Fatal("Resume on an invalid stored snapshot = nil error, want error")
+			}
+			// The orchestrator must not have adopted anything from the bad snapshot.
+			if got := orch.SessionID(); got == "session-http" {
+				t.Errorf("Resume adopted the invalid snapshot's session id")
+			}
+			if len(orch.Messages()) != 0 {
+				t.Errorf("Resume adopted %d messages from the invalid snapshot", len(orch.Messages()))
+			}
+		})
+	}
+}
+
+// TestResume_RejectsCorruptSnapshotFile is the issue's reproduction run end to
+// end against real file storage: a hand-written file passes JSON decoding but
+// violates the Status/Suspension invariant ("suspended" with nothing pending),
+// so Load rejects it and Resume refuses to start.
+func TestResume_RejectsCorruptSnapshotFile(t *testing.T) {
+	dir := t.TempDir()
+	const sid = "session-corrupt"
+	corrupt := `{"version":1,"session_id":"session-corrupt","status":"suspended","messages":[],` +
+		`"suspension":{"reason":"authorization.required"},"usage":{},"iteration":1,` +
+		`"updated_at":"2025-06-15T00:00:00Z"}`
+	if err := os.WriteFile(filepath.Join(dir, sid+".json"), []byte(corrupt), 0o600); err != nil {
+		t.Fatalf("write corrupt fixture: %v", err)
+	}
+
+	store := session.NewFileStore(dir)
+	orch := orchestrator.NewWithConfig(&mockLLMClient{}, tool.NewExecutor(tool.NewRegistry()),
+		orchestrator.Config{MaxIterations: 5, SessionStore: store, ApprovalMode: orchestrator.ApprovalSuspend})
+
+	if err := orch.Resume(context.Background(), sid, orchestrator.Approve(true)); err == nil {
+		t.Fatal("Resume on a corrupt snapshot file = nil error, want error")
+	}
+	if got := orch.SessionID(); got == sid {
+		t.Error("Resume adopted the corrupt snapshot's session id")
+	}
+	// The file is left for the operator to inspect; nothing silently repairs it.
+	if _, err := os.Stat(filepath.Join(dir, sid+".json")); err != nil {
+		t.Errorf("corrupt snapshot file was modified or removed: %v", err)
 	}
 }

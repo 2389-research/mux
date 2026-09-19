@@ -5,6 +5,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -39,14 +40,18 @@ func (s *FileStore) path(sessionID string) (string, error) {
 // Save writes snap atomically: marshal to a temp file in the same directory,
 // then rename over the target so a crash never leaves a half-written snapshot.
 func (s *FileStore) Save(_ context.Context, snap *orchestrator.Snapshot) error {
-	target, err := s.path(snap.SessionID)
+	candidate, err := snapshotForSave(snap)
+	if err != nil {
+		return err
+	}
+	target, err := s.path(candidate.SessionID)
 	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(snap, "", "  ")
+	data, err := json.MarshalIndent(candidate, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -59,6 +64,33 @@ func (s *FileStore) Save(_ context.Context, snap *orchestrator.Snapshot) error {
 		return err
 	}
 	return nil
+}
+
+// snapshotForSave returns a validated shallow copy of snap with the current
+// schema version. Copying field-by-field (rather than *snap) avoids duplicating
+// TokenUsage's mutex; the caller's snapshot is never mutated. A freshly
+// constructed Version-0 value is stamped here, but Load never guesses a version.
+func snapshotForSave(snap *orchestrator.Snapshot) (*orchestrator.Snapshot, error) {
+	if snap == nil {
+		return nil, errors.New("session: cannot save a nil snapshot")
+	}
+	candidate := &orchestrator.Snapshot{
+		Version:    snap.Version,
+		SessionID:  snap.SessionID,
+		Status:     snap.Status,
+		Messages:   snap.Messages,
+		Suspension: snap.Suspension,
+		Usage:      snap.Usage.Snapshot(),
+		Iteration:  snap.Iteration,
+		UpdatedAt:  snap.UpdatedAt,
+	}
+	if candidate.Version == 0 {
+		candidate.Version = orchestrator.SnapshotVersion
+	}
+	if err := candidate.Validate(); err != nil {
+		return nil, err
+	}
+	return candidate, nil
 }
 
 // Load reads and decodes a snapshot, returning ErrSessionNotFound if absent.
@@ -77,6 +109,15 @@ func (s *FileStore) Load(_ context.Context, sessionID string) (*orchestrator.Sna
 	var snap orchestrator.Snapshot
 	if err := json.Unmarshal(data, &snap); err != nil {
 		return nil, fmt.Errorf("session: decode %s: %w", sessionID, err)
+	}
+	// Reject an invariant-violating or foreign-schema file instead of handing
+	// Resume state it would act on. Pre-existing bad files stay on disk for the
+	// operator; nothing is silently repaired or migrated here.
+	if err := snap.Validate(); err != nil {
+		return nil, fmt.Errorf("session: load %s: %w", sessionID, err)
+	}
+	if snap.SessionID != sessionID {
+		return nil, fmt.Errorf("session: load %s: snapshot names session %q", sessionID, snap.SessionID)
 	}
 	return &snap, nil
 }

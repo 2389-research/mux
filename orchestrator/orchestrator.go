@@ -752,6 +752,7 @@ func (o *Orchestrator) snapshot(status Status) *Snapshot {
 	msgs := make([]llm.Message, len(o.messages))
 	copy(msgs, o.messages)
 	return &Snapshot{
+		Version:   SnapshotVersion,
 		SessionID: o.sessionID,
 		Status:    status,
 		Messages:  msgs,
@@ -814,6 +815,12 @@ func (o *Orchestrator) Resume(ctx context.Context, sessionID string, d Decision)
 	snap, err := o.config.SessionStore.Load(ctx, sessionID)
 	if err != nil {
 		return err
+	}
+	// Validate before adopting anything: Resume accepts any Store, so a backend,
+	// migration, or hand-edited file can hand back state that violates the
+	// lifecycle invariant. Validating here keeps the loop from restoring it.
+	if err := snap.Validate(); err != nil {
+		return fmt.Errorf("mux: session %s: %w", sessionID, err)
 	}
 	if snap.Status != StatusSuspended || snap.Suspension == nil {
 		return fmt.Errorf("mux: session %s is not suspended (status %q)", sessionID, snap.Status)

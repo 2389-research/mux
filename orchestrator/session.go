@@ -20,6 +20,11 @@ const (
 	StatusComplete  Status = "complete"
 )
 
+// StatusError is deliberately not defined. A persisted "errored" state needs the
+// durable execution-uncertainty contract (recording.Snapshot / mux#1rky) to say
+// what an error snapshot may finish, so mux keeps three statuses; Snapshot.Validate
+// rejects any other value rather than guessing at one.
+
 // Reason explains why a session suspended. Values mirror the eve.dev vocabulary.
 type Reason string
 
@@ -70,8 +75,14 @@ type Suspension struct {
 	Pending []PendingToolCall `json:"pending,omitempty"`
 }
 
+// SnapshotVersion is the schema version Save writes and Load accepts. A
+// snapshot written by an older or newer mux is rejected rather than guessed at;
+// migration, if ever needed, gets an explicit path rather than a silent repair.
+const SnapshotVersion = 1
+
 // Snapshot is the complete persisted state of a session at a checkpoint.
 type Snapshot struct {
+	Version    int           `json:"version"`
 	SessionID  string        `json:"session_id"`
 	Status     Status        `json:"status"`
 	Messages   []llm.Message `json:"messages"`
@@ -79,6 +90,41 @@ type Snapshot struct {
 	Usage      TokenUsage    `json:"usage"`
 	Iteration  int           `json:"iteration"`
 	UpdatedAt  time.Time     `json:"updated_at"`
+}
+
+// Validate reports whether s satisfies the durable-session invariants. It is the
+// single place the Status/Suspension rule is encoded, so every Store
+// implementation and the orchestrator's Resume can enforce it identically at the
+// boundary a snapshot crosses: Suspension is non-nil iff Status == StatusSuspended,
+// and a suspended snapshot always names at least one pending call. A nil snapshot,
+// an unsupported Version, or an unknown Status is invalid too.
+func (s *Snapshot) Validate() error {
+	if s == nil {
+		return errors.New("orchestrator: invalid snapshot: nil")
+	}
+	if s.Version != SnapshotVersion {
+		return fmt.Errorf("orchestrator: invalid snapshot: unsupported version %d (want %d)", s.Version, SnapshotVersion)
+	}
+	switch s.Status {
+	case StatusRunning, StatusSuspended, StatusComplete:
+	default:
+		return fmt.Errorf("orchestrator: invalid snapshot: unknown status %q", s.Status)
+	}
+	if (s.Status == StatusSuspended) != (s.Suspension != nil) {
+		return fmt.Errorf("orchestrator: invalid snapshot: status %q and suspension %s disagree", s.Status, presentOrAbsent(s.Suspension != nil))
+	}
+	if s.Suspension != nil && len(s.Suspension.Pending) == 0 {
+		return errors.New("orchestrator: invalid snapshot: suspended without pending calls")
+	}
+	return nil
+}
+
+// presentOrAbsent names a pointer's state for Validate's error text.
+func presentOrAbsent(ok bool) string {
+	if ok {
+		return "present"
+	}
+	return "absent"
 }
 
 // Store persists and retrieves session snapshots. Implementations must be safe

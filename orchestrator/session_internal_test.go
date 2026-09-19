@@ -143,3 +143,87 @@ func TestTokenUsageRestore_CopiesCounters(t *testing.T) {
 		)
 	}
 }
+
+// TestSnapshotValidate pins the lifecycle rule the durable-session design doc
+// states: Suspension is non-nil iff Status == StatusSuspended, and a suspended
+// snapshot always has at least one pending call. The rule is enforced here so
+// every Store producer gets it, not only orchestrator.snapshot().
+func TestSnapshotValidate(t *testing.T) {
+	valid := &Snapshot{
+		Version:   SnapshotVersion,
+		SessionID: "s",
+		Status:    StatusRunning,
+	}
+	suspended := &Snapshot{
+		Version:   SnapshotVersion,
+		SessionID: "s",
+		Status:    StatusSuspended,
+		Suspension: &Suspension{
+			Reason:  ReasonApprovalRequired,
+			Pending: []PendingToolCall{{ID: "call-1", Name: "read"}},
+		},
+	}
+
+	tests := []struct {
+		name    string
+		snap    *Snapshot
+		wantErr bool
+	}{
+		{"running without suspension", valid, false},
+		{"complete without suspension", &Snapshot{Version: SnapshotVersion, Status: StatusComplete}, false},
+		{"suspended with one pending call", suspended, false},
+		{"nil snapshot", nil, true},
+		{"zero version", &Snapshot{Status: StatusRunning}, true},
+		{"future version", &Snapshot{Version: SnapshotVersion + 1, Status: StatusRunning}, true},
+		{"unknown status", &Snapshot{Version: SnapshotVersion, Status: Status("paused")}, true},
+		{"empty status", &Snapshot{Version: SnapshotVersion}, true},
+		{"suspended with nil suspension", &Snapshot{Version: SnapshotVersion, Status: StatusSuspended}, true},
+		{"suspended with nil pending", &Snapshot{
+			Version: SnapshotVersion, Status: StatusSuspended,
+			Suspension: &Suspension{Reason: ReasonApprovalRequired},
+		}, true},
+		{"suspended with empty pending", &Snapshot{
+			Version: SnapshotVersion, Status: StatusSuspended,
+			Suspension: &Suspension{Reason: ReasonApprovalRequired, Pending: []PendingToolCall{}},
+		}, true},
+		{"running with suspension", &Snapshot{
+			Version: SnapshotVersion, Status: StatusRunning,
+			Suspension: &Suspension{Reason: ReasonApprovalRequired, Pending: []PendingToolCall{{ID: "call-1"}}},
+		}, true},
+		{"complete with suspension", &Snapshot{
+			Version: SnapshotVersion, Status: StatusComplete,
+			Suspension: &Suspension{Reason: ReasonApprovalRequired, Pending: []PendingToolCall{{ID: "call-1"}}},
+		}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.snap.Validate()
+			if tt.wantErr && err == nil {
+				t.Fatalf("Validate() = nil, want error")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("Validate() = %v, want nil", err)
+			}
+		})
+	}
+}
+
+// TestSnapshotValidate_ErrorNamesTheFault keeps the rejection actionable for an
+// operator staring at a hand-edited or migrated file.
+func TestSnapshotValidate_ErrorNamesTheFault(t *testing.T) {
+	err := (&Snapshot{Version: SnapshotVersion + 7, Status: StatusRunning}).Validate()
+	if err == nil {
+		t.Fatal("Validate() = nil, want error")
+	}
+	if !contains(err.Error(), "8") {
+		t.Errorf("version error %q does not name the offending version", err)
+	}
+
+	err = (&Snapshot{Version: SnapshotVersion, Status: Status("paused")}).Validate()
+	if err == nil {
+		t.Fatal("Validate() = nil, want error")
+	}
+	if !contains(err.Error(), "paused") {
+		t.Errorf("status error %q does not name the offending status", err)
+	}
+}
