@@ -5,10 +5,12 @@ package agent
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -535,4 +537,122 @@ func TestTranscriptJSONLRoundTripsLargeEntry(t *testing.T) {
 	if text := got.Entries[0].Content[0].Text; text != big {
 		t.Errorf("thinking text: got %d bytes want %d", len(text), len(big))
 	}
+}
+
+// TestTranscriptEntryWireFormatIsFrozen is the recorded decision for
+// mux#2zdv: agent.TranscriptEntry keeps its hand mirror of llm.Message as a
+// deliberate, frozen on-disk wire format rather than embedding llm.Message
+// directly. Embedding it would change the shape every external transcript
+// reader sees, and that change needs the format-version field owned by
+// mux#yp6a plus a coordinated breaking release; the widened Text field
+// (mux#bq4e) already makes the mirror lossless for today's llm.Message, so
+// no shape change is required to complete this item.
+//
+// This test makes the freeze actionable: it pins the exact serialized key
+// set of an entry, so a field rename, addition, or removal fails here and
+// forces the author to either re-record this decision deliberately or take
+// the versioned shape via mux#yp6a. The entry carries the same keys in both
+// codecs; the JSONL message record adds only its record "type".
+func TestTranscriptEntryWireFormatIsFrozen(t *testing.T) {
+	tr := NewTranscript("wire-format")
+	tr.Entries = []TranscriptEntry{{
+		Timestamp: time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC),
+		Role:      "assistant",
+		Content:   []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "body"}},
+		Text:      "body",
+	}}
+
+	// The JSON object form: each entry has exactly this key set.
+	var buf bytes.Buffer
+	if err := tr.SaveJSON(&buf); err != nil {
+		t.Fatalf("SaveJSON: %v", err)
+	}
+	var decoded struct {
+		Entries []map[string]json.RawMessage `json:"entries"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode JSON: %v", err)
+	}
+	if len(decoded.Entries) != 1 {
+		t.Fatalf("entries: got %d want 1", len(decoded.Entries))
+	}
+	assertFrozenKeys(t, "JSON entry", decoded.Entries[0],
+		"timestamp", "role", "content", "text")
+
+	// The JSONL record form: the same entry keys plus the record "type".
+	buf.Reset()
+	if err := tr.SaveJSONL(&buf); err != nil {
+		t.Fatalf("SaveJSONL: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("JSONL lines: got %d want 2", len(lines))
+	}
+	var messageRecord map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(lines[1]), &messageRecord); err != nil {
+		t.Fatalf("decode JSONL message: %v", err)
+	}
+	assertFrozenKeys(t, "JSONL message record", messageRecord,
+		"type", "timestamp", "role", "content", "text")
+}
+
+// assertFrozenKeys compares a decoded object's key set against want,
+// ignoring order, and names the mux#2zdv decision in the failure so the
+// next author knows the freeze is deliberate.
+func assertFrozenKeys(t *testing.T, what string, obj map[string]json.RawMessage, want ...string) {
+	t.Helper()
+	got := make([]string, 0, len(obj))
+	for k := range obj {
+		got = append(got, k)
+	}
+	sort.Strings(got)
+	sort.Strings(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("%s keys = %v, want %v; the transcript wire format is frozen (mux#2zdv) - re-record this decision deliberately or take the versioned shape via mux#yp6a", what, got, want)
+	}
+}
+
+// TestTranscriptEntryMirrorsEveryMessageField is the other half of the
+// mux#2zdv guard: the mirror must map every JSON field llm.Message
+// declares. It reads the struct's tags by reflection rather than marshaling
+// a zero value, because an omitted `omitempty` field would hide behind the
+// encoding and let a new field slip past. If llm.Message gains a field,
+// this fails rather than letting transcripts silently drop it at the
+// FromMessages/Append boundary - the exact failure mode that produced
+// mux#bq4e. Resolving the failure is a decision: widen the mirror and
+// re-record the freeze above, or move to the versioned shape (mux#yp6a).
+func TestTranscriptEntryMirrorsEveryMessageField(t *testing.T) {
+	// The mirror's mapping from llm.Message JSON fields to entry fields. An
+	// unmapped llm.Message field is a silent drop, which this test rejects.
+	mapped := map[string]bool{
+		"role":    true, // TranscriptEntry.Role
+		"content": true, // TranscriptEntry.Text
+		"blocks":  true, // TranscriptEntry.Content
+	}
+	messageType := reflect.TypeOf(llm.Message{})
+	for i := 0; i < messageType.NumField(); i++ {
+		name := jsonFieldName(messageType.Field(i))
+		if name == "" { // untagged or explicitly ignored
+			continue
+		}
+		if !mapped[name] {
+			t.Fatalf("llm.Message field %q has no TranscriptEntry mapping; the hand mirror would silently drop it (mux#2zdv)", name)
+		}
+	}
+}
+
+// jsonFieldName returns the JSON key a struct field serializes under, or ""
+// when the field is unexported or tagged `json:"-"`.
+func jsonFieldName(field reflect.StructField) string {
+	if field.PkgPath != "" { // unexported
+		return ""
+	}
+	name := strings.Split(field.Tag.Get("json"), ",")[0]
+	if name == "-" {
+		return ""
+	}
+	if name == "" {
+		return field.Name
+	}
+	return name
 }

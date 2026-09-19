@@ -23,6 +23,27 @@ const MaxTranscriptLineBytes = 16 * 1024 * 1024
 
 // TranscriptEntry represents a single entry in the transcript.
 //
+// # Frozen wire format (mux#2zdv decision)
+//
+// This type is a hand-written mirror of llm.Message, and the mirror is
+// deliberate rather than accidental: the on-disk entry shape is a frozen
+// wire format with external readers this repository cannot verify
+// (DEPENDENTS.md lists transcript persistence as a public feature). The
+// JSON keys below are pinned by TestTranscriptEntryWireFormatIsFrozen, and
+// TestTranscriptEntryMirrorsEveryMessageField fails if llm.Message gains a
+// field this mirror does not map, so a field change cannot slip through
+// silently at the FromMessages/Append boundary.
+//
+// The alternative - TranscriptEntry{Timestamp; Message llm.Message},
+// embedding the real message - would put the two history authorities on one
+// shape, but it changes the on-disk format for every external reader and so
+// requires the format-version field owned by mux#yp6a together with the
+// coordinated breaking release that carries it. This item keeps the mirror
+// because the widened Text field (mux#bq4e) already makes it lossless for
+// the current llm.Message; taking the embedded shape is the follow-up for
+// the yp6a version bump, at which point the two tests above are re-recorded
+// rather than silently updated.
+//
 // Content and Text mirror llm.Message's two independent payload fields:
 // Content carries Message.Blocks (structured content, under the historical
 // "content" JSON key) and Text carries Message.Content (plain text, under
