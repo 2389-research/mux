@@ -1046,6 +1046,7 @@ func TestGeminiStreamThoughtParts(t *testing.T) {
 	}
 	var deltas []string
 	var deltaKinds []StreamDeltaKind
+	var streamedText string
 	var streamedThinking string
 	var final *Response
 	for e := range ch {
@@ -1056,21 +1057,28 @@ func TestGeminiStreamThoughtParts(t *testing.T) {
 		case EventContentDelta:
 			deltas = append(deltas, e.Text)
 			deltaKinds = append(deltaKinds, e.DeltaKind)
-		case EventContentStop:
-			if e.Block != nil && e.Block.Type == ContentTypeThinking {
-				streamedThinking += e.Block.Thinking
+			// Thought content is now a typed thinking delta (s61b); only
+			// text-kind deltas count as answer text.
+			switch e.DeltaKind {
+			case StreamDeltaText:
+				streamedText += e.Text
+			case StreamDeltaThinking:
+				streamedThinking += e.Text
 			}
+		case EventContentStop:
+			// Thinking text arrives as a typed delta (s61b), so the stop
+			// block is not re-counted here; it is covered by the final
+			// response assertions below.
 		case EventMessageStop:
 			final = e.Response
 		}
 	}
 
-	streamed := strings.Join(deltas, "")
-	if strings.Contains(streamed, "reasoning") {
-		t.Errorf("thought text leaked into EventContentDelta: deltas %q kinds %v", deltas, deltaKinds)
+	if strings.Contains(streamedText, "reasoning") {
+		t.Errorf("thought text leaked into answer deltas: deltas %q kinds %v", deltas, deltaKinds)
 	}
-	if streamed != "answer" {
-		t.Errorf("streamed text = %q, want %q", streamed, "answer")
+	if streamedText != "answer" {
+		t.Errorf("streamed text = %q, want %q", streamedText, "answer")
 	}
 	if streamedThinking != "reasoning" {
 		t.Errorf("streamed thinking = %q, want %q", streamedThinking, "reasoning")
