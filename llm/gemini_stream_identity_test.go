@@ -5,12 +5,15 @@ package llm
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/tidwall/gjson"
 )
 
 // geminiFlushedSSEServer serves each payload as its own flushed SSE frame, so
@@ -327,6 +330,125 @@ func TestGeminiStreamConflictingCall(t *testing.T) {
 			t.Fatal("expected a protocol error for a changed duplicate call, got none")
 		}
 		assertGeminiProtocolError(t, gotError)
+	})
+}
+
+// TestGeminiStreamSignedContinuationStaysSeparate pins that a replay-bearing
+// part is never merged into: its opaque signature belongs to exactly the bytes
+// the wire carried, so a continuation part must open its own block. Merging the
+// continuation into the signed block would silently drop it from the next
+// request, because convertMessage replays the envelope verbatim instead of the
+// normalized (now extended) text — losing model output with no error or log.
+func TestGeminiStreamSignedContinuationStaysSeparate(t *testing.T) {
+	signature := base64.StdEncoding.EncodeToString([]byte("sig"))
+
+	// parts carries the split-text bodies for the text channel and the
+	// split-thought bodies for the thinking channel; channel selects whether
+	// the signed first part is public text or private thought.
+	run := func(t *testing.T, signedPart, continuationPart string, channel ContentType) {
+		t.Helper()
+		server := geminiFlushedSSEServer(t,
+			`{"candidates":[{"content":{"role":"model","parts":[`+signedPart+`]}}]}`,
+			`{"candidates":[{"content":{"role":"model","parts":[`+continuationPart+`]}}]}`,
+			`{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}]}`,
+		)
+		defer server.Close()
+
+		client, err := NewGeminiClientWithBaseURL(context.Background(), "fixture", "fixture", server.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		events, err := client.CreateMessageStream(context.Background(), &Request{Messages: []Message{NewUserMessage("hi")}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var final *Response
+		var deltas []string
+		for event := range events {
+			if event.Type == EventError {
+				t.Fatalf("unexpected error: %v", event.Error)
+			}
+			if event.Type == EventContentDelta {
+				deltas = append(deltas, event.Text)
+			}
+			if event.Type == EventMessageStop {
+				final = event.Response
+			}
+		}
+		if final == nil {
+			t.Fatal("stream produced no final response")
+		}
+		if len(final.Content) != 2 {
+			t.Fatalf("content = %+v, want the signed part and the continuation as two blocks", final.Content)
+		}
+		signed, cont := final.Content[0], final.Content[1]
+		if signed.Replay == nil {
+			t.Fatalf("signed block lost its replay envelope: %+v", signed)
+		}
+		if cont.Replay != nil {
+			t.Errorf("continuation must stay a normalized block, got replay %+v", cont.Replay)
+		}
+		// The continuation's bytes must not have been appended into the signed
+		// block's normalized fields: those fields are what a caller authors
+		// from, while the replay envelope governs the wire.
+		var signedText, contText string
+		if channel == ContentTypeThinking {
+			signedText, contText = signed.Thinking, cont.Thinking
+		} else {
+			signedText, contText = signed.Text, cont.Text
+		}
+		if signedText != "A" || contText != "B" {
+			t.Errorf("split text = %q/%q, want A/B (signed block must keep its own bytes)", signedText, contText)
+		}
+		if len(deltas) != 2 || deltas[0] != "A" || deltas[1] != "B" {
+			t.Errorf("deltas = %q, want the continuation delivered as its own delta", deltas)
+		}
+		// The signed block's normalized view must agree with its own envelope:
+		// an envelope is authoritative on the wire, so a normalized field
+		// claiming bytes the envelope lacks is exactly the silent divergence
+		// this guards against.
+		if envelopeText := gjson.GetBytes(signed.Replay.Data, "text").String(); envelopeText != signedText {
+			t.Errorf("signed block text %q disagrees with its replay envelope %q", signedText, envelopeText)
+		}
+
+		// The real acceptance criterion for public text: the next request must
+		// carry both the signed part and the continuation. (Normalized thinking
+		// is private and deliberately never replayed, so only text is checked
+		// here.)
+		if channel == ContentTypeText {
+			contents, _, err := convertGeminiRequest(&Request{
+				Model:    "gemini-2.5-pro",
+				Messages: []Message{{Role: RoleAssistant, Blocks: final.Content}},
+			})
+			if err != nil {
+				t.Fatalf("convertGeminiRequest: %v", err)
+			}
+			body, err := json.Marshal(contents[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			wireText := gjson.GetBytes(body, "parts.#.text").Array()
+			if len(wireText) != 2 || wireText[0].String() != "A" || wireText[1].String() != "B" {
+				t.Fatalf("replayed parts = %v, want the signed A and the continuation B; body=%s", wireText, body)
+			}
+			if gjson.GetBytes(body, "parts.0.thoughtSignature").String() != signature {
+				t.Errorf("signed part's signature changed; body=%s", body)
+			}
+			if gjson.GetBytes(body, "parts.1.thoughtSignature").Exists() {
+				t.Errorf("continuation part must not carry a signature; body=%s", body)
+			}
+		}
+	}
+
+	t.Run("text", func(t *testing.T) {
+		run(t,
+			`{"text":"A","thoughtSignature":"`+signature+`"}`,
+			`{"text":"B"}`, ContentTypeText)
+	})
+	t.Run("thinking", func(t *testing.T) {
+		run(t,
+			`{"text":"A","thought":true,"thoughtSignature":"`+signature+`"}`,
+			`{"text":"B","thought":true}`, ContentTypeThinking)
 	})
 }
 

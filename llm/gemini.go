@@ -526,6 +526,12 @@ func (a *geminiStreamAccumulator) add(chunk *genai.GenerateContentResponse, mode
 // continuation from a later chunk. Only unsigned plain text and thinking
 // qualify: a tool call is a complete observation, and a part carrying a replay
 // envelope must stay its own block so the envelope is never replayed twice.
+//
+// The open block is checked too, at the observe call site: a replay envelope
+// is authoritative on the wire, so appending a continuation into a signed block
+// would extend its normalized text without extending the envelope, and
+// convertMessage replays the envelope verbatim — silently dropping those bytes
+// from the next request.
 func geminiMergeable(block ContentBlock) bool {
 	return block.Replay == nil && (block.Type == ContentTypeText || block.Type == ContentTypeThinking)
 }
@@ -576,7 +582,10 @@ func (a *geminiStreamAccumulator) observe(block ContentBlock, allowMerge bool) (
 
 	if allowMerge && a.openIndex >= 0 && geminiMergeable(block) {
 		open := &a.response.Content[a.openIndex]
-		if open.Type == block.Type {
+		// A signed block's continuation must not append here: the replay
+		// envelope wins on the wire, so the appended bytes would never be
+		// sent. Let the continuation open its own unsigned block instead.
+		if open.Type == block.Type && open.Replay == nil {
 			// Continuation of the same channel across a chunk boundary: append
 			// and emit only the delta, since the block already started.
 			if block.Type == ContentTypeThinking {
