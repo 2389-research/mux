@@ -164,6 +164,51 @@ func TestChatAdaptersStreamIdentity(t *testing.T) {
 	}
 }
 
+// TestChatAdaptersStreamStopBlocksAreIndependent pins the adapter path for the
+// same property: a consumer that mutates a tool argument on the block delivered
+// by a stop event must not rewrite the terminal Response of the same stream.
+// Both clients are exercised over the real SDK transport.
+func TestChatAdaptersStreamStopBlocksAreIndependent(t *testing.T) {
+	for _, provider := range []string{"ollama", "openrouter"} {
+		t.Run(provider, func(t *testing.T) {
+			server := chatSSEServer(t, chatStreamFixtureChunks...)
+			defer server.Close()
+
+			client := newChatFixtureClient(provider, server.URL)
+			ch, err := client.CreateMessageStream(context.Background(), &Request{Messages: []Message{NewUserMessage("hi")}})
+			if err != nil {
+				t.Fatalf("CreateMessageStream: %v", err)
+			}
+
+			var final *Response
+			var stops int
+			for event := range ch {
+				switch event.Type {
+				case EventError:
+					t.Fatalf("unexpected error event: %v", event.Error)
+				case EventContentStop:
+					if event.Block != nil && event.Block.Type == ContentTypeToolUse {
+						stops++
+						event.Block.Input["path"] = "REDACTED-BY-CONSUMER"
+					}
+				case EventMessageStop:
+					final = event.Response
+				}
+			}
+			if stops != 2 {
+				t.Fatalf("delivered %d tool stop blocks, want 2", stops)
+			}
+			if final == nil {
+				t.Fatal("stream ended without a terminal response")
+			}
+			uses := final.ToolUses()
+			if len(uses) != 2 || uses[0].Input["path"] != "a" || uses[1].Input["path"] != "b" {
+				t.Fatalf("final response was rewritten through a delivered stop block: %+v", uses)
+			}
+		})
+	}
+}
+
 // TestChatAdaptersStreamUnicodeSplitWrites pins that multi-byte text survives a
 // transport boundary inside the SDK's own reader: each fragment arrives as its
 // own flushed frame, and the continuation still merges into one block with one

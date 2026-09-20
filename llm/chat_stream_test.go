@@ -203,6 +203,37 @@ func TestChatStreamMalformed(t *testing.T) {
 	}
 }
 
+// TestChatStreamStopBlocksAreIndependent pins that the block delivered on a
+// stop event is an independent copy of accumulator state: a consumer that
+// normalizes or redacts a tool argument on the block it received must not
+// silently rewrite the terminal Response of the same stream.
+func TestChatStreamStopBlocksAreIndependent(t *testing.T) {
+	a := newChatStreamAccumulator("ollama")
+	got, resp, err := feedChatStream(t, a, []string{
+		`{"id":"r1","choices":[{"index":0,"delta":{"content":"hi","tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"read","arguments":"{\"path\":\"a\"}"}}]}}]}`,
+		`{"id":"r1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stops int
+	for _, event := range got {
+		if event.Type != EventContentStop || event.Block == nil || event.Block.Type != ContentTypeToolUse {
+			continue
+		}
+		stops++
+		event.Block.Input["path"] = "REDACTED-BY-CONSUMER"
+	}
+	if stops != 1 {
+		t.Fatalf("delivered %d tool stop blocks, want 1", stops)
+	}
+	uses := resp.ToolUses()
+	if len(uses) != 1 || uses[0].Input["path"] != "a" {
+		t.Fatalf("final response was rewritten through the delivered stop block: %+v", uses)
+	}
+}
+
 // TestChatStreamMalformedReasonsAreSanitized pins that no protocol failure
 // embeds accumulated tool arguments in its message: the reasons are fixed
 // strings, so a failure can be reported without leaking provider payload.

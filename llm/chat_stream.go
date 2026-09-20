@@ -238,7 +238,7 @@ func (a *chatStreamAccumulator) stopEvents() []StreamEvent {
 			Type:    EventContentStop,
 			Index:   0,
 			BlockID: chatTextBlockID(),
-			Block:   &ContentBlock{Type: ContentTypeText, Text: a.text.String()},
+			Block:   copyContentBlock(ContentBlock{Type: ContentTypeText, Text: a.text.String()}),
 		})
 	}
 	for _, index := range a.toolOrder {
@@ -246,7 +246,7 @@ func (a *chatStreamAccumulator) stopEvents() []StreamEvent {
 			Type:    EventContentStop,
 			Index:   index,
 			BlockID: chatToolBlockID(index),
-			Block:   a.toolBlock(index),
+			Block:   copyContentBlock(*a.toolBlock(index)),
 		})
 	}
 	return events
@@ -254,7 +254,9 @@ func (a *chatStreamAccumulator) stopEvents() []StreamEvent {
 
 // toolBlock renders one validated tool call as a ContentBlock, in the same
 // shape convertOpenAIResponse produces. It is called only after
-// finalizeTools, so the call has a complete identity and parsed input.
+// finalizeTools, so the call has a complete identity and parsed input. Its
+// Input map aliases accumulator state, so a block handed to a consumer must be
+// copied first (copyContentBlock), exactly as the sibling stream adapters do.
 func (a *chatStreamAccumulator) toolBlock(index int) *ContentBlock {
 	tool := a.tools[index]
 	block := ContentBlock{
