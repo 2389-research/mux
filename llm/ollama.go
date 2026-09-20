@@ -59,6 +59,14 @@ func (o *OllamaClient) CreateMessage(ctx context.Context, req *Request) (*Respon
 	if err != nil {
 		return nil, err
 	}
+	// Validate every returned call's argument document before converting.
+	// convertOpenAIResponse silently drops a call whose arguments do not
+	// parse, which is only safe once this path has refused the response
+	// outright: a malformed document must not be erased here and then
+	// reported as a successful turn with the call missing.
+	if err := validateChatToolInputs("ollama", resp); err != nil {
+		return nil, err
+	}
 
 	return convertOpenAIResponse(resp), nil
 }
@@ -93,7 +101,7 @@ func (o *OllamaClient) CreateMessageStream(ctx context.Context, req *Request) (<
 			close(eventChan)
 		}()
 
-		var acc openai.ChatCompletionAccumulator
+		acc := newChatStreamAccumulator("ollama")
 
 		// Send message start
 		if !sendStreamEvent(ctx, eventChan, StreamEvent{
@@ -103,38 +111,13 @@ func (o *OllamaClient) CreateMessageStream(ctx context.Context, req *Request) (<
 		}
 
 		for stream.Next() {
-			chunk := stream.Current()
-			acc.AddChunk(chunk)
-
-			// Emit text deltas
-			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
-				if !sendStreamEvent(ctx, eventChan, StreamEvent{
-					Type: EventContentDelta,
-					Text: chunk.Choices[0].Delta.Content,
-				}) {
-					return
-				}
+			events, err := acc.Add(stream.Current())
+			if err != nil {
+				sendStreamEvent(ctx, eventChan, StreamEvent{Type: EventError, Error: err})
+				return
 			}
-
-			// Check for completed tool calls
-			if toolCall, ok := acc.JustFinishedToolCall(); ok {
-				// Decoding preserves numeric literal text, so a large
-				// integer in the arguments does not round through float64.
-				input, err := decodeToolInputObject([]byte(toolCall.Arguments))
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to parse tool call arguments for %s: %v\n", toolCall.Name, err)
-					input = make(map[string]any)
-				}
-
-				if !sendStreamEvent(ctx, eventChan, StreamEvent{
-					Type: EventContentStop,
-					Block: &ContentBlock{
-						Type:  ContentTypeToolUse,
-						ID:    toolCall.ID,
-						Name:  toolCall.Name,
-						Input: input,
-					},
-				}) {
+			for _, event := range events {
+				if !sendStreamEvent(ctx, eventChan, event) {
 					return
 				}
 			}
@@ -148,10 +131,19 @@ func (o *OllamaClient) CreateMessageStream(ctx context.Context, req *Request) (<
 			return
 		}
 
-		// Final message with complete response
+		// The terminal event is emitted once, and only after Finish has
+		// validated every accumulated fragment: a stream that ended early or
+		// carried an unexecutable call must fail instead of reporting a
+		// successful turn.
+		response, refs, err := acc.Finish()
+		if err != nil {
+			sendStreamEvent(ctx, eventChan, StreamEvent{Type: EventError, Error: err})
+			return
+		}
 		sendStreamEvent(ctx, eventChan, StreamEvent{
-			Type:     EventMessageStop,
-			Response: convertOpenAIResponse(&acc.ChatCompletion),
+			Type:        EventMessageStop,
+			Response:    response,
+			FinalBlocks: refs,
 		})
 	}()
 
