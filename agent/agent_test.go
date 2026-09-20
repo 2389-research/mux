@@ -9,47 +9,77 @@ import (
 	"testing"
 
 	"github.com/2389-research/mux/agent"
+	"github.com/2389-research/mux/internal/llmtest"
 	"github.com/2389-research/mux/llm"
 	"github.com/2389-research/mux/orchestrator"
 	"github.com/2389-research/mux/session"
 	"github.com/2389-research/mux/tool"
 )
 
-// mockClient implements llm.Client for testing
-type mockClient struct {
-	response *llm.Response
+// scriptedResponse returns the shared llmtest.Client answering every call with
+// one canned response: the nonstream path returns it directly, the stream path
+// emits a single terminal message_stop carrying it. Tests that only need a
+// benign LLM stand-in use this instead of their own llm.Client implementation.
+func scriptedResponse(response *llm.Response) *llmtest.Client {
+	client, _ := countingResponseClient(response)
+	return client
 }
 
-func (m *mockClient) CreateMessage(ctx context.Context, req *llm.Request) (*llm.Response, error) {
-	return m.response, nil
+// clientCallCounts records which llm.Client entry points a scripted client was
+// driven through, so a test can assert the streaming path was chosen.
+type clientCallCounts struct {
+	create int
+	stream int
 }
 
-func (m *mockClient) CreateMessageStream(ctx context.Context, req *llm.Request) (<-chan llm.StreamEvent, error) {
-	return nil, nil
+// countingResponseClient is scriptedResponse plus per-path call counters.
+func countingResponseClient(response *llm.Response) (*llmtest.Client, *clientCallCounts) {
+	counts := &clientCallCounts{}
+	client := &llmtest.Client{
+		Media: llm.FullCapabilities(),
+		Respond: func(context.Context, *llm.Request) (*llm.Response, error) {
+			counts.create++
+			return response, nil
+		},
+		Stream: func(context.Context, *llm.Request) (<-chan llm.StreamEvent, error) {
+			counts.stream++
+			ch := make(chan llm.StreamEvent, 1)
+			ch <- llm.StreamEvent{Type: llm.EventMessageStop, Response: response}
+			close(ch)
+			return ch, nil
+		},
+	}
+	return client, counts
 }
 
-func (m *mockClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
-
-type recordingStreamClient struct {
-	response          *llm.Response
-	createCalls       int
-	createStreamCalls int
+// queuedResponses scripts the shared client with a fixed sequence, repeating the
+// final response for any further call (the suspend/resume flows need that).
+func queuedResponses(responses ...*llm.Response) *llmtest.Client {
+	var mu sync.Mutex
+	index := 0
+	return &llmtest.Client{
+		Media: llm.FullCapabilities(),
+		Respond: func(context.Context, *llm.Request) (*llm.Response, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			resp := responses[index]
+			if index < len(responses)-1 {
+				index++
+			}
+			return resp, nil
+		},
+	}
 }
 
-func (r *recordingStreamClient) CreateMessage(ctx context.Context, req *llm.Request) (*llm.Response, error) {
-	r.createCalls++
-	return r.response, nil
+// lastRequest returns the most recent request the scripted client recorded, or
+// nil if it never saw one.
+func lastRequest(client *llmtest.Client) *llm.Request {
+	requests := client.Requests()
+	if len(requests) == 0 {
+		return nil
+	}
+	return requests[len(requests)-1]
 }
-
-func (r *recordingStreamClient) CreateMessageStream(ctx context.Context, req *llm.Request) (<-chan llm.StreamEvent, error) {
-	r.createStreamCalls++
-	events := make(chan llm.StreamEvent, 1)
-	events <- llm.StreamEvent{Type: llm.EventMessageStop, Response: r.response}
-	close(events)
-	return events, nil
-}
-
-func (r *recordingStreamClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
 
 // mockTool implements tool.Tool for testing
 type mockTool struct {
@@ -68,11 +98,9 @@ func TestNewAgent(t *testing.T) {
 	registry := tool.NewRegistry()
 	registry.Register(&mockTool{name: "read_file"})
 
-	client := &mockClient{
-		response: &llm.Response{
-			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "hello"}},
-		},
-	}
+	client := scriptedResponse(&llm.Response{
+		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "hello"}},
+	})
 
 	a := agent.New(agent.Config{
 		Name:      "test-agent",
@@ -95,11 +123,9 @@ func TestNewAgentPanicsOnNilRegistry(t *testing.T) {
 		}
 	}()
 
-	client := &mockClient{
-		response: &llm.Response{
-			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "hello"}},
-		},
-	}
+	client := scriptedResponse(&llm.Response{
+		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "hello"}},
+	})
 
 	agent.New(agent.Config{
 		Name:      "test-agent",
@@ -132,11 +158,9 @@ func TestNewAgentPanicsOnEmptyName(t *testing.T) {
 	}()
 
 	registry := tool.NewRegistry()
-	client := &mockClient{
-		response: &llm.Response{
-			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "hello"}},
-		},
-	}
+	client := scriptedResponse(&llm.Response{
+		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "hello"}},
+	})
 
 	agent.New(agent.Config{
 		Name:      "",
@@ -147,11 +171,9 @@ func TestNewAgentPanicsOnEmptyName(t *testing.T) {
 
 func TestNewAgentWithMaxIterations(t *testing.T) {
 	registry := tool.NewRegistry()
-	client := &mockClient{
-		response: &llm.Response{
-			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "hello"}},
-		},
-	}
+	client := scriptedResponse(&llm.Response{
+		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "hello"}},
+	})
 
 	a := agent.New(agent.Config{
 		Name:          "test-agent",
@@ -173,11 +195,9 @@ func TestNewAgentWithMaxIterations(t *testing.T) {
 
 func TestAgentConfigStream(t *testing.T) {
 	registry := tool.NewRegistry()
-	client := &recordingStreamClient{
-		response: &llm.Response{
-			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "streamed"}},
-		},
-	}
+	client, calls := countingResponseClient(&llm.Response{
+		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "streamed"}},
+	})
 
 	a := agent.New(agent.Config{
 		Name:      "stream-agent",
@@ -190,11 +210,11 @@ func TestAgentConfigStream(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if client.createStreamCalls != 1 {
-		t.Errorf("expected CreateMessageStream to be called once, got %d", client.createStreamCalls)
+	if calls.stream != 1 {
+		t.Errorf("expected CreateMessageStream to be called once, got %d", calls.stream)
 	}
-	if client.createCalls != 0 {
-		t.Errorf("expected CreateMessage not to be called, got %d", client.createCalls)
+	if calls.create != 0 {
+		t.Errorf("expected CreateMessage not to be called, got %d", calls.create)
 	}
 }
 
@@ -202,11 +222,9 @@ func TestNewAgentWithCustomApprovalFunc(t *testing.T) {
 	registry := tool.NewRegistry()
 	registry.Register(&mockTool{name: "dangerous_tool", requiresApproval: true})
 
-	client := &mockClient{
-		response: &llm.Response{
-			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "hello"}},
-		},
-	}
+	client := scriptedResponse(&llm.Response{
+		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "hello"}},
+	})
 
 	approvalCalled := false
 	approvalFunc := func(ctx context.Context, t tool.Tool, params map[string]any) (bool, error) {
@@ -245,11 +263,9 @@ func TestInitWithAllowedTools(t *testing.T) {
 	registry.Register(&mockTool{name: "write_file"})
 	registry.Register(&mockTool{name: "bash"})
 
-	client := &mockClient{
-		response: &llm.Response{
-			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "hello"}},
-		},
-	}
+	client := scriptedResponse(&llm.Response{
+		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "hello"}},
+	})
 
 	a := agent.New(agent.Config{
 		Name:         "test-agent",
@@ -274,11 +290,9 @@ func TestInitWithDeniedTools(t *testing.T) {
 	registry.Register(&mockTool{name: "read_file"})
 	registry.Register(&mockTool{name: "dangerous_tool"})
 
-	client := &mockClient{
-		response: &llm.Response{
-			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "hello"}},
-		},
-	}
+	client := scriptedResponse(&llm.Response{
+		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "hello"}},
+	})
 
 	a := agent.New(agent.Config{
 		Name:        "test-agent",
@@ -300,11 +314,9 @@ func TestInitWithDeniedTools(t *testing.T) {
 
 func TestInitWithCustomSystemPrompt(t *testing.T) {
 	registry := tool.NewRegistry()
-	client := &mockClient{
-		response: &llm.Response{
-			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "hello"}},
-		},
-	}
+	client := scriptedResponse(&llm.Response{
+		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "hello"}},
+	})
 
 	customPrompt := "You are a specialized agent for testing."
 
@@ -332,11 +344,9 @@ func TestInitWithAllConfigOptions(t *testing.T) {
 	registry.Register(&mockTool{name: "write_file"})
 	registry.Register(&mockTool{name: "bash"})
 
-	client := &mockClient{
-		response: &llm.Response{
-			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "hello"}},
-		},
-	}
+	client := scriptedResponse(&llm.Response{
+		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "hello"}},
+	})
 
 	approvalFunc := func(ctx context.Context, t tool.Tool, params map[string]any) (bool, error) {
 		return true, nil
@@ -378,11 +388,9 @@ func TestInitWithAllConfigOptions(t *testing.T) {
 
 func TestAgentRun(t *testing.T) {
 	registry := tool.NewRegistry()
-	client := &mockClient{
-		response: &llm.Response{
-			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "response"}},
-		},
-	}
+	client := scriptedResponse(&llm.Response{
+		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "response"}},
+	})
 
 	a := agent.New(agent.Config{
 		Name:      "runner",
@@ -408,11 +416,9 @@ func TestAgentSpawnChild(t *testing.T) {
 	registry.Register(&mockTool{name: "write_file"})
 	registry.Register(&mockTool{name: "bash"})
 
-	client := &mockClient{
-		response: &llm.Response{
-			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
-		},
-	}
+	client := scriptedResponse(&llm.Response{
+		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
+	})
 
 	parent := agent.New(agent.Config{
 		Name:         "parent",
@@ -446,11 +452,9 @@ func TestAgentSpawnChildInheritsTools(t *testing.T) {
 	registry.Register(&mockTool{name: "read_file"})
 	registry.Register(&mockTool{name: "bash"})
 
-	client := &mockClient{
-		response: &llm.Response{
-			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
-		},
-	}
+	client := scriptedResponse(&llm.Response{
+		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
+	})
 
 	parent := agent.New(agent.Config{
 		Name:         "parent",
@@ -479,11 +483,9 @@ func TestAgentSpawnChildDeniedAccumulates(t *testing.T) {
 	registry.Register(&mockTool{name: "bash"})
 	registry.Register(&mockTool{name: "rm"})
 
-	client := &mockClient{
-		response: &llm.Response{
-			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
-		},
-	}
+	client := scriptedResponse(&llm.Response{
+		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
+	})
 
 	parent := agent.New(agent.Config{
 		Name:        "parent",
@@ -512,11 +514,9 @@ func TestAgentSpawnChildInvalidTools(t *testing.T) {
 	registry.Register(&mockTool{name: "read_file"})
 	registry.Register(&mockTool{name: "bash"})
 
-	client := &mockClient{
-		response: &llm.Response{
-			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
-		},
-	}
+	client := scriptedResponse(&llm.Response{
+		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
+	})
 
 	parent := agent.New(agent.Config{
 		Name:         "parent",
@@ -541,11 +541,9 @@ func TestMaximumHierarchyDepth(t *testing.T) {
 	registry := tool.NewRegistry()
 	registry.Register(&mockTool{name: "read_file"})
 
-	client := &mockClient{
-		response: &llm.Response{
-			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
-		},
-	}
+	client := scriptedResponse(&llm.Response{
+		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
+	})
 
 	// Create a deep hierarchy
 	root := agent.New(agent.Config{
@@ -591,11 +589,9 @@ func TestMaximumHierarchyDepth(t *testing.T) {
 // TestCircularDependencyPrevention verifies that parent-child relationships cannot form cycles.
 func TestCircularDependencyPrevention(t *testing.T) {
 	registry := tool.NewRegistry()
-	client := &mockClient{
-		response: &llm.Response{
-			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
-		},
-	}
+	client := scriptedResponse(&llm.Response{
+		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
+	})
 
 	parent := agent.New(agent.Config{
 		Name:      "parent",
@@ -638,11 +634,9 @@ func TestAgentCleanupWhenParentDestroyed(t *testing.T) {
 	registry := tool.NewRegistry()
 	registry.Register(&mockTool{name: "read_file"})
 
-	client := &mockClient{
-		response: &llm.Response{
-			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
-		},
-	}
+	client := scriptedResponse(&llm.Response{
+		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
+	})
 
 	parent := agent.New(agent.Config{
 		Name:      "parent",
@@ -761,11 +755,9 @@ func TestToolInheritanceComplexCombinations(t *testing.T) {
 			registry.Register(&mockTool{name: "tool2"})
 			registry.Register(&mockTool{name: "tool3"})
 
-			client := &mockClient{
-				response: &llm.Response{
-					Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
-				},
-			}
+			client := scriptedResponse(&llm.Response{
+				Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
+			})
 
 			parent := agent.New(agent.Config{
 				Name:         "parent",
@@ -814,11 +806,9 @@ func TestChildAgentInvalidConfigurations(t *testing.T) {
 	registry := tool.NewRegistry()
 	registry.Register(&mockTool{name: "read"})
 
-	client := &mockClient{
-		response: &llm.Response{
-			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
-		},
-	}
+	client := scriptedResponse(&llm.Response{
+		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
+	})
 
 	parent := agent.New(agent.Config{
 		Name:         "parent",
@@ -875,11 +865,9 @@ func TestConcurrentChildSpawning(t *testing.T) {
 	registry := tool.NewRegistry()
 	registry.Register(&mockTool{name: "read"})
 
-	client := &mockClient{
-		response: &llm.Response{
-			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
-		},
-	}
+	client := scriptedResponse(&llm.Response{
+		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
+	})
 
 	parent := agent.New(agent.Config{
 		Name:      "parent",
@@ -938,11 +926,9 @@ func TestConcurrentChildSpawning(t *testing.T) {
 // TestMemoryLeakPreventionLargeHierarchy tests that large hierarchies don't leak memory.
 func TestMemoryLeakPreventionLargeHierarchy(t *testing.T) {
 	registry := tool.NewRegistry()
-	client := &mockClient{
-		response: &llm.Response{
-			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
-		},
-	}
+	client := scriptedResponse(&llm.Response{
+		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
+	})
 
 	root := agent.New(agent.Config{
 		Name:      "root",
@@ -1036,11 +1022,9 @@ func TestMemoryLeakPreventionLargeHierarchy(t *testing.T) {
 // TestChildrenIsolation tests that Children() returns a copy and doesn't allow external modification.
 func TestChildrenIsolation(t *testing.T) {
 	registry := tool.NewRegistry()
-	client := &mockClient{
-		response: &llm.Response{
-			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
-		},
-	}
+	client := scriptedResponse(&llm.Response{
+		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
+	})
 
 	parent := agent.New(agent.Config{
 		Name:      "parent",
@@ -1085,11 +1069,9 @@ func TestChildrenIsolation(t *testing.T) {
 // TestRemoveChild tests removing a specific child agent.
 func TestRemoveChild(t *testing.T) {
 	registry := tool.NewRegistry()
-	client := &mockClient{
-		response: &llm.Response{
-			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
-		},
-	}
+	client := scriptedResponse(&llm.Response{
+		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
+	})
 
 	parent := agent.New(agent.Config{
 		Name:      "parent",
@@ -1172,11 +1154,9 @@ func TestRemoveChild(t *testing.T) {
 // TestRemoveAllChildren tests removing all child agents.
 func TestRemoveAllChildren(t *testing.T) {
 	registry := tool.NewRegistry()
-	client := &mockClient{
-		response: &llm.Response{
-			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
-		},
-	}
+	client := scriptedResponse(&llm.Response{
+		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
+	})
 
 	parent := agent.New(agent.Config{
 		Name:      "parent",
@@ -1218,11 +1198,9 @@ func TestRemoveAllChildren(t *testing.T) {
 // TestConcurrentChildRemoval tests thread-safety of removing children concurrently.
 func TestConcurrentChildRemoval(t *testing.T) {
 	registry := tool.NewRegistry()
-	client := &mockClient{
-		response: &llm.Response{
-			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
-		},
-	}
+	client := scriptedResponse(&llm.Response{
+		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
+	})
 
 	parent := agent.New(agent.Config{
 		Name:      "parent",
@@ -1259,31 +1237,12 @@ func TestConcurrentChildRemoval(t *testing.T) {
 	}
 }
 
-// capturingClient captures the last request sent to CreateMessage.
-type capturingClient struct {
-	lastRequest *llm.Request
-	response    *llm.Response
-}
-
-func (c *capturingClient) CreateMessage(ctx context.Context, req *llm.Request) (*llm.Response, error) {
-	c.lastRequest = req
-	return c.response, nil
-}
-
-func (c *capturingClient) CreateMessageStream(ctx context.Context, req *llm.Request) (<-chan llm.StreamEvent, error) {
-	return nil, nil
-}
-
-func (c *capturingClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
-
 func TestAgentThinkingSettingsPassthrough(t *testing.T) {
 	registry := tool.NewRegistry()
 
-	client := &capturingClient{
-		response: &llm.Response{
-			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
-		},
-	}
+	client := scriptedResponse(&llm.Response{
+		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
+	})
 
 	const thinkingBudget = 4096
 
@@ -1302,36 +1261,16 @@ func TestAgentThinkingSettingsPassthrough(t *testing.T) {
 		t.Fatalf("Run failed: %v", err)
 	}
 
-	if client.lastRequest == nil {
+	if lastRequest(client) == nil {
 		t.Fatal("no request was captured")
 	}
-	if client.lastRequest.Thinking == nil {
+	if lastRequest(client).Thinking == nil {
 		t.Fatal("expected Thinking to be set on request, got nil")
 	}
-	if client.lastRequest.Thinking.Budget != thinkingBudget {
-		t.Errorf("expected Thinking.Budget %d, got %d", thinkingBudget, client.lastRequest.Thinking.Budget)
+	if lastRequest(client).Thinking.Budget != thinkingBudget {
+		t.Errorf("expected Thinking.Budget %d, got %d", thinkingBudget, lastRequest(client).Thinking.Budget)
 	}
 }
-
-// scriptedClient plays back a fixed sequence of LLM responses for testing suspend/resume flows.
-type scriptedClient struct {
-	responses []*llm.Response
-	idx       int
-}
-
-func (c *scriptedClient) CreateMessage(ctx context.Context, req *llm.Request) (*llm.Response, error) {
-	r := c.responses[c.idx]
-	if c.idx < len(c.responses)-1 {
-		c.idx++
-	}
-	return r, nil
-}
-
-func (c *scriptedClient) CreateMessageStream(ctx context.Context, req *llm.Request) (<-chan llm.StreamEvent, error) {
-	return nil, nil
-}
-
-func (c *scriptedClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
 
 func TestAgent_SuspendAndResume(t *testing.T) {
 	store := session.NewFileStore(t.TempDir())
@@ -1341,18 +1280,16 @@ func TestAgent_SuspendAndResume(t *testing.T) {
 
 	// Two-phase client: first call returns tool_use (triggers suspension),
 	// second call returns end_turn (completes after resume+approval).
-	client := &scriptedClient{
-		responses: []*llm.Response{
-			{
-				Content:    []llm.ContentBlock{{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "deploy", Input: map[string]any{}}},
-				StopReason: llm.StopReasonToolUse,
-			},
-			{
-				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "deployed"}},
-				StopReason: llm.StopReasonEndTurn,
-			},
+	client := queuedResponses([]*llm.Response{
+		{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "deploy", Input: map[string]any{}}},
+			StopReason: llm.StopReasonToolUse,
 		},
-	}
+		{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "deployed"}},
+			StopReason: llm.StopReasonEndTurn,
+		},
+	}...)
 
 	ag := agent.New(agent.Config{
 		Name:          "test-agent",

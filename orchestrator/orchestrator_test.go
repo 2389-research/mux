@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/2389-research/mux/internal/llmtest"
 	"github.com/2389-research/mux/llm"
 	"github.com/2389-research/mux/orchestrator"
 	"github.com/2389-research/mux/session"
@@ -163,35 +164,30 @@ func TestEventBusMultipleSubscribers(t *testing.T) {
 	bus.Close()
 }
 
-// Add mock LLM client for testing
-type mockLLMClient struct {
-	responses []*llm.Response
-	callIndex int
-}
-
-func (m *mockLLMClient) CreateMessage(ctx context.Context, req *llm.Request) (*llm.Response, error) {
-	if m.callIndex >= len(m.responses) {
-		return &llm.Response{
-			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
-			StopReason: llm.StopReasonEndTurn,
-		}, nil
+// scriptedLLM scripts the shared client with this suite's long-standing queue
+// behavior: return each canned response in turn, then answer "done" (end_turn)
+// once the queue is exhausted. A nil/empty queue is stateless, which is what
+// tests that only care about lifecycle use.
+func scriptedLLM(responses []*llm.Response) *llmtest.Client {
+	var mu sync.Mutex
+	index := 0
+	return &llmtest.Client{
+		Media: llm.FullCapabilities(),
+		Respond: func(context.Context, *llm.Request) (*llm.Response, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if index >= len(responses) {
+				return &llm.Response{
+					Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
+					StopReason: llm.StopReasonEndTurn,
+				}, nil
+			}
+			resp := responses[index]
+			index++
+			return resp, nil
+		},
 	}
-	resp := m.responses[m.callIndex]
-	m.callIndex++
-	return resp, nil
 }
-
-func (m *mockLLMClient) CreateMessageStream(ctx context.Context, req *llm.Request) (<-chan llm.StreamEvent, error) {
-	ch := make(chan llm.StreamEvent)
-	go func() {
-		resp, _ := m.CreateMessage(ctx, req)
-		ch <- llm.StreamEvent{Type: llm.EventMessageStop, Response: resp}
-		close(ch)
-	}()
-	return ch, nil
-}
-
-func (m *mockLLMClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
 
 // mockTool for orchestrator tests
 type mockTool struct {
@@ -209,67 +205,78 @@ func (m *mockTool) Execute(ctx context.Context, params map[string]any) (*tool.Re
 	return tool.NewResult(m.name, true, "executed", ""), nil
 }
 
-type recordingStreamClient struct {
-	responses         []*llm.Response
-	events            [][]llm.StreamEvent
-	createErr         error
-	streamSetupErr    error
-	createCalls       int
-	streamCalls       int
-	lastStreamRequest *llm.Request
+// streamCallCounts records which llm.Client entry points a streaming-path
+// scripted client was driven through.
+type streamCallCounts struct {
+	create int
+	stream int
 }
 
-func (c *recordingStreamClient) CreateMessage(ctx context.Context, req *llm.Request) (*llm.Response, error) {
-	c.createCalls++
-	if c.createErr != nil {
-		return nil, c.createErr
-	}
-	if c.createCalls > len(c.responses) {
-		return &llm.Response{
-			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
-			StopReason: llm.StopReasonEndTurn,
-		}, nil
-	}
-	return c.responses[c.createCalls-1], nil
-}
-
-func (c *recordingStreamClient) CreateMessageStream(ctx context.Context, req *llm.Request) (<-chan llm.StreamEvent, error) {
-	c.streamCalls++
-	c.lastStreamRequest = req
-	if c.streamSetupErr != nil {
-		return nil, c.streamSetupErr
-	}
-
-	ch := make(chan llm.StreamEvent)
-	callIndex := c.streamCalls - 1
-	go func() {
-		defer close(ch)
-		if callIndex < len(c.events) {
-			for _, event := range c.events[callIndex] {
-				ch <- event
+// streamingClient scripts the shared llmtest.Client for the streaming-path
+// tests: CreateMessage always fails with createErr (every caller asserts the
+// nonstream path is never taken), and CreateMessageStream plays spec.events
+// per call, falling back to a single message_stop carrying spec.responses for
+// that call index. A nil streamSetupErr is required for the stream to open.
+func streamingClient(spec streamingSpec) (*llmtest.Client, *streamCallCounts) {
+	counts := &streamCallCounts{}
+	client := &llmtest.Client{
+		Media: llm.FullCapabilities(),
+		Respond: func(context.Context, *llm.Request) (*llm.Response, error) {
+			counts.create++
+			if spec.createErr != nil {
+				return nil, spec.createErr
 			}
-			return
-		}
-		if callIndex < len(c.responses) {
-			ch <- llm.StreamEvent{Type: llm.EventMessageStop, Response: c.responses[callIndex]}
-		}
-	}()
-	return ch, nil
+			if counts.create > len(spec.responses) {
+				return &llm.Response{
+					Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
+					StopReason: llm.StopReasonEndTurn,
+				}, nil
+			}
+			return spec.responses[counts.create-1], nil
+		},
+		Stream: func(context.Context, *llm.Request) (<-chan llm.StreamEvent, error) {
+			counts.stream++
+			if spec.streamSetupErr != nil {
+				return nil, spec.streamSetupErr
+			}
+			callIndex := counts.stream - 1
+			ch := make(chan llm.StreamEvent)
+			go func() {
+				defer close(ch)
+				if callIndex < len(spec.events) {
+					for _, event := range spec.events[callIndex] {
+						ch <- event
+					}
+					return
+				}
+				if callIndex < len(spec.responses) {
+					ch <- llm.StreamEvent{Type: llm.EventMessageStop, Response: spec.responses[callIndex]}
+				}
+			}()
+			return ch, nil
+		},
+	}
+	return client, counts
 }
 
-func (c *recordingStreamClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
+// streamingSpec configures streamingClient's per-call event script.
+type streamingSpec struct {
+	responses      []*llm.Response
+	events         [][]llm.StreamEvent
+	createErr      error
+	streamSetupErr error
+}
 
 func TestOrchestratorStreamingModeUsesCreateMessageStream(t *testing.T) {
 	streamedResponse := &llm.Response{
 		Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "streamed"}},
 		StopReason: llm.StopReasonEndTurn,
 	}
-	client := &recordingStreamClient{
+	client, calls := streamingClient(streamingSpec{
 		createErr: errors.New("CreateMessage should not be called"),
 		events: [][]llm.StreamEvent{{
 			{Type: llm.EventMessageStop, Response: streamedResponse},
-		}},
-	}
+		}}})
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
 
@@ -282,11 +289,11 @@ func TestOrchestratorStreamingModeUsesCreateMessageStream(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if client.createCalls != 0 {
-		t.Fatalf("expected CreateMessage not to be called, got %d calls", client.createCalls)
+	if calls.create != 0 {
+		t.Fatalf("expected CreateMessage not to be called, got %d calls", calls.create)
 	}
-	if client.streamCalls != 1 {
-		t.Fatalf("expected CreateMessageStream to be called once, got %d calls", client.streamCalls)
+	if calls.stream != 1 {
+		t.Fatalf("expected CreateMessageStream to be called once, got %d calls", calls.stream)
 	}
 
 	var gotText bool
@@ -301,7 +308,7 @@ func TestOrchestratorStreamingModeUsesCreateMessageStream(t *testing.T) {
 }
 
 func TestOrchestratorStreamingModeProcessesToolUse(t *testing.T) {
-	client := &recordingStreamClient{
+	client, calls := streamingClient(streamingSpec{
 		createErr: errors.New("CreateMessage should not be called"),
 		events: [][]llm.StreamEvent{
 			{
@@ -321,8 +328,7 @@ func TestOrchestratorStreamingModeProcessesToolUse(t *testing.T) {
 					StopReason: llm.StopReasonEndTurn,
 				}},
 			},
-		},
-	}
+		}})
 
 	var toolCalls int
 	registry := tool.NewRegistry()
@@ -347,11 +353,11 @@ func TestOrchestratorStreamingModeProcessesToolUse(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if client.createCalls != 0 {
-		t.Fatalf("expected CreateMessage not to be called, got %d calls", client.createCalls)
+	if calls.create != 0 {
+		t.Fatalf("expected CreateMessage not to be called, got %d calls", calls.create)
 	}
-	if client.streamCalls != 2 {
-		t.Fatalf("expected two streaming calls for tool loop, got %d", client.streamCalls)
+	if calls.stream != 2 {
+		t.Fatalf("expected two streaming calls for tool loop, got %d", calls.stream)
 	}
 	if toolCalls != 1 {
 		t.Fatalf("expected tool to execute once, got %d", toolCalls)
@@ -381,12 +387,11 @@ func TestOrchestratorStreamingModeProcessesToolUse(t *testing.T) {
 
 func TestOrchestratorStreamingModeReturnsStreamError(t *testing.T) {
 	streamErr := errors.New("stream failed")
-	client := &recordingStreamClient{
+	client, calls := streamingClient(streamingSpec{
 		createErr: errors.New("CreateMessage should not be called"),
 		events: [][]llm.StreamEvent{{
 			{Type: llm.EventError, Error: streamErr},
-		}},
-	}
+		}}})
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
 
@@ -399,11 +404,11 @@ func TestOrchestratorStreamingModeReturnsStreamError(t *testing.T) {
 	if !errors.Is(err, streamErr) {
 		t.Fatalf("expected stream error, got %v", err)
 	}
-	if client.createCalls != 0 {
-		t.Fatalf("expected CreateMessage not to be called, got %d calls", client.createCalls)
+	if calls.create != 0 {
+		t.Fatalf("expected CreateMessage not to be called, got %d calls", calls.create)
 	}
-	if client.streamCalls != 1 {
-		t.Fatalf("expected CreateMessageStream to be called once, got %d calls", client.streamCalls)
+	if calls.stream != 1 {
+		t.Fatalf("expected CreateMessageStream to be called once, got %d calls", calls.stream)
 	}
 
 	var gotError bool
@@ -417,10 +422,9 @@ func TestOrchestratorStreamingModeReturnsStreamError(t *testing.T) {
 	}
 
 	setupErr := errors.New("stream setup failed")
-	setupClient := &recordingStreamClient{
+	setupClient, calls := streamingClient(streamingSpec{
 		createErr:      errors.New("CreateMessage should not be called"),
-		streamSetupErr: setupErr,
-	}
+		streamSetupErr: setupErr})
 	setupOrch := orchestrator.NewWithConfig(setupClient, executor, config)
 	setupEvents := setupOrch.Subscribe()
 
@@ -428,16 +432,15 @@ func TestOrchestratorStreamingModeReturnsStreamError(t *testing.T) {
 	if !errors.Is(err, setupErr) {
 		t.Fatalf("expected setup error, got %v", err)
 	}
-	if setupClient.createCalls != 0 {
-		t.Fatalf("expected CreateMessage not to be called for setup error, got %d calls", setupClient.createCalls)
+	if calls.create != 0 {
+		t.Fatalf("expected CreateMessage not to be called for setup error, got %d calls", calls.create)
 	}
 	for range setupEvents {
 	}
 
-	missingFinalClient := &recordingStreamClient{
+	missingFinalClient, calls := streamingClient(streamingSpec{
 		createErr: errors.New("CreateMessage should not be called"),
-		events:    [][]llm.StreamEvent{{}},
-	}
+		events:    [][]llm.StreamEvent{{}}})
 	missingFinalOrch := orchestrator.NewWithConfig(missingFinalClient, executor, config)
 	missingFinalEvents := missingFinalOrch.Subscribe()
 
@@ -448,15 +451,15 @@ func TestOrchestratorStreamingModeReturnsStreamError(t *testing.T) {
 	if !contains(err.Error(), "stream closed without final message_stop response") {
 		t.Fatalf("expected missing final response error, got %v", err)
 	}
-	if missingFinalClient.createCalls != 0 {
-		t.Fatalf("expected CreateMessage not to be called for missing final response, got %d calls", missingFinalClient.createCalls)
+	if calls.create != 0 {
+		t.Fatalf("expected CreateMessage not to be called for missing final response, got %d calls", calls.create)
 	}
 	for range missingFinalEvents {
 	}
 }
 
 func TestOrchestratorStreamingModeKeepsUsage(t *testing.T) {
-	client := &recordingStreamClient{
+	client, _ := streamingClient(streamingSpec{
 		createErr: errors.New("CreateMessage should not be called"),
 		events: [][]llm.StreamEvent{{
 			{Type: llm.EventMessageStop, Response: &llm.Response{
@@ -468,8 +471,7 @@ func TestOrchestratorStreamingModeKeepsUsage(t *testing.T) {
 					ThinkingTokens: 3,
 				},
 			}},
-		}},
-	}
+		}}})
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
 
@@ -749,12 +751,10 @@ func TestOrchestratorStreamingModeOpenAIIncompleteToolTurn(t *testing.T) {
 }
 
 func TestOrchestratorSimpleResponse(t *testing.T) {
-	client := &mockLLMClient{
-		responses: []*llm.Response{{
-			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Hello!"}},
-			StopReason: llm.StopReasonEndTurn,
-		}},
-	}
+	client := scriptedLLM([]*llm.Response{{
+		Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Hello!"}},
+		StopReason: llm.StopReasonEndTurn,
+	}})
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
 
@@ -786,23 +786,21 @@ func TestOrchestratorSimpleResponse(t *testing.T) {
 }
 
 func TestOrchestratorWithToolUse(t *testing.T) {
-	client := &mockLLMClient{
-		responses: []*llm.Response{
-			{
-				Content: []llm.ContentBlock{{
-					Type:  llm.ContentTypeToolUse,
-					ID:    "tool_1",
-					Name:  "test_tool",
-					Input: map[string]any{"arg": "value"},
-				}},
-				StopReason: llm.StopReasonToolUse,
-			},
-			{
-				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done!"}},
-				StopReason: llm.StopReasonEndTurn,
-			},
+	client := scriptedLLM([]*llm.Response{
+		{
+			Content: []llm.ContentBlock{{
+				Type:  llm.ContentTypeToolUse,
+				ID:    "tool_1",
+				Name:  "test_tool",
+				Input: map[string]any{"arg": "value"},
+			}},
+			StopReason: llm.StopReasonToolUse,
 		},
-	}
+		{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done!"}},
+			StopReason: llm.StopReasonEndTurn,
+		},
+	})
 
 	registry := tool.NewRegistry()
 	testTool := &mockTool{name: "test_tool"}
@@ -844,19 +842,17 @@ func TestContextCancellationDuringToolExecution(t *testing.T) {
 	toolExecuting := make(chan struct{})
 	toolBlocked := make(chan struct{})
 
-	client := &mockLLMClient{
-		responses: []*llm.Response{
-			{
-				Content: []llm.ContentBlock{{
-					Type:  llm.ContentTypeToolUse,
-					ID:    "tool_1",
-					Name:  "blocking_tool",
-					Input: map[string]any{},
-				}},
-				StopReason: llm.StopReasonToolUse,
-			},
+	client := scriptedLLM([]*llm.Response{
+		{
+			Content: []llm.ContentBlock{{
+				Type:  llm.ContentTypeToolUse,
+				ID:    "tool_1",
+				Name:  "blocking_tool",
+				Input: map[string]any{},
+			}},
+			StopReason: llm.StopReasonToolUse,
 		},
-	}
+	})
 
 	registry := tool.NewRegistry()
 	blockingTool := &mockTool{
@@ -916,19 +912,17 @@ func TestContextCancellationBeforeToolExecution(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately
 
-	client := &mockLLMClient{
-		responses: []*llm.Response{
-			{
-				Content: []llm.ContentBlock{{
-					Type:  llm.ContentTypeToolUse,
-					ID:    "tool_1",
-					Name:  "test_tool",
-					Input: map[string]any{},
-				}},
-				StopReason: llm.StopReasonToolUse,
-			},
+	client := scriptedLLM([]*llm.Response{
+		{
+			Content: []llm.ContentBlock{{
+				Type:  llm.ContentTypeToolUse,
+				ID:    "tool_1",
+				Name:  "test_tool",
+				Input: map[string]any{},
+			}},
+			StopReason: llm.StopReasonToolUse,
 		},
-	}
+	})
 
 	registry := tool.NewRegistry()
 	testTool := &mockTool{name: "test_tool"}
@@ -952,23 +946,21 @@ func TestContextCancellationBeforeToolExecution(t *testing.T) {
 func TestToolExecutionTimeout(t *testing.T) {
 	ctx := context.Background()
 
-	client := &mockLLMClient{
-		responses: []*llm.Response{
-			{
-				Content: []llm.ContentBlock{{
-					Type:  llm.ContentTypeToolUse,
-					ID:    "tool_1",
-					Name:  "timeout_tool",
-					Input: map[string]any{},
-				}},
-				StopReason: llm.StopReasonToolUse,
-			},
-			{
-				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Handled timeout"}},
-				StopReason: llm.StopReasonEndTurn,
-			},
+	client := scriptedLLM([]*llm.Response{
+		{
+			Content: []llm.ContentBlock{{
+				Type:  llm.ContentTypeToolUse,
+				ID:    "tool_1",
+				Name:  "timeout_tool",
+				Input: map[string]any{},
+			}},
+			StopReason: llm.StopReasonToolUse,
 		},
-	}
+		{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Handled timeout"}},
+			StopReason: llm.StopReasonEndTurn,
+		},
+	})
 
 	registry := tool.NewRegistry()
 	timeoutTool := &mockTool{
@@ -1006,23 +998,21 @@ func TestToolExecutionTimeout(t *testing.T) {
 func TestRecoveryFromFailedToolExecution(t *testing.T) {
 	ctx := context.Background()
 
-	client := &mockLLMClient{
-		responses: []*llm.Response{
-			{
-				Content: []llm.ContentBlock{{
-					Type:  llm.ContentTypeToolUse,
-					ID:    "tool_1",
-					Name:  "failing_tool",
-					Input: map[string]any{},
-				}},
-				StopReason: llm.StopReasonToolUse,
-			},
-			{
-				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Recovered from failure"}},
-				StopReason: llm.StopReasonEndTurn,
-			},
+	client := scriptedLLM([]*llm.Response{
+		{
+			Content: []llm.ContentBlock{{
+				Type:  llm.ContentTypeToolUse,
+				ID:    "tool_1",
+				Name:  "failing_tool",
+				Input: map[string]any{},
+			}},
+			StopReason: llm.StopReasonToolUse,
 		},
-	}
+		{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Recovered from failure"}},
+			StopReason: llm.StopReasonEndTurn,
+		},
+	})
 
 	registry := tool.NewRegistry()
 	failingTool := &mockTool{
@@ -1067,7 +1057,7 @@ func TestMaxIterationLimit(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a client that always returns tool use (infinite loop scenario)
-	loopingClient := &mockLoopingLLMClient{}
+	loopingClient := loopingLLMClient()
 
 	registry := tool.NewRegistry()
 	loopTool := &mockTool{name: "loop_tool"}
@@ -1104,12 +1094,10 @@ func TestMaxIterationLimit(t *testing.T) {
 func TestMaxIterationLimitEdgeCaseZero(t *testing.T) {
 	ctx := context.Background()
 
-	client := &mockLLMClient{
-		responses: []*llm.Response{{
-			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Hello"}},
-			StopReason: llm.StopReasonEndTurn,
-		}},
-	}
+	client := scriptedLLM([]*llm.Response{{
+		Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Hello"}},
+		StopReason: llm.StopReasonEndTurn,
+	}})
 
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
@@ -1231,12 +1219,10 @@ func TestConcurrentOrchestratorExecution(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 
-			client := &mockLLMClient{
-				responses: []*llm.Response{{
-					Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: fmt.Sprintf("Response %d", id)}},
-					StopReason: llm.StopReasonEndTurn,
-				}},
-			}
+			client := scriptedLLM([]*llm.Response{{
+				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: fmt.Sprintf("Response %d", id)}},
+				StopReason: llm.StopReasonEndTurn,
+			}})
 
 			registry := tool.NewRegistry()
 			executor := tool.NewExecutor(registry)
@@ -1263,9 +1249,7 @@ func TestLLMStreamInterruption(t *testing.T) {
 	ctx := context.Background()
 
 	// Client that returns an error immediately
-	errorClient := &mockLLMClientWithError{
-		err: fmt.Errorf("stream interrupted"),
-	}
+	errorClient := errorLLMClient(fmt.Errorf("stream interrupted"))
 
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
@@ -1336,68 +1320,47 @@ func TestEventBusSubscriberManagement(t *testing.T) {
 	bus.Close()
 }
 
-// mockLLMClientWithError always returns an error.
-type mockLLMClientWithError struct {
-	err error
+// errorLLMClient scripts the shared client to fail every nonstream call, for
+// tests that drive the orchestrator down an LLM error path.
+func errorLLMClient(err error) *llmtest.Client {
+	return &llmtest.Client{
+		Media: llm.FullCapabilities(),
+		Respond: func(context.Context, *llm.Request) (*llm.Response, error) {
+			return nil, err
+		},
+	}
 }
 
-func (m *mockLLMClientWithError) CreateMessage(ctx context.Context, req *llm.Request) (*llm.Response, error) {
-	return nil, m.err
+// loopingLLMClient scripts the shared client to always request a tool call, so
+// a tool registered as "loop_tool" keeps the orchestrator iterating until it
+// hits MaxIterations.
+func loopingLLMClient() *llmtest.Client {
+	return &llmtest.Client{
+		Media: llm.FullCapabilities(),
+		Respond: func(context.Context, *llm.Request) (*llm.Response, error) {
+			return &llm.Response{
+				Content: []llm.ContentBlock{{
+					Type:  llm.ContentTypeToolUse,
+					ID:    "tool_loop",
+					Name:  "loop_tool",
+					Input: map[string]any{},
+				}},
+				StopReason: llm.StopReasonToolUse,
+			}, nil
+		},
+	}
 }
 
-func (m *mockLLMClientWithError) CreateMessageStream(ctx context.Context, req *llm.Request) (<-chan llm.StreamEvent, error) {
-	return nil, m.err
+// dynamicLLMClient scripts the shared client with a per-call response function,
+// for tests whose response depends on the call number or captured state.
+func dynamicLLMClient(fn func() *llm.Response) *llmtest.Client {
+	return &llmtest.Client{
+		Media: llm.FullCapabilities(),
+		Respond: func(context.Context, *llm.Request) (*llm.Response, error) {
+			return fn(), nil
+		},
+	}
 }
-
-func (m *mockLLMClientWithError) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
-
-// mockLoopingLLMClient always returns tool use to test max iterations.
-type mockLoopingLLMClient struct{}
-
-func (m *mockLoopingLLMClient) CreateMessage(ctx context.Context, req *llm.Request) (*llm.Response, error) {
-	return &llm.Response{
-		Content: []llm.ContentBlock{{
-			Type:  llm.ContentTypeToolUse,
-			ID:    "tool_loop",
-			Name:  "loop_tool",
-			Input: map[string]any{},
-		}},
-		StopReason: llm.StopReasonToolUse,
-	}, nil
-}
-
-func (m *mockLoopingLLMClient) CreateMessageStream(ctx context.Context, req *llm.Request) (<-chan llm.StreamEvent, error) {
-	ch := make(chan llm.StreamEvent)
-	go func() {
-		resp, _ := m.CreateMessage(ctx, req)
-		ch <- llm.StreamEvent{Type: llm.EventMessageStop, Response: resp}
-		close(ch)
-	}()
-	return ch, nil
-}
-
-func (m *mockLoopingLLMClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
-
-// mockDynamicLLMClient returns responses from a function for dynamic testing.
-type mockDynamicLLMClient struct {
-	responseFn func() *llm.Response
-}
-
-func (m *mockDynamicLLMClient) CreateMessage(ctx context.Context, req *llm.Request) (*llm.Response, error) {
-	return m.responseFn(), nil
-}
-
-func (m *mockDynamicLLMClient) CreateMessageStream(ctx context.Context, req *llm.Request) (<-chan llm.StreamEvent, error) {
-	ch := make(chan llm.StreamEvent)
-	go func() {
-		resp := m.responseFn()
-		ch <- llm.StreamEvent{Type: llm.EventMessageStop, Response: resp}
-		close(ch)
-	}()
-	return ch, nil
-}
-
-func (m *mockDynamicLLMClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
 
 // TestEventBusSlowSubscriberBufferOverflow tests that slow subscribers don't block
 // publishing and that events are dropped when the buffer overflows.
@@ -1856,15 +1819,13 @@ func TestEventBusRaceConditions(t *testing.T) {
 }
 
 func TestOrchestratorThinkingEvent(t *testing.T) {
-	client := &mockLLMClient{
-		responses: []*llm.Response{{
-			Content: []llm.ContentBlock{
-				{Type: llm.ContentTypeThinking, Thinking: "Let me reason about this..."},
-				{Type: llm.ContentTypeText, Text: "Hello!"},
-			},
-			StopReason: llm.StopReasonEndTurn,
-		}},
-	}
+	client := scriptedLLM([]*llm.Response{{
+		Content: []llm.ContentBlock{
+			{Type: llm.ContentTypeThinking, Thinking: "Let me reason about this..."},
+			{Type: llm.ContentTypeText, Text: "Hello!"},
+		},
+		StopReason: llm.StopReasonEndTurn,
+	}})
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
 
@@ -1909,48 +1870,11 @@ func indexOf(s, substr string) int {
 	return -1
 }
 
-// capturingLLMClient records the requests it receives for assertion.
-type capturingLLMClient struct {
-	requests  []*llm.Request
-	responses []*llm.Response
-	callIndex int
-	mu        sync.Mutex
-}
-
-func (c *capturingLLMClient) CreateMessage(ctx context.Context, req *llm.Request) (*llm.Response, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.requests = append(c.requests, req)
-	if c.callIndex >= len(c.responses) {
-		return &llm.Response{
-			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
-			StopReason: llm.StopReasonEndTurn,
-		}, nil
-	}
-	resp := c.responses[c.callIndex]
-	c.callIndex++
-	return resp, nil
-}
-
-func (c *capturingLLMClient) CreateMessageStream(ctx context.Context, req *llm.Request) (<-chan llm.StreamEvent, error) {
-	ch := make(chan llm.StreamEvent)
-	go func() {
-		resp, _ := c.CreateMessage(ctx, req)
-		ch <- llm.StreamEvent{Type: llm.EventMessageStop, Response: resp}
-		close(ch)
-	}()
-	return ch, nil
-}
-
-func (c *capturingLLMClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
-
 func TestThinkingStrategyOff(t *testing.T) {
-	client := &capturingLLMClient{
-		responses: []*llm.Response{{
-			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
-			StopReason: llm.StopReasonEndTurn,
-		}},
-	}
+	client := scriptedLLM([]*llm.Response{{
+		Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
+		StopReason: llm.StopReasonEndTurn,
+	}})
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
 	config := orchestrator.DefaultConfig()
@@ -1964,30 +1888,28 @@ func TestThinkingStrategyOff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(client.requests) != 1 {
-		t.Fatalf("expected 1 request, got %d", len(client.requests))
+	if len(client.Requests()) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(client.Requests()))
 	}
-	if client.requests[0].Thinking != nil {
+	if client.Requests()[0].Thinking != nil {
 		t.Error("ThinkingOff: expected Thinking to be nil")
 	}
 }
 
 func TestThinkingStrategyAlways(t *testing.T) {
-	client := &capturingLLMClient{
-		responses: []*llm.Response{
-			{
-				Content: []llm.ContentBlock{{
-					Type: llm.ContentTypeToolUse, ID: "t1", Name: "test_tool",
-					Input: map[string]any{},
-				}},
-				StopReason: llm.StopReasonToolUse,
-			},
-			{
-				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
-				StopReason: llm.StopReasonEndTurn,
-			},
+	client := scriptedLLM([]*llm.Response{
+		{
+			Content: []llm.ContentBlock{{
+				Type: llm.ContentTypeToolUse, ID: "t1", Name: "test_tool",
+				Input: map[string]any{},
+			}},
+			StopReason: llm.StopReasonToolUse,
 		},
-	}
+		{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
+			StopReason: llm.StopReasonEndTurn,
+		},
+	})
 	registry := tool.NewRegistry()
 	registry.Register(&mockTool{name: "test_tool"})
 	executor := tool.NewExecutor(registry)
@@ -2002,10 +1924,10 @@ func TestThinkingStrategyAlways(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(client.requests) != 2 {
-		t.Fatalf("expected 2 requests, got %d", len(client.requests))
+	if len(client.Requests()) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(client.Requests()))
 	}
-	for i, req := range client.requests {
+	for i, req := range client.Requests() {
 		if req.Thinking == nil {
 			t.Errorf("request %d: ThinkingAlways: expected Thinking to be set", i)
 		} else if req.Thinking.Budget != 8192 {
@@ -2015,21 +1937,19 @@ func TestThinkingStrategyAlways(t *testing.T) {
 }
 
 func TestThinkingStrategyFirstOnly(t *testing.T) {
-	client := &capturingLLMClient{
-		responses: []*llm.Response{
-			{
-				Content: []llm.ContentBlock{{
-					Type: llm.ContentTypeToolUse, ID: "t1", Name: "test_tool",
-					Input: map[string]any{},
-				}},
-				StopReason: llm.StopReasonToolUse,
-			},
-			{
-				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
-				StopReason: llm.StopReasonEndTurn,
-			},
+	client := scriptedLLM([]*llm.Response{
+		{
+			Content: []llm.ContentBlock{{
+				Type: llm.ContentTypeToolUse, ID: "t1", Name: "test_tool",
+				Input: map[string]any{},
+			}},
+			StopReason: llm.StopReasonToolUse,
 		},
-	}
+		{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
+			StopReason: llm.StopReasonEndTurn,
+		},
+	})
 	registry := tool.NewRegistry()
 	registry.Register(&mockTool{name: "test_tool"})
 	executor := tool.NewExecutor(registry)
@@ -2044,33 +1964,31 @@ func TestThinkingStrategyFirstOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(client.requests) != 2 {
-		t.Fatalf("expected 2 requests, got %d", len(client.requests))
+	if len(client.Requests()) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(client.Requests()))
 	}
-	if client.requests[0].Thinking == nil {
+	if client.Requests()[0].Thinking == nil {
 		t.Error("request 0: ThinkingFirstOnly: expected Thinking to be set")
 	}
-	if client.requests[1].Thinking != nil {
+	if client.Requests()[1].Thinking != nil {
 		t.Error("request 1: ThinkingFirstOnly: expected Thinking to be nil")
 	}
 }
 
 func TestThinkingStrategyAdaptiveFirstCall(t *testing.T) {
-	client := &capturingLLMClient{
-		responses: []*llm.Response{
-			{
-				Content: []llm.ContentBlock{{
-					Type: llm.ContentTypeToolUse, ID: "t1", Name: "test_tool",
-					Input: map[string]any{},
-				}},
-				StopReason: llm.StopReasonToolUse,
-			},
-			{
-				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
-				StopReason: llm.StopReasonEndTurn,
-			},
+	client := scriptedLLM([]*llm.Response{
+		{
+			Content: []llm.ContentBlock{{
+				Type: llm.ContentTypeToolUse, ID: "t1", Name: "test_tool",
+				Input: map[string]any{},
+			}},
+			StopReason: llm.StopReasonToolUse,
 		},
-	}
+		{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
+			StopReason: llm.StopReasonEndTurn,
+		},
+	})
 	registry := tool.NewRegistry()
 	registry.Register(&mockTool{name: "test_tool"})
 	executor := tool.NewExecutor(registry)
@@ -2086,30 +2004,28 @@ func TestThinkingStrategyAdaptiveFirstCall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if client.requests[0].Thinking == nil {
+	if client.Requests()[0].Thinking == nil {
 		t.Error("request 0: Adaptive: expected Thinking on first call")
 	}
-	if client.requests[1].Thinking != nil {
+	if client.Requests()[1].Thinking != nil {
 		t.Error("request 1: Adaptive: expected no Thinking on second call")
 	}
 }
 
 func TestThinkingStrategyAdaptiveToolError(t *testing.T) {
-	client := &capturingLLMClient{
-		responses: []*llm.Response{
-			{
-				Content: []llm.ContentBlock{{
-					Type: llm.ContentTypeToolUse, ID: "t1", Name: "error_tool",
-					Input: map[string]any{},
-				}},
-				StopReason: llm.StopReasonToolUse,
-			},
-			{
-				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
-				StopReason: llm.StopReasonEndTurn,
-			},
+	client := scriptedLLM([]*llm.Response{
+		{
+			Content: []llm.ContentBlock{{
+				Type: llm.ContentTypeToolUse, ID: "t1", Name: "error_tool",
+				Input: map[string]any{},
+			}},
+			StopReason: llm.StopReasonToolUse,
 		},
-	}
+		{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
+			StopReason: llm.StopReasonEndTurn,
+		},
+	})
 	registry := tool.NewRegistry()
 	registry.Register(&mockTool{
 		name: "error_tool",
@@ -2130,13 +2046,13 @@ func TestThinkingStrategyAdaptiveToolError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(client.requests) != 2 {
-		t.Fatalf("expected 2 requests, got %d", len(client.requests))
+	if len(client.Requests()) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(client.Requests()))
 	}
-	if client.requests[0].Thinking == nil {
+	if client.Requests()[0].Thinking == nil {
 		t.Error("request 0: expected Thinking on first call")
 	}
-	if client.requests[1].Thinking == nil {
+	if client.Requests()[1].Thinking == nil {
 		t.Error("request 1: expected Thinking re-enabled after tool error")
 	}
 }
@@ -2156,7 +2072,7 @@ func TestThinkingStrategyAdaptiveConsecutiveTools(t *testing.T) {
 		Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
 		StopReason: llm.StopReasonEndTurn,
 	})
-	client := &capturingLLMClient{responses: responses}
+	client := scriptedLLM(responses)
 	registry := tool.NewRegistry()
 	registry.Register(&mockTool{name: "test_tool"})
 	executor := tool.NewExecutor(registry)
@@ -2172,8 +2088,8 @@ func TestThinkingStrategyAdaptiveConsecutiveTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(client.requests) != 7 {
-		t.Fatalf("expected 7 requests, got %d", len(client.requests))
+	if len(client.Requests()) != 7 {
+		t.Fatalf("expected 7 requests, got %d", len(client.Requests()))
 	}
 	// Request 0: thinking (first call)
 	// Request 1: no thinking (1 consecutive tool)
@@ -2183,7 +2099,7 @@ func TestThinkingStrategyAdaptiveConsecutiveTools(t *testing.T) {
 	// Request 5: thinking (5 >= threshold)
 	// Request 6: thinking (6 >= threshold)
 	expected := []bool{true, false, false, true, true, true, true}
-	for i, req := range client.requests {
+	for i, req := range client.Requests() {
 		hasThinking := req.Thinking != nil
 		if hasThinking != expected[i] {
 			t.Errorf("request %d: thinking=%v, want %v", i, hasThinking, expected[i])
@@ -2192,12 +2108,10 @@ func TestThinkingStrategyAdaptiveConsecutiveTools(t *testing.T) {
 }
 
 func TestThinkingNilSettings(t *testing.T) {
-	client := &capturingLLMClient{
-		responses: []*llm.Response{{
-			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
-			StopReason: llm.StopReasonEndTurn,
-		}},
-	}
+	client := scriptedLLM([]*llm.Response{{
+		Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
+		StopReason: llm.StopReasonEndTurn,
+	}})
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
 	orch := orchestrator.New(client, executor)
@@ -2206,7 +2120,7 @@ func TestThinkingNilSettings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if client.requests[0].Thinking != nil {
+	if client.Requests()[0].Thinking != nil {
 		t.Error("nil ThinkingSettings: expected Thinking to be nil")
 	}
 }
@@ -2219,9 +2133,9 @@ func TestOrchestratorLockContract(t *testing.T) {
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
 
-	// A mockLLMClient with no canned responses is stateless: it always returns a
+	// A scriptedLLM with no canned responses is stateless: it always returns a
 	// terminal "done" response, so each Run/Continue settles in one iteration.
-	orch := orchestrator.New(&mockLLMClient{}, executor)
+	orch := orchestrator.New(scriptedLLM(nil), executor)
 
 	// 1. SetMessages -> Messages round-trips.
 	seed := []llm.Message{
@@ -2271,7 +2185,7 @@ func TestOrchestratorLockContract(t *testing.T) {
 	// race under -race, and the final history is a valid single-run result.
 	creg := tool.NewRegistry()
 	cexec := tool.NewExecutor(creg)
-	concurrent := orchestrator.New(&mockLLMClient{}, cexec)
+	concurrent := orchestrator.New(scriptedLLM(nil), cexec)
 	const goroutines = 16
 	var wg sync.WaitGroup
 	wg.Add(goroutines)
@@ -2300,7 +2214,7 @@ func TestNewWithConfig_SuspendRequiresStore(t *testing.T) {
 	}()
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
-	orchestrator.NewWithConfig(&mockLLMClient{}, executor, orchestrator.Config{
+	orchestrator.NewWithConfig(scriptedLLM(nil), executor, orchestrator.Config{
 		MaxIterations: 5,
 		ApprovalMode:  orchestrator.ApprovalSuspend,
 		// SessionStore intentionally nil
@@ -2311,7 +2225,7 @@ func TestNewWithConfig_DefaultsDoNotPanic(t *testing.T) {
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
 	// ApprovalSync (zero value) + nil store must remain today's behavior: no panic.
-	_ = orchestrator.NewWithConfig(&mockLLMClient{}, executor, orchestrator.Config{MaxIterations: 5})
+	_ = orchestrator.NewWithConfig(scriptedLLM(nil), executor, orchestrator.Config{MaxIterations: 5})
 }
 
 func TestThinkingAdaptiveFullCycle(t *testing.T) {
@@ -2353,7 +2267,7 @@ func TestThinkingAdaptiveFullCycle(t *testing.T) {
 		},
 	}
 
-	client := &capturingLLMClient{responses: responses}
+	client := scriptedLLM(responses)
 	registry := tool.NewRegistry()
 	registry.Register(&mockTool{name: "good_tool"})
 	registry.Register(&mockTool{
@@ -2378,8 +2292,8 @@ func TestThinkingAdaptiveFullCycle(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(client.requests) != 4 {
-		t.Fatalf("expected 4 requests, got %d", len(client.requests))
+	if len(client.Requests()) != 4 {
+		t.Fatalf("expected 4 requests, got %d", len(client.Requests()))
 	}
 
 	// Call 0: thinking ON (first call)
@@ -2387,7 +2301,7 @@ func TestThinkingAdaptiveFullCycle(t *testing.T) {
 	// Call 2: thinking ON (previous tool had error)
 	// Call 3: thinking OFF (no error from previous, 1 consecutive tool)
 	expected := []bool{true, false, true, false}
-	for i, req := range client.requests {
+	for i, req := range client.Requests() {
 		hasThinking := req.Thinking != nil
 		if hasThinking != expected[i] {
 			t.Errorf("request %d: thinking=%v, want %v", i, hasThinking, expected[i])
@@ -2418,9 +2332,9 @@ func TestRun_SuspendsOnApprovalTool(t *testing.T) {
 	executed := false
 	registry.Register(&approvalTool{name: "deploy", executed: &executed})
 	executor := tool.NewExecutor(registry)
-	client := &mockLLMClient{responses: []*llm.Response{
+	client := scriptedLLM([]*llm.Response{
 		{Content: []llm.ContentBlock{{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "deploy", Input: map[string]any{"env": "prod"}}}, StopReason: llm.StopReasonToolUse},
-	}}
+	})
 	orch := orchestrator.NewWithConfig(client, executor, orchestrator.Config{
 		MaxIterations: 5,
 		SessionStore:  store,
@@ -2461,10 +2375,10 @@ func TestResume_Approve_ExecutesAndCompletes(t *testing.T) {
 	registry.Register(&approvalTool{name: "deploy", executed: &executed})
 	executor := tool.NewExecutor(registry)
 	// First response asks for the tool; after resume the second response ends the turn.
-	client := &mockLLMClient{responses: []*llm.Response{
+	client := scriptedLLM([]*llm.Response{
 		{Content: []llm.ContentBlock{{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "deploy", Input: map[string]any{}}}, StopReason: llm.StopReasonToolUse},
 		{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "deployed"}}, StopReason: llm.StopReasonEndTurn},
-	}}
+	})
 	cfg := orchestrator.Config{MaxIterations: 5, SessionStore: store, ApprovalMode: orchestrator.ApprovalSuspend}
 	orch := orchestrator.NewWithConfig(client, executor, cfg)
 
@@ -2494,10 +2408,10 @@ func TestResume_Deny_SynthesizesErrorResultAndCompletes(t *testing.T) {
 	executed := false
 	registry.Register(&approvalTool{name: "deploy", executed: &executed})
 	executor := tool.NewExecutor(registry)
-	client := &mockLLMClient{responses: []*llm.Response{
+	client := scriptedLLM([]*llm.Response{
 		{Content: []llm.ContentBlock{{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "deploy", Input: map[string]any{}}}, StopReason: llm.StopReasonToolUse},
 		{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok, cancelled"}}, StopReason: llm.StopReasonEndTurn},
-	}}
+	})
 	cfg := orchestrator.Config{MaxIterations: 5, SessionStore: store, ApprovalMode: orchestrator.ApprovalSuspend}
 	orch := orchestrator.NewWithConfig(client, executor, cfg)
 
@@ -2531,7 +2445,7 @@ func TestResume_NotSuspended(t *testing.T) {
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
 	cfg := orchestrator.Config{MaxIterations: 5, SessionStore: store, ApprovalMode: orchestrator.ApprovalSuspend}
-	orch := orchestrator.NewWithConfig(&mockLLMClient{}, executor, cfg)
+	orch := orchestrator.NewWithConfig(scriptedLLM(nil), executor, cfg)
 	// No snapshot saved for this ID.
 	if err := orch.Resume(context.Background(), "session-missing", orchestrator.Approve(true)); err == nil {
 		t.Fatal("Resume on missing session = nil error, want error")
@@ -2550,7 +2464,7 @@ func TestResume_NotSuspended_AlreadyComplete(t *testing.T) {
 	}
 	executor := tool.NewExecutor(tool.NewRegistry())
 	cfg := orchestrator.Config{MaxIterations: 5, SessionStore: store, ApprovalMode: orchestrator.ApprovalSuspend}
-	orch := orchestrator.NewWithConfig(&mockLLMClient{}, executor, cfg)
+	orch := orchestrator.NewWithConfig(scriptedLLM(nil), executor, cfg)
 	if err := orch.Resume(context.Background(), sid, orchestrator.Approve(true)); err == nil {
 		t.Fatal("Resume on a completed (non-suspended) session = nil error, want error")
 	}
@@ -2568,10 +2482,10 @@ func TestRun_CheckpointsWithStore(t *testing.T) {
 		return tool.NewResult("noop", true, "done", ""), nil
 	}})
 	executor := tool.NewExecutor(registry)
-	client := &mockLLMClient{responses: []*llm.Response{
+	client := scriptedLLM([]*llm.Response{
 		{Content: []llm.ContentBlock{{Type: llm.ContentTypeToolUse, ID: "u1", Name: "noop", Input: map[string]any{}}}, StopReason: llm.StopReasonToolUse},
 		{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "all done"}}, StopReason: llm.StopReasonEndTurn},
-	}}
+	})
 	orch := orchestrator.NewWithConfig(client, executor, orchestrator.Config{
 		MaxIterations: 5,
 		SessionStore:  store,
@@ -2651,7 +2565,7 @@ func TestCheckpointFailureDoesNotAnnounceSuccess(t *testing.T) {
 			diskFull := errors.New("disk full")
 			store := &failingCompleteStore{Store: session.NewFileStore(t.TempDir()), err: diskFull}
 			executor := tool.NewExecutor(tool.NewRegistry())
-			orch := orchestrator.NewWithConfig(&mockLLMClient{}, executor, orchestrator.Config{
+			orch := orchestrator.NewWithConfig(scriptedLLM(nil), executor, orchestrator.Config{
 				MaxIterations: 5,
 				SessionStore:  store,
 			})
@@ -2691,7 +2605,7 @@ func TestCompletionCheckpointOrder(t *testing.T) {
 			var orch *orchestrator.Orchestrator
 			store.stateProbe = func() orchestrator.State { return orch.State() }
 			executor := tool.NewExecutor(tool.NewRegistry())
-			orch = orchestrator.NewWithConfig(&mockLLMClient{}, executor, orchestrator.Config{
+			orch = orchestrator.NewWithConfig(scriptedLLM(nil), executor, orchestrator.Config{
 				MaxIterations: 5,
 				SessionStore:  store,
 			})
@@ -2730,9 +2644,9 @@ func TestResume_CrossProcess(t *testing.T) {
 	regA := tool.NewRegistry()
 	regA.Register(&approvalTool{name: "deploy"})
 	execA := tool.NewExecutor(regA)
-	clientA := &mockLLMClient{responses: []*llm.Response{
+	clientA := scriptedLLM([]*llm.Response{
 		{Content: []llm.ContentBlock{{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "deploy", Input: map[string]any{}}}, StopReason: llm.StopReasonToolUse},
-	}}
+	})
 	orchA := orchestrator.NewWithConfig(clientA, execA, orchestrator.Config{
 		MaxIterations: 5, SessionStore: storeA, ApprovalMode: orchestrator.ApprovalSuspend,
 	})
@@ -2748,9 +2662,9 @@ func TestResume_CrossProcess(t *testing.T) {
 	executed := false
 	regB.Register(&approvalTool{name: "deploy", executed: &executed})
 	execB := tool.NewExecutor(regB)
-	clientB := &mockLLMClient{responses: []*llm.Response{
+	clientB := scriptedLLM([]*llm.Response{
 		{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "deployed"}}, StopReason: llm.StopReasonEndTurn},
-	}}
+	})
 	orchB := orchestrator.NewWithConfig(clientB, execB, orchestrator.Config{
 		MaxIterations: 5, SessionStore: storeB, ApprovalMode: orchestrator.ApprovalSuspend,
 	})
@@ -2778,23 +2692,21 @@ func TestResume_CrossProcess(t *testing.T) {
 func TestLoadSkillUnknownNameErrorReachesNextRequest(t *testing.T) {
 	skills := skill.NewRegistry()
 
-	client := &capturingLLMClient{
-		responses: []*llm.Response{
-			{
-				Content: []llm.ContentBlock{{
-					Type:  llm.ContentTypeToolUse,
-					ID:    "call-1",
-					Name:  "load_skill",
-					Input: map[string]any{"name": "nonexistent-skill"},
-				}},
-				StopReason: llm.StopReasonToolUse,
-			},
-			{
-				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
-				StopReason: llm.StopReasonEndTurn,
-			},
+	client := scriptedLLM([]*llm.Response{
+		{
+			Content: []llm.ContentBlock{{
+				Type:  llm.ContentTypeToolUse,
+				ID:    "call-1",
+				Name:  "load_skill",
+				Input: map[string]any{"name": "nonexistent-skill"},
+			}},
+			StopReason: llm.StopReasonToolUse,
 		},
-	}
+		{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
+			StopReason: llm.StopReasonEndTurn,
+		},
+	})
 
 	registry := tool.NewRegistry()
 	registry.Register(skills.Tool())
@@ -2805,13 +2717,13 @@ func TestLoadSkillUnknownNameErrorReachesNextRequest(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	if len(client.requests) != 2 {
-		t.Fatalf("expected 2 requests, got %d", len(client.requests))
+	if len(client.Requests()) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(client.Requests()))
 	}
 
 	// requests[1] is what the provider would see next; find the tool_result
 	// block answering call-1.
-	nextReq := client.requests[1]
+	nextReq := client.Requests()[1]
 	last := nextReq.Messages[len(nextReq.Messages)-1]
 	var found bool
 	for _, block := range last.Blocks {
@@ -2864,14 +2776,14 @@ func TestResume_DecisionBindsToToolCallID_WhenEarlierToolDisappears(t *testing.T
 	registry.Register(&approvalTool{name: "deploy", executed: &deployExecuted})
 	registry.Register(&approvalTool{name: "nuke", executed: &nukeExecuted})
 	executor := tool.NewExecutor(registry)
-	client := &mockLLMClient{responses: []*llm.Response{
+	client := scriptedLLM([]*llm.Response{
 		{Content: []llm.ContentBlock{
 			{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "probe", Input: map[string]any{}},
 			{Type: llm.ContentTypeToolUse, ID: "call-2", Name: "deploy", Input: map[string]any{}},
 			{Type: llm.ContentTypeToolUse, ID: "call-3", Name: "nuke", Input: map[string]any{}},
 		}, StopReason: llm.StopReasonToolUse},
 		{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}}, StopReason: llm.StopReasonEndTurn},
-	}}
+	})
 	cfg := orchestrator.Config{MaxIterations: 5, SessionStore: store, ApprovalMode: orchestrator.ApprovalSuspend}
 	orch := orchestrator.NewWithConfig(client, executor, cfg)
 
@@ -2940,14 +2852,14 @@ func TestResume_DecisionBindsToToolCallID_WhenApprovalRequirementChanges(t *test
 	registry.Register(&togglingApprovalTool{name: "gate", needs: &gateNeedsApproval, executed: &gateExecuted})
 	registry.Register(&approvalTool{name: "nuke", executed: &nukeExecuted})
 	executor := tool.NewExecutor(registry)
-	client := &mockLLMClient{responses: []*llm.Response{
+	client := scriptedLLM([]*llm.Response{
 		{Content: []llm.ContentBlock{
 			{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "probe", Input: map[string]any{}},
 			{Type: llm.ContentTypeToolUse, ID: "call-2", Name: "gate", Input: map[string]any{}},
 			{Type: llm.ContentTypeToolUse, ID: "call-3", Name: "nuke", Input: map[string]any{}},
 		}, StopReason: llm.StopReasonToolUse},
 		{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}}, StopReason: llm.StopReasonEndTurn},
-	}}
+	})
 	cfg := orchestrator.Config{MaxIterations: 5, SessionStore: store, ApprovalMode: orchestrator.ApprovalSuspend}
 	orch := orchestrator.NewWithConfig(client, executor, cfg)
 
@@ -2977,13 +2889,13 @@ func TestResume_SameToolNameDistinctIDs_ApplyOwnDecisions(t *testing.T) {
 	var targets []string
 	registry.Register(&recordingApprovalTool{name: "deploy", targets: &targets})
 	executor := tool.NewExecutor(registry)
-	client := &mockLLMClient{responses: []*llm.Response{
+	client := scriptedLLM([]*llm.Response{
 		{Content: []llm.ContentBlock{
 			{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "deploy", Input: map[string]any{"target": "staging"}},
 			{Type: llm.ContentTypeToolUse, ID: "call-2", Name: "deploy", Input: map[string]any{"target": "prod"}},
 		}, StopReason: llm.StopReasonToolUse},
 		{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}}, StopReason: llm.StopReasonEndTurn},
-	}}
+	})
 	cfg := orchestrator.Config{MaxIterations: 5, SessionStore: store, ApprovalMode: orchestrator.ApprovalSuspend}
 	orch := orchestrator.NewWithConfig(client, executor, cfg)
 
@@ -3015,10 +2927,10 @@ func TestResume_RestoresCallerApprovalFunc(t *testing.T) {
 		callerAsked = true
 		return false, nil
 	})
-	client := &mockLLMClient{responses: []*llm.Response{
+	client := scriptedLLM([]*llm.Response{
 		{Content: []llm.ContentBlock{{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "deploy", Input: map[string]any{}}}, StopReason: llm.StopReasonToolUse},
 		{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}}, StopReason: llm.StopReasonEndTurn},
-	}}
+	})
 	cfg := orchestrator.Config{MaxIterations: 5, SessionStore: store, ApprovalMode: orchestrator.ApprovalSuspend}
 	orch := orchestrator.NewWithConfig(client, executor, cfg)
 
@@ -3096,7 +3008,7 @@ func TestResume_RejectsInvalidStoredSnapshot(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &badSnapshotStore{snap: tc.snap}
-			orch := orchestrator.NewWithConfig(&mockLLMClient{}, tool.NewExecutor(tool.NewRegistry()),
+			orch := orchestrator.NewWithConfig(scriptedLLM(nil), tool.NewExecutor(tool.NewRegistry()),
 				orchestrator.Config{MaxIterations: 5, SessionStore: store, ApprovalMode: orchestrator.ApprovalSuspend})
 
 			err := orch.Resume(context.Background(), "session-http", orchestrator.Approve(true))
@@ -3129,7 +3041,7 @@ func TestResume_RejectsCorruptSnapshotFile(t *testing.T) {
 	}
 
 	store := session.NewFileStore(dir)
-	orch := orchestrator.NewWithConfig(&mockLLMClient{}, tool.NewExecutor(tool.NewRegistry()),
+	orch := orchestrator.NewWithConfig(scriptedLLM(nil), tool.NewExecutor(tool.NewRegistry()),
 		orchestrator.Config{MaxIterations: 5, SessionStore: store, ApprovalMode: orchestrator.ApprovalSuspend})
 
 	if err := orch.Resume(context.Background(), sid, orchestrator.Approve(true)); err == nil {

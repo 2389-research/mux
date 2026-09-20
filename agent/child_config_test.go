@@ -9,18 +9,17 @@ import (
 
 	"github.com/2389-research/mux/agent"
 	"github.com/2389-research/mux/hooks"
+	"github.com/2389-research/mux/internal/llmtest"
 	"github.com/2389-research/mux/llm"
 	"github.com/2389-research/mux/orchestrator"
 	"github.com/2389-research/mux/skill"
 	"github.com/2389-research/mux/tool"
 )
 
-func newTestClient() *mockClient {
-	return &mockClient{
-		response: &llm.Response{
-			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
-		},
-	}
+func newTestClient() *llmtest.Client {
+	return scriptedResponse(&llm.Response{
+		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "ok"}},
+	})
 }
 
 // TestSpawnChildRejectsSuspendWithoutSessionStore covers the invalid child config:

@@ -6,6 +6,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/2389-research/mux/internal/llmtest"
 	"github.com/2389-research/mux/llm"
 	"github.com/2389-research/mux/tool"
 )
@@ -138,7 +139,7 @@ func TestReviewerPreset(t *testing.T) {
 
 func TestSpawnExplorer(t *testing.T) {
 	registry := tool.NewRegistry()
-	client := &mockPresetLLMClient{}
+	client := presetsTestClient()
 
 	parent := New(Config{
 		Name:      "parent",
@@ -161,7 +162,7 @@ func TestSpawnExplorer(t *testing.T) {
 
 func TestSpawnPlanner(t *testing.T) {
 	registry := tool.NewRegistry()
-	client := &mockPresetLLMClient{}
+	client := presetsTestClient()
 
 	parent := New(Config{
 		Name:      "parent",
@@ -181,7 +182,7 @@ func TestSpawnPlanner(t *testing.T) {
 
 func TestSpawnWithCustomName(t *testing.T) {
 	registry := tool.NewRegistry()
-	client := &mockPresetLLMClient{}
+	client := presetsTestClient()
 
 	parent := New(Config{
 		Name:      "parent",
@@ -201,7 +202,7 @@ func TestSpawnWithCustomName(t *testing.T) {
 
 func TestAllSpawnMethods(t *testing.T) {
 	registry := tool.NewRegistry()
-	client := &mockPresetLLMClient{}
+	client := presetsTestClient()
 
 	parent := New(Config{
 		Name:      "parent",
@@ -234,19 +235,15 @@ func TestAllSpawnMethods(t *testing.T) {
 	}
 }
 
-// mockPresetLLMClient for preset tests
-type mockPresetLLMClient struct{}
-
-func (m *mockPresetLLMClient) CreateMessage(ctx context.Context, req *llm.Request) (*llm.Response, error) {
-	return &llm.Response{
-		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
-	}, nil
+// presetsTestClient is the shared scripted client used by the preset tests.
+// Preset spawning never runs a turn, so the callback just answers any run.
+func presetsTestClient() *llmtest.Client {
+	return &llmtest.Client{
+		Media: llm.FullCapabilities(),
+		Respond: func(context.Context, *llm.Request) (*llm.Response, error) {
+			return &llm.Response{
+				Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
+			}, nil
+		},
+	}
 }
-
-func (m *mockPresetLLMClient) CreateMessageStream(ctx context.Context, req *llm.Request) (<-chan llm.StreamEvent, error) {
-	ch := make(chan llm.StreamEvent)
-	close(ch)
-	return ch, nil
-}
-
-func (m *mockPresetLLMClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }

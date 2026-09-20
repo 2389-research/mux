@@ -48,9 +48,7 @@ func toolResultText(msgs []llm.Message, toolName string) string {
 }
 
 func TestAgentInjectsSkillCatalog(t *testing.T) {
-	client := &capturingClient{
-		response: &llm.Response{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}}},
-	}
+	client := scriptedResponse(&llm.Response{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}}})
 	a := agent.New(agent.Config{
 		Name:         "root",
 		Registry:     tool.NewRegistry(),
@@ -61,10 +59,10 @@ func TestAgentInjectsSkillCatalog(t *testing.T) {
 	if err := a.Run(context.Background(), "hi"); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if client.lastRequest == nil {
+	if lastRequest(client) == nil {
 		t.Fatal("no request captured")
 	}
-	sys := client.lastRequest.System
+	sys := lastRequest(client).System
 	if !strings.Contains(sys, "Base prompt.") {
 		t.Errorf("system prompt lost the base:\n%s", sys)
 	}
@@ -74,16 +72,16 @@ func TestAgentInjectsSkillCatalog(t *testing.T) {
 }
 
 func TestAgentLoadSkillRoundTrip(t *testing.T) {
-	client := &scriptedClient{responses: []*llm.Response{
-		{
+	client := queuedResponses(
+		&llm.Response{
 			Content:    []llm.ContentBlock{{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "load_skill", Input: map[string]any{"name": "greet"}}},
 			StopReason: llm.StopReasonToolUse,
 		},
-		{
+		&llm.Response{
 			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
 			StopReason: llm.StopReasonEndTurn,
 		},
-	}}
+	)
 	a := agent.New(agent.Config{
 		Name:      "root",
 		Registry:  tool.NewRegistry(),
@@ -99,16 +97,16 @@ func TestAgentLoadSkillRoundTrip(t *testing.T) {
 }
 
 func TestAgentLoadSkillReachableWithAllowlist(t *testing.T) {
-	client := &scriptedClient{responses: []*llm.Response{
-		{
+	client := queuedResponses(
+		&llm.Response{
 			Content:    []llm.ContentBlock{{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "load_skill", Input: map[string]any{"name": "greet"}}},
 			StopReason: llm.StopReasonToolUse,
 		},
-		{
+		&llm.Response{
 			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
 			StopReason: llm.StopReasonEndTurn,
 		},
-	}}
+	)
 	// Non-empty allowlist that omits load_skill: wiring must auto-allow it.
 	a := agent.New(agent.Config{
 		Name:         "root",
@@ -130,9 +128,7 @@ func TestAgentLoadSkillReachableWithAllowlist(t *testing.T) {
 }
 
 func TestAgentInjectsSkillCatalogDefaultPrompt(t *testing.T) {
-	client := &capturingClient{
-		response: &llm.Response{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}}},
-	}
+	client := scriptedResponse(&llm.Response{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}}})
 	// No SystemPrompt set: the catalog must still be injected into the effective
 	// (default) system prompt.
 	a := agent.New(agent.Config{
@@ -144,19 +140,17 @@ func TestAgentInjectsSkillCatalogDefaultPrompt(t *testing.T) {
 	if err := a.Run(context.Background(), "hi"); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if client.lastRequest == nil {
+	if lastRequest(client) == nil {
 		t.Fatal("no request captured")
 	}
-	sys := client.lastRequest.System
+	sys := lastRequest(client).System
 	if !strings.Contains(sys, "## Available Skills") || !strings.Contains(sys, "- **greet** — Say hi to the user.") {
 		t.Errorf("catalog missing from default-prompt path:\n%s", sys)
 	}
 }
 
 func TestAgentNoSkillsUnaffected(t *testing.T) {
-	client := &capturingClient{
-		response: &llm.Response{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}}},
-	}
+	client := scriptedResponse(&llm.Response{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}}})
 	reg := tool.NewRegistry()
 	a := agent.New(agent.Config{
 		Name:      "root",
@@ -166,7 +160,7 @@ func TestAgentNoSkillsUnaffected(t *testing.T) {
 	if err := a.Run(context.Background(), "hi"); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if client.lastRequest != nil && strings.Contains(client.lastRequest.System, "## Available Skills") {
+	if lastRequest(client) != nil && strings.Contains(lastRequest(client).System, "## Available Skills") {
 		t.Error("catalog injected without Skills set")
 	}
 	if _, ok := reg.Get("load_skill"); ok {

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/2389-research/mux/hooks"
+	"github.com/2389-research/mux/internal/llmtest"
 	"github.com/2389-research/mux/llm"
 	"github.com/2389-research/mux/orchestrator"
 	"github.com/2389-research/mux/tool"
@@ -35,71 +36,57 @@ func (r *compactionHookRecorder) Events() []hooks.CompactionEvent {
 	return result
 }
 
-// compactionTestClient is a mock LLM client for compaction integration tests.
-// It tracks all requests and returns configurable responses.
-type compactionTestClient struct {
-	mu           sync.Mutex
+// compactionSpec configures the shared scripted client for compaction tests.
+type compactionSpec struct {
 	responses    []*llm.Response
-	callIndex    int
-	requests     []*llm.Request
-	responseSize int // bytes of text to return (for large response tests)
+	responseSize int // bytes of text to return for an unscripted response
 }
 
-func (c *compactionTestClient) CreateMessage(ctx context.Context, req *llm.Request) (*llm.Response, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.requests = append(c.requests, req)
+// compactionClient scripts the shared llmtest.Client with this suite's
+// compaction-aware behavior: a request carrying the summarization system prompt
+// gets a canned summary, the next scripted response answers any other call, and
+// once the script runs out the client returns a text response of spec's
+// configured size. Requests themselves are recorded by the fixture.
+func compactionClient(spec compactionSpec) *llmtest.Client {
+	var mu sync.Mutex
+	callIndex := 0
+	return &llmtest.Client{
+		Media: llm.FullCapabilities(),
+		Respond: func(_ context.Context, req *llm.Request) (*llm.Response, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			// Check if this is a summarization request (has SummarizationPrompt system)
+			if strings.Contains(req.System, "CONTEXT CHECKPOINT COMPACTION") {
+				// Return a summary response
+				return &llm.Response{
+					ID: "summary-response",
+					Content: []llm.ContentBlock{
+						{Type: llm.ContentTypeText, Text: "Summary: Previous conversation about testing and code."},
+					},
+					StopReason: llm.StopReasonEndTurn,
+					Usage:      llm.Usage{InputTokens: 100, OutputTokens: 20},
+				}, nil
+			}
 
-	// Check if this is a summarization request (has SummarizationPrompt system)
-	if strings.Contains(req.System, "CONTEXT CHECKPOINT COMPACTION") {
-		// Return a summary response
-		return &llm.Response{
-			ID: "summary-response",
-			Content: []llm.ContentBlock{
-				{Type: llm.ContentTypeText, Text: "Summary: Previous conversation about testing and code."},
-			},
-			StopReason: llm.StopReasonEndTurn,
-			Usage:      llm.Usage{InputTokens: 100, OutputTokens: 20},
-		}, nil
+			// Return from configured responses
+			if callIndex < len(spec.responses) {
+				resp := spec.responses[callIndex]
+				callIndex++
+				return resp, nil
+			}
+
+			// Default response with configurable size
+			responseText := "Done"
+			if spec.responseSize > 0 {
+				responseText = strings.Repeat("x", spec.responseSize)
+			}
+			return &llm.Response{
+				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: responseText}},
+				StopReason: llm.StopReasonEndTurn,
+				Usage:      llm.Usage{InputTokens: 50, OutputTokens: 10},
+			}, nil
+		},
 	}
-
-	// Return from configured responses
-	if c.callIndex < len(c.responses) {
-		resp := c.responses[c.callIndex]
-		c.callIndex++
-		return resp, nil
-	}
-
-	// Default response with configurable size
-	responseText := "Done"
-	if c.responseSize > 0 {
-		responseText = strings.Repeat("x", c.responseSize)
-	}
-	return &llm.Response{
-		Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: responseText}},
-		StopReason: llm.StopReasonEndTurn,
-		Usage:      llm.Usage{InputTokens: 50, OutputTokens: 10},
-	}, nil
-}
-
-func (c *compactionTestClient) CreateMessageStream(ctx context.Context, req *llm.Request) (<-chan llm.StreamEvent, error) {
-	ch := make(chan llm.StreamEvent)
-	go func() {
-		resp, _ := c.CreateMessage(ctx, req)
-		ch <- llm.StreamEvent{Type: llm.EventMessageStop, Response: resp}
-		close(ch)
-	}()
-	return ch, nil
-}
-
-func (c *compactionTestClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
-
-func (c *compactionTestClient) Requests() []*llm.Request {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	result := make([]*llm.Request, len(c.requests))
-	copy(result, c.requests)
-	return result
 }
 
 // TestCompactionTriggers verifies that compaction fires when budget is exceeded.
@@ -109,7 +96,7 @@ func TestCompactionTriggers(t *testing.T) {
 	hookMgr.OnCompaction(recorder.record)
 
 	// Client returns small responses so compaction can reduce tokens
-	client := &compactionTestClient{}
+	client := compactionClient(compactionSpec{})
 
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
@@ -169,9 +156,9 @@ func TestCompactionDisabledIntegration(t *testing.T) {
 	hookMgr.OnCompaction(recorder.record)
 
 	// Client with large responses
-	client := &compactionTestClient{
+	client := compactionClient(compactionSpec{
 		responseSize: 5000, // Large response that would trigger compaction if enabled
-	}
+	})
 
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
@@ -205,7 +192,7 @@ func TestCompactionPreservesRecentMessages(t *testing.T) {
 	hookMgr.OnCompaction(recorder.record)
 
 	// Track requests to inspect what messages are sent post-compaction
-	client := &compactionTestClient{}
+	client := compactionClient(compactionSpec{})
 
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
@@ -280,7 +267,7 @@ func TestCompactionHookFires(t *testing.T) {
 	})
 
 	// Client returns a small summary to ensure compaction reduces tokens
-	client := &compactionTestClient{}
+	client := compactionClient(compactionSpec{})
 
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
@@ -349,25 +336,23 @@ func TestCompactionMultipleTriggers(t *testing.T) {
 	hookMgr.OnCompaction(recorder.record)
 
 	// Use a tool to create multiple iterations
-	client := &compactionTestClient{
-		responses: []*llm.Response{
-			{
-				Content: []llm.ContentBlock{{
-					Type:  llm.ContentTypeToolUse,
-					ID:    "tool_1",
-					Name:  "test_tool",
-					Input: map[string]any{},
-				}},
-				StopReason: llm.StopReasonToolUse,
-				Usage:      llm.Usage{InputTokens: 100, OutputTokens: 50},
-			},
-			{
-				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: strings.Repeat("x", 1000)}},
-				StopReason: llm.StopReasonEndTurn,
-				Usage:      llm.Usage{InputTokens: 100, OutputTokens: 250},
-			},
+	client := compactionClient(compactionSpec{responses: []*llm.Response{
+		{
+			Content: []llm.ContentBlock{{
+				Type:  llm.ContentTypeToolUse,
+				ID:    "tool_1",
+				Name:  "test_tool",
+				Input: map[string]any{},
+			}},
+			StopReason: llm.StopReasonToolUse,
+			Usage:      llm.Usage{InputTokens: 100, OutputTokens: 50},
 		},
-	}
+		{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: strings.Repeat("x", 1000)}},
+			StopReason: llm.StopReasonEndTurn,
+			Usage:      llm.Usage{InputTokens: 100, OutputTokens: 250},
+		},
+	}})
 
 	registry := tool.NewRegistry()
 	testTool := &compactionMockTool{name: "test_tool", output: strings.Repeat("y", 500)}
@@ -406,38 +391,36 @@ func TestCompactionWithToolResults(t *testing.T) {
 	// Client that uses a tool and generates large responses
 	// Note: compaction calls CreateMessage BEFORE the normal loop, so first call is for summary
 	callCount := 0
-	client := &mockDynamicLLMClient{
-		responseFn: func() *llm.Response {
-			callCount++
-			if callCount == 1 {
-				// First call is compaction summary request
-				return &llm.Response{
-					Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Summary: Working on data processing task."}},
-					StopReason: llm.StopReasonEndTurn,
-					Usage:      llm.Usage{InputTokens: 50, OutputTokens: 20},
-				}
-			}
-			if callCount == 2 {
-				// Second call: tool use
-				return &llm.Response{
-					Content: []llm.ContentBlock{{
-						Type:  llm.ContentTypeToolUse,
-						ID:    "tool_call_1",
-						Name:  "large_tool",
-						Input: map[string]any{"size": 1000},
-					}},
-					StopReason: llm.StopReasonToolUse,
-					Usage:      llm.Usage{InputTokens: 50, OutputTokens: 30},
-				}
-			}
-			// Subsequent calls: text response (may include more compaction summaries)
+	client := dynamicLLMClient(func() *llm.Response {
+		callCount++
+		if callCount == 1 {
+			// First call is compaction summary request
 			return &llm.Response{
-				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done processing."}},
+				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Summary: Working on data processing task."}},
 				StopReason: llm.StopReasonEndTurn,
-				Usage:      llm.Usage{InputTokens: 200, OutputTokens: 10},
+				Usage:      llm.Usage{InputTokens: 50, OutputTokens: 20},
 			}
-		},
-	}
+		}
+		if callCount == 2 {
+			// Second call: tool use
+			return &llm.Response{
+				Content: []llm.ContentBlock{{
+					Type:  llm.ContentTypeToolUse,
+					ID:    "tool_call_1",
+					Name:  "large_tool",
+					Input: map[string]any{"size": 1000},
+				}},
+				StopReason: llm.StopReasonToolUse,
+				Usage:      llm.Usage{InputTokens: 50, OutputTokens: 30},
+			}
+		}
+		// Subsequent calls: text response (may include more compaction summaries)
+		return &llm.Response{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done processing."}},
+			StopReason: llm.StopReasonEndTurn,
+			Usage:      llm.Usage{InputTokens: 200, OutputTokens: 10},
+		}
+	})
 
 	registry := tool.NewRegistry()
 	// Tool that returns large output
@@ -477,9 +460,7 @@ func TestCompactionHookError(t *testing.T) {
 		return context.DeadlineExceeded // Simulate an error
 	})
 
-	client := &compactionTestClient{
-		responseSize: 1000,
-	}
+	client := compactionClient(compactionSpec{responseSize: 1000})
 
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)

@@ -8,36 +8,29 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/2389-research/mux/internal/llmtest"
 	"github.com/2389-research/mux/llm"
 	"github.com/2389-research/mux/tool"
 )
 
-// compactMockClient implements llm.Client for testing compaction.
-type compactMockClient struct {
+// compactSpec scripts the shared llmtest.Client for compaction tests: a
+// canned response or error, with every request recorded by the fixture.
+type compactSpec struct {
 	response *llm.Response
 	err      error
-	requests []*llm.Request // capture requests for inspection
 }
 
-func (m *compactMockClient) CreateMessage(ctx context.Context, req *llm.Request) (*llm.Response, error) {
-	m.requests = append(m.requests, req)
-	if m.err != nil {
-		return nil, m.err
+func (spec compactSpec) client() *llmtest.Client {
+	return &llmtest.Client{
+		Media: llm.FullCapabilities(),
+		Respond: func(context.Context, *llm.Request) (*llm.Response, error) {
+			if spec.err != nil {
+				return nil, spec.err
+			}
+			return spec.response, nil
+		},
 	}
-	return m.response, nil
 }
-
-func (m *compactMockClient) CreateMessageStream(ctx context.Context, req *llm.Request) (<-chan llm.StreamEvent, error) {
-	ch := make(chan llm.StreamEvent)
-	go func() {
-		resp, _ := m.CreateMessage(ctx, req)
-		ch <- llm.StreamEvent{Type: llm.EventMessageStop, Response: resp}
-		close(ch)
-	}()
-	return ch, nil
-}
-
-func (m *compactMockClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
 
 // newTestExecutor creates a test executor with an empty registry.
 func newTestExecutor() *tool.Executor {
@@ -47,7 +40,7 @@ func newTestExecutor() *tool.Executor {
 
 func TestCompactDisabled(t *testing.T) {
 	// When ContextBudget is 0, compaction should be disabled
-	client := &compactMockClient{}
+	client := (&compactSpec{}).client()
 	executor := newTestExecutor()
 	config := Config{
 		MaxIterations: 10,
@@ -74,7 +67,7 @@ func TestCompactDisabled(t *testing.T) {
 
 func TestCompactUnderBudget(t *testing.T) {
 	// When token count is under budget, compaction should not trigger
-	client := &compactMockClient{}
+	client := (&compactSpec{}).client()
 	executor := newTestExecutor()
 	config := Config{
 		MaxIterations: 10,
@@ -100,13 +93,13 @@ func TestCompactUnderBudget(t *testing.T) {
 
 func TestCompactEmptySummary(t *testing.T) {
 	// When LLM returns empty response, ErrEmptySummary should be returned
-	client := &compactMockClient{
+	client := compactSpec{
 		response: &llm.Response{
 			Content:    []llm.ContentBlock{}, // Empty content
 			StopReason: llm.StopReasonEndTurn,
 			Usage:      llm.Usage{InputTokens: 100, OutputTokens: 0},
 		},
-	}
+	}.client()
 	executor := newTestExecutor()
 	config := Config{
 		MaxIterations: 10,
@@ -130,9 +123,9 @@ func TestCompactEmptySummary(t *testing.T) {
 func TestCompactLLMError(t *testing.T) {
 	// When LLM returns error, it should be propagated
 	expectedErr := errors.New("LLM API error")
-	client := &compactMockClient{
+	client := compactSpec{
 		err: expectedErr,
-	}
+	}.client()
 	executor := newTestExecutor()
 	config := Config{
 		MaxIterations: 10,
@@ -153,7 +146,7 @@ func TestCompactLLMError(t *testing.T) {
 }
 
 func TestCollectRecentUserMessages(t *testing.T) {
-	client := &compactMockClient{}
+	client := (&compactSpec{}).client()
 	executor := newTestExecutor()
 	config := DefaultConfig()
 	orch := NewWithConfig(client, executor, config)
@@ -185,7 +178,7 @@ func TestCollectRecentUserMessages(t *testing.T) {
 }
 
 func TestCollectRecentUserMessagesWithTokenLimit(t *testing.T) {
-	client := &compactMockClient{}
+	client := (&compactSpec{}).client()
 	executor := newTestExecutor()
 	config := DefaultConfig()
 	orch := NewWithConfig(client, executor, config)
@@ -215,7 +208,7 @@ func TestCollectRecentUserMessagesWithTokenLimit(t *testing.T) {
 }
 
 func TestBuildCompactedHistory(t *testing.T) {
-	client := &compactMockClient{}
+	client := (&compactSpec{}).client()
 	executor := newTestExecutor()
 	config := DefaultConfig()
 	orch := NewWithConfig(client, executor, config)
@@ -251,7 +244,7 @@ func TestBuildCompactedHistory(t *testing.T) {
 }
 
 func TestBuildSummarizationRequest(t *testing.T) {
-	client := &compactMockClient{}
+	client := (&compactSpec{}).client()
 	executor := newTestExecutor()
 	config := Config{
 		MaxIterations:   10,
@@ -287,7 +280,7 @@ func TestBuildSummarizationRequest(t *testing.T) {
 
 func TestBuildSummarizationRequestUsesMainModel(t *testing.T) {
 	// When CompactionModel is empty, should use main Model
-	client := &compactMockClient{}
+	client := (&compactSpec{}).client()
 	executor := newTestExecutor()
 	config := Config{
 		MaxIterations:   10,
@@ -311,7 +304,7 @@ func TestBuildSummarizationRequestUsesMainModel(t *testing.T) {
 func TestCompactIntegration(t *testing.T) {
 	// Integration test: compaction should work end-to-end
 	summaryText := "Summary of the conversation: user asked about Go testing."
-	client := &compactMockClient{
+	client := compactSpec{
 		response: &llm.Response{
 			ID: "test-response",
 			Content: []llm.ContentBlock{
@@ -320,7 +313,7 @@ func TestCompactIntegration(t *testing.T) {
 			StopReason: llm.StopReasonEndTurn,
 			Usage:      llm.Usage{InputTokens: 100, OutputTokens: 50},
 		},
-	}
+	}.client()
 	executor := newTestExecutor()
 
 	// Create a large conversation that exceeds budget
@@ -378,8 +371,8 @@ func TestCompactIntegration(t *testing.T) {
 	}
 
 	// Verify LLM was called
-	if len(client.requests) != 1 {
-		t.Errorf("expected 1 LLM request, got %d", len(client.requests))
+	if len(client.Requests()) != 1 {
+		t.Errorf("expected 1 LLM request, got %d", len(client.Requests()))
 	}
 }
 
@@ -409,7 +402,7 @@ func TestCollectRecentUserMessagesSkipsToolResults(t *testing.T) {
 	// A pure tool-result message must not be collected as a "recent user
 	// message": compaction summarizes away the assistant turn that held the
 	// matching tool_use, so retaining the tool_result would orphan it.
-	client := &compactMockClient{}
+	client := (&compactSpec{}).client()
 	executor := newTestExecutor()
 	orch := NewWithConfig(client, executor, DefaultConfig())
 
@@ -442,14 +435,14 @@ func TestCompactDoesNotOrphanToolResults(t *testing.T) {
 	// End-to-end: when compaction fires while the most recent message carries
 	// tool results, the rebuilt history must not leave those results orphaned.
 	summaryText := "Summary: explored the codebase."
-	client := &compactMockClient{
+	client := compactSpec{
 		response: &llm.Response{
 			ID:         "r",
 			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: summaryText}},
 			StopReason: llm.StopReasonEndTurn,
 			Usage:      llm.Usage{InputTokens: 100, OutputTokens: 20},
 		},
-	}
+	}.client()
 	executor := newTestExecutor()
 	largeText := strings.Repeat("x", 2000) // ~500 tokens of removable history
 	config := Config{MaxIterations: 10, ContextBudget: 100, Model: "claude-3-opus"}

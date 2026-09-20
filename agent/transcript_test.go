@@ -280,11 +280,11 @@ func TestTranscriptSaveLoadFileJSONL(t *testing.T) {
 // keeps its slot still passes a count comparison.
 func TestAgentSaveRestoreTranscript(t *testing.T) {
 	registry := tool.NewRegistry()
-	client := &mockLLMClient{
+	client := asyncSpec{
 		response: &llm.Response{
 			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "response"}},
 		},
-	}
+	}.client()
 
 	agent := New(Config{
 		Name:      "test-agent",

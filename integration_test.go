@@ -17,6 +17,7 @@ import (
 
 	"github.com/2389-research/mux/agent"
 	"github.com/2389-research/mux/coordinator"
+	"github.com/2389-research/mux/internal/llmtest"
 	"github.com/2389-research/mux/llm"
 	"github.com/2389-research/mux/mcp"
 	"github.com/2389-research/mux/orchestrator"
@@ -45,38 +46,29 @@ func (t *testTool) WasExecuted() bool {
 	return t.executed
 }
 
-type mockLLM struct {
-	mu        sync.Mutex
-	responses []*llm.Response
-	idx       int
-}
-
-func (m *mockLLM) CreateMessage(ctx context.Context, req *llm.Request) (*llm.Response, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.idx >= len(m.responses) {
-		return &llm.Response{
-			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
-			StopReason: llm.StopReasonEndTurn,
-		}, nil
+// queuedLLM returns the shared scripted client answering each canned response
+// in turn, then "done" (end_turn) once the queue is exhausted — the same
+// stand-in behavior this suite's old hand-written client provided.
+func queuedLLM(responses []*llm.Response) *llmtest.Client {
+	var mu sync.Mutex
+	index := 0
+	return &llmtest.Client{
+		Media: llm.FullCapabilities(),
+		Respond: func(context.Context, *llm.Request) (*llm.Response, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if index >= len(responses) {
+				return &llm.Response{
+					Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
+					StopReason: llm.StopReasonEndTurn,
+				}, nil
+			}
+			resp := responses[index]
+			index++
+			return resp, nil
+		},
 	}
-	resp := m.responses[m.idx]
-	m.idx++
-	return resp, nil
 }
-
-func (m *mockLLM) CreateMessageStream(ctx context.Context, req *llm.Request) (<-chan llm.StreamEvent, error) {
-	ch := make(chan llm.StreamEvent)
-	go func() {
-		resp, _ := m.CreateMessage(ctx, req)
-		ch <- llm.StreamEvent{Type: llm.EventMessageStop, Response: resp}
-		close(ch)
-	}()
-	return ch, nil
-}
-
-func (m *mockLLM) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
 
 func TestFullStackIntegration(t *testing.T) {
 	registry := tool.NewRegistry()
@@ -89,23 +81,21 @@ func TestFullStackIntegration(t *testing.T) {
 		return checker.Check(ctx, tl.Name(), params)
 	})
 
-	mockClient := &mockLLM{
-		responses: []*llm.Response{
-			{
-				Content: []llm.ContentBlock{{
-					Type:  llm.ContentTypeToolUse,
-					ID:    "tool_1",
-					Name:  "calculator",
-					Input: map[string]any{"a": 1},
-				}},
-				StopReason: llm.StopReasonToolUse,
-			},
-			{
-				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done!"}},
-				StopReason: llm.StopReasonEndTurn,
-			},
+	mockClient := queuedLLM([]*llm.Response{
+		{
+			Content: []llm.ContentBlock{{
+				Type:  llm.ContentTypeToolUse,
+				ID:    "tool_1",
+				Name:  "calculator",
+				Input: map[string]any{"a": 1},
+			}},
+			StopReason: llm.StopReasonToolUse,
 		},
-	}
+		{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done!"}},
+			StopReason: llm.StopReasonEndTurn,
+		},
+	})
 
 	orch := orchestrator.New(mockClient, executor)
 	events := orch.Subscribe()
@@ -158,14 +148,12 @@ func TestMultiAgentCoordination(t *testing.T) {
 	registry.Register(&testTool{name: "write_file"})
 	registry.Register(&testTool{name: "compute"})
 
-	mockClient := &mockLLM{
-		responses: []*llm.Response{
-			{
-				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done"}},
-				StopReason: llm.StopReasonEndTurn,
-			},
+	mockClient := queuedLLM([]*llm.Response{
+		{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done"}},
+			StopReason: llm.StopReasonEndTurn,
 		},
-	}
+	})
 
 	// Create coordinator for resource management
 	coord := coordinator.New()
@@ -241,8 +229,12 @@ func TestMultiAgentCoordination(t *testing.T) {
 //
 // It deliberately reports a mismatch by making the next provider call fail,
 // rather than only recording it: if the orchestrator mis-correlated the result,
-// the conversation must not continue as if it had succeeded.
+// the conversation must not continue as if it had succeeded. The llm.Client
+// methods themselves come from the shared llmtest.Client; only the script lives
+// here.
 type mcpScriptedLLM struct {
+	*llmtest.Client
+
 	nonce  string
 	toolID string
 
@@ -251,7 +243,26 @@ type mcpScriptedLLM struct {
 	resultSeen *llm.ContentBlock
 }
 
-func (m *mcpScriptedLLM) CreateMessage(_ context.Context, req *llm.Request) (*llm.Response, error) {
+func newMCPScriptedLLM(nonce, toolID string) *mcpScriptedLLM {
+	m := &mcpScriptedLLM{nonce: nonce, toolID: toolID}
+	m.Client = &llmtest.Client{
+		Media:   llm.FullCapabilities(),
+		Respond: m.respond,
+		Stream: func(ctx context.Context, req *llm.Request) (<-chan llm.StreamEvent, error) {
+			resp, err := m.respond(ctx, req)
+			if err != nil {
+				return nil, err
+			}
+			ch := make(chan llm.StreamEvent, 1)
+			ch <- llm.StreamEvent{Type: llm.EventMessageStop, Response: resp}
+			close(ch)
+			return ch, nil
+		},
+	}
+	return m
+}
+
+func (m *mcpScriptedLLM) respond(_ context.Context, req *llm.Request) (*llm.Response, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -288,19 +299,6 @@ func (m *mcpScriptedLLM) CreateMessage(_ context.Context, req *llm.Request) (*ll
 		StopReason: llm.StopReasonEndTurn,
 	}, nil
 }
-
-func (m *mcpScriptedLLM) CreateMessageStream(ctx context.Context, req *llm.Request) (<-chan llm.StreamEvent, error) {
-	resp, err := m.CreateMessage(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-	ch := make(chan llm.StreamEvent, 1)
-	ch <- llm.StreamEvent{Type: llm.EventMessageStop, Response: resp}
-	close(ch)
-	return ch, nil
-}
-
-func (m *mcpScriptedLLM) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
 
 // resultBlock returns the tool_result the second provider call observed, if any.
 func (m *mcpScriptedLLM) resultBlock() *llm.ContentBlock {
@@ -367,7 +365,7 @@ func TestMCPAgentIntegration(t *testing.T) {
 
 	nonce := randomNonce(t)
 	toolID := "call_" + nonce
-	llmClient := &mcpScriptedLLM{nonce: nonce, toolID: toolID}
+	llmClient := newMCPScriptedLLM(nonce, toolID)
 
 	mcpAgent := agent.New(agent.Config{
 		Name:         "mcp-agent",
@@ -520,25 +518,23 @@ func TestPermissionApprovalFlow(t *testing.T) {
 		return checker.Check(ctx, tl.Name(), params)
 	})
 
-	mockClient := &mockLLM{
-		responses: []*llm.Response{
-			{
-				Content: []llm.ContentBlock{
-					{
-						Type:  llm.ContentTypeToolUse,
-						ID:    "tool_1",
-						Name:  "dangerous_operation",
-						Input: map[string]any{},
-					},
+	mockClient := queuedLLM([]*llm.Response{
+		{
+			Content: []llm.ContentBlock{
+				{
+					Type:  llm.ContentTypeToolUse,
+					ID:    "tool_1",
+					Name:  "dangerous_operation",
+					Input: map[string]any{},
 				},
-				StopReason: llm.StopReasonToolUse,
 			},
-			{
-				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done"}},
-				StopReason: llm.StopReasonEndTurn,
-			},
+			StopReason: llm.StopReasonToolUse,
 		},
-	}
+		{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done"}},
+			StopReason: llm.StopReasonEndTurn,
+		},
+	})
 
 	orch := orchestrator.New(mockClient, executor)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -557,25 +553,23 @@ func TestPermissionApprovalFlow(t *testing.T) {
 	dangerousTool.Reset()
 	checker.SetMode(permission.ModeDeny)
 
-	mockClient2 := &mockLLM{
-		responses: []*llm.Response{
-			{
-				Content: []llm.ContentBlock{
-					{
-						Type:  llm.ContentTypeToolUse,
-						ID:    "tool_2",
-						Name:  "dangerous_operation",
-						Input: map[string]any{},
-					},
+	mockClient2 := queuedLLM([]*llm.Response{
+		{
+			Content: []llm.ContentBlock{
+				{
+					Type:  llm.ContentTypeToolUse,
+					ID:    "tool_2",
+					Name:  "dangerous_operation",
+					Input: map[string]any{},
 				},
-				StopReason: llm.StopReasonToolUse,
 			},
-			{
-				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Handled denial"}},
-				StopReason: llm.StopReasonEndTurn,
-			},
+			StopReason: llm.StopReasonToolUse,
 		},
-	}
+		{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Handled denial"}},
+			StopReason: llm.StopReasonEndTurn,
+		},
+	})
 	orch2 := orchestrator.New(mockClient2, executor)
 
 	err = orch2.Run(ctx, "test")
@@ -593,25 +587,23 @@ func TestPermissionApprovalFlow(t *testing.T) {
 	checker.AddRule(permission.AllowTool("safe_operation"))
 	checker.AddRule(permission.DenyTool("dangerous_operation"))
 
-	mockClient3 := &mockLLM{
-		responses: []*llm.Response{
-			{
-				Content: []llm.ContentBlock{
-					{
-						Type:  llm.ContentTypeToolUse,
-						ID:    "tool_3",
-						Name:  "dangerous_operation",
-						Input: map[string]any{},
-					},
+	mockClient3 := queuedLLM([]*llm.Response{
+		{
+			Content: []llm.ContentBlock{
+				{
+					Type:  llm.ContentTypeToolUse,
+					ID:    "tool_3",
+					Name:  "dangerous_operation",
+					Input: map[string]any{},
 				},
-				StopReason: llm.StopReasonToolUse,
 			},
-			{
-				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Handled denial"}},
-				StopReason: llm.StopReasonEndTurn,
-			},
+			StopReason: llm.StopReasonToolUse,
 		},
-	}
+		{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Handled denial"}},
+			StopReason: llm.StopReasonEndTurn,
+		},
+	})
 	orch3 := orchestrator.New(mockClient3, executor)
 
 	err = orch3.Run(ctx, "test")
@@ -624,25 +616,23 @@ func TestPermissionApprovalFlow(t *testing.T) {
 	}
 
 	// Test safe operation is allowed
-	mockClient4 := &mockLLM{
-		responses: []*llm.Response{
-			{
-				Content: []llm.ContentBlock{
-					{
-						Type:  llm.ContentTypeToolUse,
-						ID:    "tool_4",
-						Name:  "safe_operation",
-						Input: map[string]any{},
-					},
+	mockClient4 := queuedLLM([]*llm.Response{
+		{
+			Content: []llm.ContentBlock{
+				{
+					Type:  llm.ContentTypeToolUse,
+					ID:    "tool_4",
+					Name:  "safe_operation",
+					Input: map[string]any{},
 				},
-				StopReason: llm.StopReasonToolUse,
 			},
-			{
-				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done"}},
-				StopReason: llm.StopReasonEndTurn,
-			},
+			StopReason: llm.StopReasonToolUse,
 		},
-	}
+		{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done"}},
+			StopReason: llm.StopReasonEndTurn,
+		},
+	})
 
 	executor2 := tool.NewExecutor(registry)
 	executor2.SetApprovalFunc(func(ctx context.Context, tl tool.Tool, params map[string]any) (bool, error) {
@@ -675,25 +665,23 @@ func TestEndToEndErrorPropagation(t *testing.T) {
 	})
 
 	// Test orchestrator error handling - tool errors are sent to LLM, not returned
-	mockClient := &mockLLM{
-		responses: []*llm.Response{
-			{
-				Content: []llm.ContentBlock{
-					{
-						Type:  llm.ContentTypeToolUse,
-						ID:    "tool_1",
-						Name:  "failing_tool",
-						Input: map[string]any{},
-					},
+	mockClient := queuedLLM([]*llm.Response{
+		{
+			Content: []llm.ContentBlock{
+				{
+					Type:  llm.ContentTypeToolUse,
+					ID:    "tool_1",
+					Name:  "failing_tool",
+					Input: map[string]any{},
 				},
-				StopReason: llm.StopReasonToolUse,
 			},
-			{
-				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Error handled"}},
-				StopReason: llm.StopReasonEndTurn,
-			},
+			StopReason: llm.StopReasonToolUse,
 		},
-	}
+		{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Error handled"}},
+			StopReason: llm.StopReasonEndTurn,
+		},
+	})
 
 	orch := orchestrator.New(mockClient, executor)
 
@@ -733,21 +721,19 @@ func TestEndToEndErrorPropagation(t *testing.T) {
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	cancel2() // Cancel immediately
 
-	mockClient2 := &mockLLM{
-		responses: []*llm.Response{
-			{
-				Content: []llm.ContentBlock{
-					{
-						Type:  llm.ContentTypeToolUse,
-						ID:    "tool_1",
-						Name:  "failing_tool",
-						Input: map[string]any{},
-					},
+	mockClient2 := queuedLLM([]*llm.Response{
+		{
+			Content: []llm.ContentBlock{
+				{
+					Type:  llm.ContentTypeToolUse,
+					ID:    "tool_1",
+					Name:  "failing_tool",
+					Input: map[string]any{},
 				},
-				StopReason: llm.StopReasonToolUse,
 			},
+			StopReason: llm.StopReasonToolUse,
 		},
-	}
+	})
 	orch2 := orchestrator.New(mockClient2, executor)
 
 	err = orch2.Run(ctx2, "test")
@@ -781,25 +767,23 @@ func TestPerformanceUnderLoad(t *testing.T) {
 			defer wg.Done()
 
 			// Each agent gets its own mock client
-			mockClient := &mockLLM{
-				responses: []*llm.Response{
-					{
-						Content: []llm.ContentBlock{
-							{
-								Type:  llm.ContentTypeToolUse,
-								ID:    "tool_1",
-								Name:  "fast_tool",
-								Input: map[string]any{},
-							},
+			mockClient := queuedLLM([]*llm.Response{
+				{
+					Content: []llm.ContentBlock{
+						{
+							Type:  llm.ContentTypeToolUse,
+							ID:    "tool_1",
+							Name:  "fast_tool",
+							Input: map[string]any{},
 						},
-						StopReason: llm.StopReasonToolUse,
 					},
-					{
-						Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done"}},
-						StopReason: llm.StopReasonEndTurn,
-					},
+					StopReason: llm.StopReasonToolUse,
 				},
-			}
+				{
+					Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done"}},
+					StopReason: llm.StopReasonEndTurn,
+				},
+			})
 
 			a := agent.New(agent.Config{
 				Name:      fmt.Sprintf("agent_%d", agentID),
@@ -829,14 +813,12 @@ func TestResourceCleanup(t *testing.T) {
 	registry := tool.NewRegistry()
 	registry.Register(&testTool{name: "resource_tool"})
 
-	mockClient := &mockLLM{
-		responses: []*llm.Response{
-			{
-				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done"}},
-				StopReason: llm.StopReasonEndTurn,
-			},
+	mockClient := queuedLLM([]*llm.Response{
+		{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done"}},
+			StopReason: llm.StopReasonEndTurn,
 		},
-	}
+	})
 
 	coord := coordinator.New()
 

@@ -96,14 +96,14 @@ func TestRun_CancelledMidBatch_LeavesNoOrphanedToolUse(t *testing.T) {
 		return tool.NewResult("last", true, "last done", ""), nil
 	}})
 	executor := tool.NewExecutor(registry)
-	client := &mockLLMClient{responses: []*llm.Response{{
+	client := scriptedLLM([]*llm.Response{{
 		Content: []llm.ContentBlock{
 			{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "first", Input: map[string]any{}},
 			{Type: llm.ContentTypeToolUse, ID: "call-2", Name: "blocker", Input: map[string]any{}},
 			{Type: llm.ContentTypeToolUse, ID: "call-3", Name: "last", Input: map[string]any{}},
 		},
 		StopReason: llm.StopReasonToolUse,
-	}}}
+	}})
 	orch := orchestrator.New(client, executor)
 
 	errCh := make(chan error, 1)
@@ -177,13 +177,13 @@ func TestResume_AfterCancelledBatch_DoesNotRerunCompletedCall(t *testing.T) {
 		return tool.NewResult("deploy", true, "deployed", ""), nil
 	}})
 	executor := tool.NewExecutor(registry)
-	client := &mockLLMClient{responses: []*llm.Response{
+	client := scriptedLLM([]*llm.Response{
 		{Content: []llm.ContentBlock{
 			{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "audit", Input: map[string]any{}},
 			{Type: llm.ContentTypeToolUse, ID: "call-2", Name: "deploy", Input: map[string]any{}},
 		}, StopReason: llm.StopReasonToolUse},
 		{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "shipped"}}, StopReason: llm.StopReasonEndTurn},
-	}}
+	})
 	orch := orchestrator.NewWithConfig(client, executor, orchestrator.Config{
 		MaxIterations: 5, SessionStore: store, ApprovalMode: orchestrator.ApprovalSuspend,
 	})
@@ -265,10 +265,10 @@ func TestRun_CheckpointFailureAfterToolBatch_ReportsUnpersistedCalls(t *testing.
 		return tool.NewResult("deploy", true, "deployed", ""), nil
 	}})
 	executor := tool.NewExecutor(registry)
-	client := &mockLLMClient{responses: []*llm.Response{
+	client := scriptedLLM([]*llm.Response{
 		{Content: []llm.ContentBlock{{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "deploy", Input: map[string]any{}}}, StopReason: llm.StopReasonToolUse},
 		{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}}, StopReason: llm.StopReasonEndTurn},
-	}}
+	})
 	orch := orchestrator.NewWithConfig(client, executor, orchestrator.Config{MaxIterations: 5, SessionStore: store})
 
 	err := orch.Run(context.Background(), "go")
@@ -307,10 +307,10 @@ func TestResume_CheckpointFailureAfterToolBatch_ReportsUnpersistedCalls(t *testi
 		return tool.NewResult("deploy", true, "deployed", ""), nil
 	}})
 	executor := tool.NewExecutor(registry)
-	client := &mockLLMClient{responses: []*llm.Response{
+	client := scriptedLLM([]*llm.Response{
 		{Content: []llm.ContentBlock{{Type: llm.ContentTypeToolUse, ID: "call-1", Name: "deploy", Input: map[string]any{}}}, StopReason: llm.StopReasonToolUse},
 		{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}}, StopReason: llm.StopReasonEndTurn},
-	}}
+	})
 	orch := orchestrator.NewWithConfig(client, executor, orchestrator.Config{
 		MaxIterations: 5, SessionStore: store, ApprovalMode: orchestrator.ApprovalSuspend,
 	})

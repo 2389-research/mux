@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/2389-research/mux/internal/llmtest"
 	"github.com/2389-research/mux/llm"
 	"github.com/2389-research/mux/tool"
 )
@@ -38,12 +39,12 @@ func TestRunAsync_Success(t *testing.T) {
 	// observed the initial status, so the run cannot race to completion before
 	// the check below.
 	release := make(chan struct{})
-	client := &mockLLMClient{
+	client := asyncSpec{
 		response: &llm.Response{
 			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
 		},
 		release: release,
-	}
+	}.client()
 
 	agent := New(Config{
 		Name:      "test-agent",
@@ -80,9 +81,9 @@ func TestRunAsync_Success(t *testing.T) {
 func TestRunAsync_Failure(t *testing.T) {
 	registry := tool.NewRegistry()
 	expectedErr := errors.New("LLM error")
-	client := &mockLLMClient{
+	client := asyncSpec{
 		err: expectedErr,
-	}
+	}.client()
 
 	agent := New(Config{
 		Name:      "test-agent",
@@ -105,9 +106,9 @@ func TestRunAsync_Failure(t *testing.T) {
 func TestRunAsync_Cancellation(t *testing.T) {
 	registry := tool.NewRegistry()
 	// Client that blocks until context is cancelled
-	client := &mockLLMClient{
+	client := asyncSpec{
 		blockUntilCancel: true,
-	}
+	}.client()
 
 	agent := New(Config{
 		Name:      "test-agent",
@@ -136,11 +137,11 @@ func TestRunAsync_Cancellation(t *testing.T) {
 
 func TestRunAsync_Poll(t *testing.T) {
 	registry := tool.NewRegistry()
-	client := &mockLLMClient{
+	client := asyncSpec{
 		response: &llm.Response{
 			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
 		},
-	}
+	}.client()
 
 	agent := New(Config{
 		Name:      "test-agent",
@@ -172,12 +173,12 @@ func TestRunAsync_Poll(t *testing.T) {
 func TestRunAsync_WaitWithTimeout(t *testing.T) {
 	registry := tool.NewRegistry()
 	// Client that blocks for a while
-	client := &mockLLMClient{
+	client := asyncSpec{
 		delay: 500 * time.Millisecond,
 		response: &llm.Response{
 			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
 		},
-	}
+	}.client()
 
 	agent := New(Config{
 		Name:      "test-agent",
@@ -202,11 +203,11 @@ func TestRunAsync_WaitWithTimeout(t *testing.T) {
 
 func TestRunAsync_Done(t *testing.T) {
 	registry := tool.NewRegistry()
-	client := &mockLLMClient{
+	client := asyncSpec{
 		response: &llm.Response{
 			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
 		},
-	}
+	}.client()
 
 	agent := New(Config{
 		Name:      "test-agent",
@@ -227,12 +228,12 @@ func TestRunAsync_Done(t *testing.T) {
 
 func TestRunAsync_Duration(t *testing.T) {
 	registry := tool.NewRegistry()
-	client := &mockLLMClient{
+	client := asyncSpec{
 		delay: 50 * time.Millisecond,
 		response: &llm.Response{
 			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
 		},
-	}
+	}.client()
 
 	agent := New(Config{
 		Name:      "test-agent",
@@ -251,11 +252,11 @@ func TestRunAsync_Duration(t *testing.T) {
 
 func TestRunAsync_Agent(t *testing.T) {
 	registry := tool.NewRegistry()
-	client := &mockLLMClient{
+	client := asyncSpec{
 		response: &llm.Response{
 			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
 		},
-	}
+	}.client()
 
 	agent := New(Config{
 		Name:      "test-agent",
@@ -272,11 +273,11 @@ func TestRunAsync_Agent(t *testing.T) {
 
 func TestContinueAsync(t *testing.T) {
 	registry := tool.NewRegistry()
-	client := &mockLLMClient{
+	client := asyncSpec{
 		response: &llm.Response{
 			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
 		},
-	}
+	}.client()
 
 	agent := New(Config{
 		Name:      "test-agent",
@@ -302,11 +303,11 @@ func TestContinueAsync(t *testing.T) {
 
 func TestRunChildAsync(t *testing.T) {
 	registry := tool.NewRegistry()
-	client := &mockLLMClient{
+	client := asyncSpec{
 		response: &llm.Response{
 			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
 		},
-	}
+	}.client()
 
 	parent := New(Config{
 		Name:      "parent",
@@ -331,8 +332,12 @@ func TestRunChildAsync(t *testing.T) {
 	}
 }
 
-// mockLLMClient with additional control for async tests
-type mockLLMClient struct {
+// asyncSpec describes the behavior an async test wants from the shared scripted
+// client: a response or error answer, an optional delay before answering, and
+// optional gates that hold the call until the context is cancelled or a channel
+// is closed. Keeping only the knobs (not the interface methods) means a change
+// to llm.Client never touches this suite.
+type asyncSpec struct {
 	response         *llm.Response
 	err              error
 	delay            time.Duration
@@ -340,41 +345,40 @@ type mockLLMClient struct {
 	release          chan struct{}
 }
 
-func (m *mockLLMClient) CreateMessage(ctx context.Context, req *llm.Request) (*llm.Response, error) {
-	if m.blockUntilCancel {
-		<-ctx.Done()
-		return nil, ctx.Err()
+// client builds a shared llmtest.Client that scripts spec's behavior.
+func (spec asyncSpec) client() *llmtest.Client {
+	return &llmtest.Client{
+		Media: llm.FullCapabilities(),
+		Respond: func(ctx context.Context, req *llm.Request) (*llm.Response, error) {
+			if spec.blockUntilCancel {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}
+			// release gates the success path: when set, block until the test
+			// closes the channel (or the context is cancelled). This lets a test
+			// deterministically observe the in-progress status before the run is
+			// allowed to complete.
+			if spec.release != nil {
+				select {
+				case <-spec.release:
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			}
+			if spec.delay > 0 {
+				select {
+				case <-time.After(spec.delay):
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			}
+			if spec.err != nil {
+				return nil, spec.err
+			}
+			return spec.response, nil
+		},
 	}
-	// release gates the success path: when set, block until the test closes the
-	// channel (or the context is cancelled). This lets a test deterministically
-	// observe the in-progress status before the run is allowed to complete.
-	if m.release != nil {
-		select {
-		case <-m.release:
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-	}
-	if m.delay > 0 {
-		select {
-		case <-time.After(m.delay):
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-	}
-	if m.err != nil {
-		return nil, m.err
-	}
-	return m.response, nil
 }
-
-func (m *mockLLMClient) CreateMessageStream(ctx context.Context, req *llm.Request) (<-chan llm.StreamEvent, error) {
-	ch := make(chan llm.StreamEvent)
-	close(ch)
-	return ch, nil
-}
-
-func (m *mockLLMClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
 
 // TestRunAsync_CancelStopsRun verifies that handle.Cancel() actually stops a
 // running agent (not merely flips a status flag). The run blocks in the LLM
@@ -382,7 +386,7 @@ func (m *mockLLMClient) Capabilities() llm.Capabilities { return llm.FullCapabil
 // the caller's context is never cancelled.
 func TestRunAsync_CancelStopsRun(t *testing.T) {
 	registry := tool.NewRegistry()
-	client := &mockLLMClient{blockUntilCancel: true}
+	client := asyncSpec{blockUntilCancel: true}.client()
 
 	agent := New(Config{
 		Name:      "test-agent",

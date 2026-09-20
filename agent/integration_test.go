@@ -19,11 +19,9 @@ func TestAgentToolFiltering(t *testing.T) {
 
 	// Mock client that uses a tool
 	toolUsed := ""
-	client := &mockClient{
-		response: &llm.Response{
-			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
-		},
-	}
+	client := scriptedResponse(&llm.Response{
+		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
+	})
 
 	// Create agent with restricted tools
 	a := agent.New(agent.Config{
@@ -68,11 +66,9 @@ func TestAgentHierarchyToolRestriction(t *testing.T) {
 	registry.Register(&mockTool{name: "write"})
 	registry.Register(&mockTool{name: "exec"})
 
-	client := &mockClient{
-		response: &llm.Response{
-			Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
-		},
-	}
+	client := scriptedResponse(&llm.Response{
+		Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}},
+	})
 
 	// Root agent has all tools
 	root := agent.New(agent.Config{

@@ -103,12 +103,10 @@ func TestHookSessionStartOnRun(t *testing.T) {
 	hookMgr := hooks.NewManager()
 	recorder.registerAll(hookMgr)
 
-	client := &mockLLMClient{
-		responses: []*llm.Response{{
-			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Hello"}},
-			StopReason: llm.StopReasonEndTurn,
-		}},
-	}
+	client := scriptedLLM([]*llm.Response{{
+		Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Hello"}},
+		StopReason: llm.StopReasonEndTurn,
+	}})
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
 
@@ -151,12 +149,10 @@ func TestHookSessionStartOnContinue(t *testing.T) {
 	hookMgr := hooks.NewManager()
 	recorder.registerAll(hookMgr)
 
-	client := &mockLLMClient{
-		responses: []*llm.Response{{
-			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Hello"}},
-			StopReason: llm.StopReasonEndTurn,
-		}},
-	}
+	client := scriptedLLM([]*llm.Response{{
+		Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Hello"}},
+		StopReason: llm.StopReasonEndTurn,
+	}})
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
 
@@ -188,12 +184,10 @@ func TestHookSessionEndOnComplete(t *testing.T) {
 	hookMgr := hooks.NewManager()
 	recorder.registerAll(hookMgr)
 
-	client := &mockLLMClient{
-		responses: []*llm.Response{{
-			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done"}},
-			StopReason: llm.StopReasonEndTurn,
-		}},
-	}
+	client := scriptedLLM([]*llm.Response{{
+		Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done"}},
+		StopReason: llm.StopReasonEndTurn,
+	}})
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
 
@@ -228,7 +222,7 @@ func TestHookSessionEndOnError(t *testing.T) {
 	hookMgr := hooks.NewManager()
 	recorder.registerAll(hookMgr)
 
-	client := &mockLLMClientWithError{err: fmt.Errorf("LLM failure")}
+	client := errorLLMClient(fmt.Errorf("LLM failure"))
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
 
@@ -266,12 +260,10 @@ func TestHookSessionEndOnCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately
 
-	client := &mockLLMClient{
-		responses: []*llm.Response{{
-			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Never"}},
-			StopReason: llm.StopReasonEndTurn,
-		}},
-	}
+	client := scriptedLLM([]*llm.Response{{
+		Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Never"}},
+		StopReason: llm.StopReasonEndTurn,
+	}})
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
 
@@ -304,32 +296,30 @@ func TestHookIterationFiringCorrectly(t *testing.T) {
 	recorder.registerAll(hookMgr)
 
 	// Client that requires 3 iterations: tool -> tool -> done
-	client := &mockLLMClient{
-		responses: []*llm.Response{
-			{
-				Content: []llm.ContentBlock{{
-					Type:  llm.ContentTypeToolUse,
-					ID:    "tool_1",
-					Name:  "test_tool",
-					Input: map[string]any{},
-				}},
-				StopReason: llm.StopReasonToolUse,
-			},
-			{
-				Content: []llm.ContentBlock{{
-					Type:  llm.ContentTypeToolUse,
-					ID:    "tool_2",
-					Name:  "test_tool",
-					Input: map[string]any{},
-				}},
-				StopReason: llm.StopReasonToolUse,
-			},
-			{
-				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done"}},
-				StopReason: llm.StopReasonEndTurn,
-			},
+	client := scriptedLLM([]*llm.Response{
+		{
+			Content: []llm.ContentBlock{{
+				Type:  llm.ContentTypeToolUse,
+				ID:    "tool_1",
+				Name:  "test_tool",
+				Input: map[string]any{},
+			}},
+			StopReason: llm.StopReasonToolUse,
 		},
-	}
+		{
+			Content: []llm.ContentBlock{{
+				Type:  llm.ContentTypeToolUse,
+				ID:    "tool_2",
+				Name:  "test_tool",
+				Input: map[string]any{},
+			}},
+			StopReason: llm.StopReasonToolUse,
+		},
+		{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done"}},
+			StopReason: llm.StopReasonEndTurn,
+		},
+	})
 
 	registry := tool.NewRegistry()
 	testTool := &mockTool{name: "test_tool"}
@@ -369,12 +359,10 @@ func TestHookIterationSingleIteration(t *testing.T) {
 	hookMgr := hooks.NewManager()
 	recorder.registerAll(hookMgr)
 
-	client := &mockLLMClient{
-		responses: []*llm.Response{{
-			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done"}},
-			StopReason: llm.StopReasonEndTurn,
-		}},
-	}
+	client := scriptedLLM([]*llm.Response{{
+		Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done"}},
+		StopReason: llm.StopReasonEndTurn,
+	}})
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
 
@@ -406,12 +394,10 @@ func TestHookStopFires(t *testing.T) {
 	hookMgr := hooks.NewManager()
 	recorder.registerAll(hookMgr)
 
-	client := &mockLLMClient{
-		responses: []*llm.Response{{
-			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Final response"}},
-			StopReason: llm.StopReasonEndTurn,
-		}},
-	}
+	client := scriptedLLM([]*llm.Response{{
+		Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Final response"}},
+		StopReason: llm.StopReasonEndTurn,
+	}})
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
 
@@ -451,15 +437,13 @@ func TestHookStopContinue(t *testing.T) {
 
 	// Client that always returns text (would normally stop immediately)
 	callCount := 0
-	client := &mockDynamicLLMClient{
-		responseFn: func() *llm.Response {
-			callCount++
-			return &llm.Response{
-				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: fmt.Sprintf("Response %d", callCount)}},
-				StopReason: llm.StopReasonEndTurn,
-			}
-		},
-	}
+	client := dynamicLLMClient(func() *llm.Response {
+		callCount++
+		return &llm.Response{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: fmt.Sprintf("Response %d", callCount)}},
+			StopReason: llm.StopReasonEndTurn,
+		}
+	})
 
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
@@ -522,12 +506,10 @@ func TestHookOrderingWithinIteration(t *testing.T) {
 		return nil
 	})
 
-	client := &mockLLMClient{
-		responses: []*llm.Response{{
-			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done"}},
-			StopReason: llm.StopReasonEndTurn,
-		}},
-	}
+	client := scriptedLLM([]*llm.Response{{
+		Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done"}},
+		StopReason: llm.StopReasonEndTurn,
+	}})
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
 
@@ -563,7 +545,7 @@ func TestHookMaxIterationsWithIterationHook(t *testing.T) {
 	recorder.registerAll(hookMgr)
 
 	// Client that always returns tool use (infinite loop)
-	loopingClient := &mockLoopingLLMClient{}
+	loopingClient := loopingLLMClient()
 
 	registry := tool.NewRegistry()
 	loopTool := &mockTool{name: "loop_tool"}
@@ -628,23 +610,21 @@ func TestHookIterationError(t *testing.T) {
 	})
 
 	// Client that requires 2 iterations (tool use then text)
-	client := &mockLLMClient{
-		responses: []*llm.Response{
-			{
-				Content: []llm.ContentBlock{{
-					Type:  llm.ContentTypeToolUse,
-					ID:    "tool_1",
-					Name:  "test_tool",
-					Input: map[string]any{},
-				}},
-				StopReason: llm.StopReasonToolUse,
-			},
-			{
-				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done"}},
-				StopReason: llm.StopReasonEndTurn,
-			},
+	client := scriptedLLM([]*llm.Response{
+		{
+			Content: []llm.ContentBlock{{
+				Type:  llm.ContentTypeToolUse,
+				ID:    "tool_1",
+				Name:  "test_tool",
+				Input: map[string]any{},
+			}},
+			StopReason: llm.StopReasonToolUse,
 		},
-	}
+		{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done"}},
+			StopReason: llm.StopReasonEndTurn,
+		},
+	})
 
 	registry := tool.NewRegistry()
 	testTool := &mockTool{name: "test_tool"}
@@ -681,12 +661,10 @@ func TestHookIterationError(t *testing.T) {
 
 // TestHookNoHookManager verifies orchestrator works without hook manager.
 func TestHookNoHookManager(t *testing.T) {
-	client := &mockLLMClient{
-		responses: []*llm.Response{{
-			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done"}},
-			StopReason: llm.StopReasonEndTurn,
-		}},
-	}
+	client := scriptedLLM([]*llm.Response{{
+		Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done"}},
+		StopReason: llm.StopReasonEndTurn,
+	}})
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
 

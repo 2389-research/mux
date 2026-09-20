@@ -4,32 +4,33 @@ import (
 	"context"
 	"testing"
 
+	"github.com/2389-research/mux/internal/llmtest"
 	"github.com/2389-research/mux/llm"
 )
 
-type mockClient struct{}
-
-func (m *mockClient) CreateMessage(ctx context.Context, req *llm.Request) (*llm.Response, error) {
-	return &llm.Response{
-		Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Hello"}},
-		StopReason: llm.StopReasonEndTurn,
-	}, nil
+// helloClient is the shared scripted client answering "Hello": the nonstream
+// path returns it, the stream path emits it as a delta followed by a stop.
+func helloClient() *llmtest.Client {
+	return &llmtest.Client{
+		Media: llm.FullCapabilities(),
+		Respond: func(context.Context, *llm.Request) (*llm.Response, error) {
+			return &llm.Response{
+				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Hello"}},
+				StopReason: llm.StopReasonEndTurn,
+			}, nil
+		},
+		Stream: func(context.Context, *llm.Request) (<-chan llm.StreamEvent, error) {
+			ch := make(chan llm.StreamEvent, 2)
+			ch <- llm.StreamEvent{Type: llm.EventContentDelta, Text: "Hello"}
+			ch <- llm.StreamEvent{Type: llm.EventMessageStop}
+			close(ch)
+			return ch, nil
+		},
+	}
 }
-
-func (m *mockClient) CreateMessageStream(ctx context.Context, req *llm.Request) (<-chan llm.StreamEvent, error) {
-	ch := make(chan llm.StreamEvent)
-	go func() {
-		ch <- llm.StreamEvent{Type: llm.EventContentDelta, Text: "Hello"}
-		ch <- llm.StreamEvent{Type: llm.EventMessageStop}
-		close(ch)
-	}()
-	return ch, nil
-}
-
-func (m *mockClient) Capabilities() llm.Capabilities { return llm.FullCapabilities() }
 
 func TestClientInterface(t *testing.T) {
-	var client llm.Client = &mockClient{}
+	var client llm.Client = helloClient()
 
 	resp, err := client.CreateMessage(context.Background(), &llm.Request{
 		Messages: []llm.Message{llm.NewUserMessage("Hi")},

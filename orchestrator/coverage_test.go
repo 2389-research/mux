@@ -43,24 +43,20 @@ func TestNewWithConfigNilExecutor(t *testing.T) {
 		}
 	}()
 
-	client := &mockLLMClient{
-		responses: []*llm.Response{{
-			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "test"}},
-			StopReason: llm.StopReasonEndTurn,
-		}},
-	}
+	client := scriptedLLM([]*llm.Response{{
+		Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "test"}},
+		StopReason: llm.StopReasonEndTurn,
+	}})
 	config := orchestrator.DefaultConfig()
 	orchestrator.NewWithConfig(client, nil, config)
 }
 
 // TestOrchestratorStateMethod tests the State() method returns current state.
 func TestOrchestratorStateMethod(t *testing.T) {
-	client := &mockLLMClient{
-		responses: []*llm.Response{{
-			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "response"}},
-			StopReason: llm.StopReasonEndTurn,
-		}},
-	}
+	client := scriptedLLM([]*llm.Response{{
+		Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "response"}},
+		StopReason: llm.StopReasonEndTurn,
+	}})
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
 
@@ -190,31 +186,29 @@ func TestBuildToolDefinitionsWithSchemaProvider(t *testing.T) {
 	executor := tool.NewExecutor(registry)
 
 	// Client that will invoke both tools
-	client := &mockLLMClient{
-		responses: []*llm.Response{
-			{
-				Content: []llm.ContentBlock{
-					{
-						Type:  llm.ContentTypeToolUse,
-						ID:    "tool_1",
-						Name:  "read_file",
-						Input: map[string]any{"path": "/tmp/test.txt"},
-					},
-					{
-						Type:  llm.ContentTypeToolUse,
-						ID:    "tool_2",
-						Name:  "regular_tool",
-						Input: map[string]any{},
-					},
+	client := scriptedLLM([]*llm.Response{
+		{
+			Content: []llm.ContentBlock{
+				{
+					Type:  llm.ContentTypeToolUse,
+					ID:    "tool_1",
+					Name:  "read_file",
+					Input: map[string]any{"path": "/tmp/test.txt"},
 				},
-				StopReason: llm.StopReasonToolUse,
+				{
+					Type:  llm.ContentTypeToolUse,
+					ID:    "tool_2",
+					Name:  "regular_tool",
+					Input: map[string]any{},
+				},
 			},
-			{
-				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done"}},
-				StopReason: llm.StopReasonEndTurn,
-			},
+			StopReason: llm.StopReasonToolUse,
 		},
-	}
+		{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Done"}},
+			StopReason: llm.StopReasonEndTurn,
+		},
+	})
 
 	// Create orchestrator - this will call buildToolDefinitions internally
 	orch := orchestrator.New(client, executor)
@@ -252,12 +246,10 @@ func TestBuildToolDefinitionsWithSchemaProvider(t *testing.T) {
 
 // TestBuildToolDefinitionsEmptyRegistry tests buildToolDefinitions with no tools.
 func TestBuildToolDefinitionsEmptyRegistry(t *testing.T) {
-	client := &mockLLMClient{
-		responses: []*llm.Response{{
-			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "response"}},
-			StopReason: llm.StopReasonEndTurn,
-		}},
-	}
+	client := scriptedLLM([]*llm.Response{{
+		Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "response"}},
+		StopReason: llm.StopReasonEndTurn,
+	}})
 
 	// Empty registry
 	registry := tool.NewRegistry()
@@ -316,12 +308,10 @@ func TestTransitionToErrorFromDifferentStates(t *testing.T) {
 
 // TestOrchestratorWithCustomConfig tests orchestrator with custom configuration.
 func TestOrchestratorWithCustomConfig(t *testing.T) {
-	client := &mockLLMClient{
-		responses: []*llm.Response{{
-			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "response"}},
-			StopReason: llm.StopReasonEndTurn,
-		}},
-	}
+	client := scriptedLLM([]*llm.Response{{
+		Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "response"}},
+		StopReason: llm.StopReasonEndTurn,
+	}})
 
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
@@ -506,12 +496,10 @@ func TestStateMachineStreamingToExecutingTool(t *testing.T) {
 func TestOrchestratorInvalidStateTransition(t *testing.T) {
 	// This is a pathological test case to cover the error path in transition()
 	// In normal operation, this shouldn't happen due to the orchestrator's logic
-	client := &mockLLMClient{
-		responses: []*llm.Response{{
-			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "test"}},
-			StopReason: llm.StopReasonEndTurn,
-		}},
-	}
+	client := scriptedLLM([]*llm.Response{{
+		Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "test"}},
+		StopReason: llm.StopReasonEndTurn,
+	}})
 
 	registry := tool.NewRegistry()
 	executor := tool.NewExecutor(registry)
@@ -540,23 +528,21 @@ func TestOrchestratorInvalidStateTransition(t *testing.T) {
 func TestOrchestratorToolExecutionWithIsError(t *testing.T) {
 	ctx := context.Background()
 
-	client := &mockLLMClient{
-		responses: []*llm.Response{
-			{
-				Content: []llm.ContentBlock{{
-					Type:  llm.ContentTypeToolUse,
-					ID:    "tool_1",
-					Name:  "error_tool",
-					Input: map[string]any{},
-				}},
-				StopReason: llm.StopReasonToolUse,
-			},
-			{
-				Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Handled error"}},
-				StopReason: llm.StopReasonEndTurn,
-			},
+	client := scriptedLLM([]*llm.Response{
+		{
+			Content: []llm.ContentBlock{{
+				Type:  llm.ContentTypeToolUse,
+				ID:    "tool_1",
+				Name:  "error_tool",
+				Input: map[string]any{},
+			}},
+			StopReason: llm.StopReasonToolUse,
 		},
-	}
+		{
+			Content:    []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "Handled error"}},
+			StopReason: llm.StopReasonEndTurn,
+		},
+	})
 
 	registry := tool.NewRegistry()
 	errorTool := &mockTool{

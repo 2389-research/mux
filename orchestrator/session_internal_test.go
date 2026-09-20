@@ -79,7 +79,7 @@ func TestFailedResultReachesHistory(t *testing.T) {
 		result: tool.NewErrorResult("fail", "unknown skill: absent"),
 	})
 	executor := tool.NewExecutor(registry)
-	client := &compactMockClient{}
+	client := (&compactSpec{}).client()
 	orch := New(client, executor)
 
 	orch.mu.Lock()

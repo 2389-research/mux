@@ -57,12 +57,12 @@ func TestResume_NestedToolCall_ResolvesItsOwnApproval(t *testing.T) {
 		return false, nil
 	})
 
-	client := &mockLLMClient{responses: []*llm.Response{
+	client := scriptedLLM([]*llm.Response{
 		{Content: []llm.ContentBlock{
 			{Type: llm.ContentTypeToolUse, ID: "call-outer", Name: "outer", Input: map[string]any{}},
 		}, StopReason: llm.StopReasonToolUse},
 		{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}}, StopReason: llm.StopReasonEndTurn},
-	}}
+	})
 	orch := orchestrator.NewWithConfig(client, executor, orchestrator.Config{
 		MaxIterations: 5, SessionStore: store, ApprovalMode: orchestrator.ApprovalSuspend,
 	})
@@ -117,12 +117,12 @@ func TestResume_NestedToolCall_ApprovedByCallerStillRuns(t *testing.T) {
 		return tl.Name() == "inner", nil
 	})
 
-	client := &mockLLMClient{responses: []*llm.Response{
+	client := scriptedLLM([]*llm.Response{
 		{Content: []llm.ContentBlock{
 			{Type: llm.ContentTypeToolUse, ID: "call-outer", Name: "outer", Input: map[string]any{}},
 		}, StopReason: llm.StopReasonToolUse},
 		{Content: []llm.ContentBlock{{Type: llm.ContentTypeText, Text: "done"}}, StopReason: llm.StopReasonEndTurn},
-	}}
+	})
 	orch := orchestrator.NewWithConfig(client, executor, orchestrator.Config{
 		MaxIterations: 5, SessionStore: store, ApprovalMode: orchestrator.ApprovalSuspend,
 	})
