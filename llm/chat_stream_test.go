@@ -251,3 +251,47 @@ func TestChatStreamMalformedReasonsAreSanitized(t *testing.T) {
 		t.Fatalf("error text = %q", got)
 	}
 }
+
+// TestOpenRouterUsageTrailer parses the documented choice-bearing usage trailer seen on the live API.
+func TestOpenRouterUsageTrailer(t *testing.T) {
+	for _, tc := range []struct {
+		name, provider, delta, reason string
+		wantErr                       bool
+	}{
+		{"usage", "openrouter", `{"content":"","role":"assistant"}`, "stop", false},
+		{"content", "openrouter", `{"content":"more"}`, "stop", true},
+		{"different_finish", "openrouter", `{}`, "length", true},
+		{"other_provider", "ollama", `{}`, "stop", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			acc := newChatStreamAccumulator(tc.provider)
+			for _, wire := range []string{`{"id":"r","choices":[{"index":0,"delta":{"content":"done"}}]}`, `{"id":"r","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`} {
+				var chunk openai.ChatCompletionChunk
+				if err := json.Unmarshal([]byte(wire), &chunk); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := acc.Add(chunk); err != nil {
+					t.Fatal(err)
+				}
+			}
+			wire := `{"id":"r","choices":[{"index":0,"delta":` + tc.delta + `,"finish_reason":"` + tc.reason + `"}],"usage":{"prompt_tokens":78,"completion_tokens":22,"total_tokens":100}}`
+			var chunk openai.ChatCompletionChunk
+			if err := json.Unmarshal([]byte(wire), &chunk); err != nil {
+				t.Fatal(err)
+			}
+			events, err := acc.Add(chunk)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("trailer err=%v wantErr=%v", err, tc.wantErr)
+			}
+			if !tc.wantErr {
+				if len(events) != 0 {
+					t.Fatal("usage trailer repeated content events")
+				}
+				response, _, err := acc.Finish()
+				if err != nil || response.TextContent() != "done" || response.Usage.InputTokens != 78 || response.Usage.OutputTokens != 22 {
+					t.Fatalf("usage result=%+v err=%v", response, err)
+				}
+			}
+		})
+	}
+}

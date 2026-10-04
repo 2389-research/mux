@@ -265,6 +265,7 @@ func (c *httpClient) notify(ctx context.Context, method string, params any) erro
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json, text/event-stream")
 	httpReq.Header.Set("MCP-Protocol-Version", httpProtocolVersion)
 
 	c.mu.Lock()

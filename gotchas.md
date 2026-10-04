@@ -1,3 +1,17 @@
+## Tools-only e2e contracts (2026-10-04)
+
+`npm ci --ignore-scripts` and `make test-e2e` run tester-army/e2e 0.17.0 against actual MCP
+subprocess and filesystem contracts. It needs Go on PATH and Node >=24.8, no
+model credentials. JSON pass events guard against empty Go test selections.
+`make test` still owns the full suite; scripted LLM tests are integration
+evidence, while `make check-live` costs money and needs an explicit budget.
+The local OpenAI key returned 401 `not_authorized_invalid_project` on a real
+`gpt-5.2` call: its project is archived. Key presence alone does not prove access.
+The Anthropic key is invalid; Gemini 2.5 Flash and OpenRouter tool roundtrips
+passed. Anthropic/OpenRouter now default to supported Sonnet 4.6. Gemini's
+retired 2.0 default remains pending Doctor Biz's model/cost decision; a passing
+explicit 2.5 call does not establish that the default path works.
+
 ## Quality audit (2026-09-11)
 
 The audit of `6f7305e` filed 38 issues in Kata under `audit-2026-09-11`.
@@ -477,3 +491,9 @@ four days behind a mapping layer that had since grown replay envelopes, so takin
 side of the conflict would have reverted shipped work. Read what the conflict is
 *about* before resolving it — rebuilding the idea on current main beat replaying the
 diff.
+
+Independent MCP tests need `npm ci --ignore-scripts` before `make test`: filesystem server 2026.8.31 and SDK 1.32.0. The handwritten echo process shares mux protocol assumptions; use the reference tests for interoperability. MCP notifications need both JSON and SSE Accept types. OpenRouter repeats finish_reason in its content-free usage trailer; this is a valid provider-specific terminal shape, not post-finish content.
+
+Gemini 2.5 live signed streaming replay passed three times, but one fresh E2E stream ended without a finish reason. Keep strict failure and no retries; root cause remains unconfirmed. All capability prompts contain only synthetic public markers.
+
+Keep setup on `npm ci --ignore-scripts`, matching the baseline; dropping the flag introduced npm lifecycle-script policy warnings. Measured npm is 11.19.1 directly and 11.19.0 through mise. Never infer npm version from warning style. In-flight HTTP cancellation tests must observe handler receipt before canceling; client cancellation promises no server rollback.

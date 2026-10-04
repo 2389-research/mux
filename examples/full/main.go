@@ -243,7 +243,7 @@ func main() {
 	registry.Register(&SearchTool{cache: cache})
 
 	// Create LLM client
-	llmClient := llm.NewAnthropicClient(apiKey, "claude-sonnet-4-20250514")
+	llmClient := llm.NewAnthropicClient(apiKey, "")
 
 	// Create root agent with all tools
 	rootAgent := agent.New(agent.Config{

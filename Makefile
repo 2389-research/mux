@@ -1,7 +1,7 @@
 # ABOUTME: Build automation for mux library and examples.
 # ABOUTME: Run 'make help' to see available targets.
 
-.PHONY: all build examples test test-cover test-live check-live lint vulncheck clean help \
+.PHONY: all build examples test test-cover test-e2e test-e2e-live test-live check-live lint vulncheck clean help \
 	examples/simple examples/minimal examples/full
 
 # govulncheck version, pinned so the gate can't drift green silently.
@@ -37,6 +37,17 @@ examples/full:
 # a quicker loop.
 test:
 	go test -race -tags=integration -timeout=300s ./...
+
+# Real MCP process contracts, reported by tester-army/e2e; no AI credentials.
+# Install pinned dev dependencies with npm ci --ignore-scripts first. Go must be on PATH.
+test-e2e:
+	npm run typecheck:e2e
+	npm run test:e2e
+
+# Bounded real provider contracts; explicit model and credential inputs required.
+test-e2e-live:
+	npm run typecheck:e2e
+	npm run test:e2e:live
 
 # Run tests with coverage
 test-cover:
@@ -96,6 +107,8 @@ help:
 	@echo "  examples/full     - Build full example"
 	@echo "  test           - Run the canonical suite (race, integration tag)"
 	@echo "  test-cover     - Run tests with coverage report"
+	@echo "  test-e2e       - Run tools-only MCP subprocess checks (npm ci --ignore-scripts first)"
+	@echo "  test-e2e-live  - Run bounded real provider E2E (explicit provider/model/key)"
 	@echo "  test-live      - Run opt-in live provider checks (needs credentials)"
 	@echo "  check-live     - Validate live provider inputs, then run live checks"
 	@echo "  lint           - Run golangci-lint"

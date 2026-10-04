@@ -75,8 +75,8 @@ func main() {
 		llmClient = llm.NewOpenAIClient(apiKey, "gpt-5.2")
 		fmt.Println("Using OpenAI (gpt-5.2)")
 	} else if apiKey := os.Getenv("ANTHROPIC_API_KEY"); apiKey != "" {
-		llmClient = llm.NewAnthropicClient(apiKey, "claude-sonnet-4-20250514")
-		fmt.Println("Using Anthropic (claude-sonnet-4)")
+		llmClient = llm.NewAnthropicClient(apiKey, "")
+		fmt.Println("Using Anthropic")
 	} else {
 		fmt.Fprintln(os.Stderr, "Set OPENAI_API_KEY or ANTHROPIC_API_KEY")
 		os.Exit(1)

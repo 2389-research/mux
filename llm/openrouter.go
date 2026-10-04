@@ -16,7 +16,7 @@ const (
 	OpenRouterBaseURL = "https://openrouter.ai/api/v1"
 
 	// OpenRouterDefaultModel is the default model used when none is specified.
-	OpenRouterDefaultModel = "anthropic/claude-3.5-sonnet"
+	OpenRouterDefaultModel = "anthropic/claude-sonnet-4.6"
 )
 
 // OpenRouterClient implements Client for the OpenRouter API.
@@ -27,7 +27,7 @@ type OpenRouterClient struct {
 }
 
 // NewOpenRouterClient creates a new OpenRouter API client.
-// Default model is anthropic/claude-3.5-sonnet.
+// Default model is anthropic/claude-sonnet-4.6.
 func NewOpenRouterClient(apiKey, model string) *OpenRouterClient {
 	if model == "" {
 		model = OpenRouterDefaultModel

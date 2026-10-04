@@ -810,8 +810,8 @@ func TestOpenRouterConstants(t *testing.T) {
 	if OpenRouterBaseURL != "https://openrouter.ai/api/v1" {
 		t.Errorf("expected base URL https://openrouter.ai/api/v1, got %s", OpenRouterBaseURL)
 	}
-	if OpenRouterDefaultModel != "anthropic/claude-3.5-sonnet" {
-		t.Errorf("expected default model anthropic/claude-3.5-sonnet, got %s", OpenRouterDefaultModel)
+	if OpenRouterDefaultModel != "anthropic/claude-sonnet-4.6" {
+		t.Errorf("expected default model anthropic/claude-sonnet-4.6, got %s", OpenRouterDefaultModel)
 	}
 }
 

@@ -25,7 +25,7 @@ type AnthropicClient struct {
 // NewAnthropicClient creates a new Anthropic API client.
 func NewAnthropicClient(apiKey, model string) *AnthropicClient {
 	if model == "" {
-		model = "claude-sonnet-4-20250514"
+		model = "claude-sonnet-4-6"
 	}
 	return &AnthropicClient{
 		client: anthropic.NewClient(option.WithAPIKey(apiKey)),
@@ -37,7 +37,7 @@ func NewAnthropicClient(apiKey, model string) *AnthropicClient {
 // Useful for proxies, API gateways, or compatible endpoints.
 func NewAnthropicClientWithBaseURL(apiKey, model, baseURL string) *AnthropicClient {
 	if model == "" {
-		model = "claude-sonnet-4-20250514"
+		model = "claude-sonnet-4-6"
 	}
 	opts := []option.RequestOption{option.WithAPIKey(apiKey)}
 	if baseURL != "" {

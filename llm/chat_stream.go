@@ -140,9 +140,20 @@ func (a *chatStreamAccumulator) Add(chunk openai.ChatCompletionChunk) ([]StreamE
 		return nil, nil
 	}
 	if a.finished {
+		// OpenRouter's documented usage trailer repeats the selected finish
+		// reason with an empty delta. It updates usage without adding content.
+		if a.provider == "openrouter" && chunk.JSON.Usage.Valid() && len(chunk.Choices) == 1 {
+			choice := chunk.Choices[0]
+			delta := choice.Delta
+			if int(choice.Index) == chatSelectedChoiceIndex && choice.FinishReason == a.finishReason &&
+				delta.Content == "" && delta.Refusal == "" && len(delta.ToolCalls) == 0 &&
+				!delta.JSON.FunctionCall.Valid() && len(delta.JSON.ExtraFields) == 0 {
+				return nil, nil
+			}
+		}
 		// Any choice-bearing chunk after the finish reason could add content
 		// the final response will not carry, so it is a protocol violation
-		// even if its delta looks empty.
+		// unless it is the documented OpenRouter usage trailer above.
 		return nil, &StreamProtocolError{Provider: a.provider, Reason: reasonChatStreamAfterFinish}
 	}
 	if len(chunk.Choices) != 1 || int(chunk.Choices[0].Index) != chatSelectedChoiceIndex {

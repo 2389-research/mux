@@ -24,7 +24,10 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
+
+      - name: Install pinned test dependencies
+        run: npm ci --ignore-scripts
 
       - name: go vet
         run: go vet ./...
@@ -38,6 +41,9 @@ jobs:
         # the canonical local suite (make test). Keep the two invocations in
         # sync.
         run: go test -race -tags=integration -timeout=300s ./...
+
+      - name: tools-only E2E
+        run: make test-e2e
 
   test-floor:
     name: test (race, go 1.25.0 floor)
@@ -63,7 +69,10 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
+
+      - name: Install pinned test dependencies
+        run: npm ci --ignore-scripts
 
       - name: go vet
         run: go vet ./...

@@ -108,15 +108,13 @@ func newLiveClient(ctx context.Context, t *testing.T, provider, model string) ll
 // the call reached a separate server process and that its result came back
 // correlated before the model produced a final answer.
 //
-// It exercises only capabilities every supported provider has (a text prompt
-// plus one tool call). Capability-specific subtests — reasoning replay, stream
-// vs non-stream terminal outcomes, structured-output refusal/truncation and
-// compaction retention — are added as mux#e451, mux#rjqv, mux#38f5 and mux#v43c
-// land, rather than by guessing what the selected model supports.
+// It exercises a text prompt plus one tool call. TestLiveProviderStreaming,
+// TestLiveProviderTokenLimit and TestLiveProviderCompaction exercise bounded
+// representative capabilities separately; model support remains explicit.
 //
 // Run it with a configured provider:
 //
-//	MUX_LIVE_PROVIDER=anthropic MUX_LIVE_MODEL=claude-sonnet-4-20250514 \
+//	MUX_LIVE_PROVIDER=anthropic MUX_LIVE_MODEL=claude-sonnet-4-6 \
 //	    go test -tags=live -race -timeout=300s . -run TestLiveProviderEcho -count=1
 func TestLiveProviderEcho(t *testing.T) {
 	provider, model := requireLiveConfig(t)
@@ -187,6 +185,15 @@ func TestLiveProviderEcho(t *testing.T) {
 	}
 
 	assertLiveResult(t, orch.Messages(), nonce)
+	usage := orch.Usage()
+	var replies int
+	for _, message := range orch.Messages() {
+		if message.Role == llm.RoleAssistant {
+			replies++
+		}
+	}
+	t.Logf("live usage: provider=%s model=%s replies=%d input_tokens=%d output_tokens=%d",
+		provider, model, replies, usage.InputTokens, usage.OutputTokens)
 }
 
 // assertLiveResult checks the provider-visible history carries exactly one

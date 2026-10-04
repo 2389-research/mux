@@ -30,8 +30,8 @@ func TestNewAnthropicClient(t *testing.T) {
 
 func TestNewAnthropicClientDefaultModel(t *testing.T) {
 	client := NewAnthropicClient("test-api-key", "")
-	if client.model != "claude-sonnet-4-20250514" {
-		t.Errorf("expected default model claude-sonnet-4-20250514, got %s", client.model)
+	if client.model != "claude-sonnet-4-6" {
+		t.Errorf("expected default model claude-sonnet-4-6, got %s", client.model)
 	}
 }
 

@@ -1,0 +1,20 @@
+{
+  "name": "mux-contract-tests",
+  "private": true,
+  "engines": {
+    "node": ">=24.8.0"
+  },
+  "scripts": {
+    "test:e2e": "E2E_TELEMETRY_DISABLED=1 e2e run",
+    "typecheck:e2e": "tsc --noEmit",
+    "test:e2e:live": "E2E_TELEMETRY_DISABLED=1 e2e run --config e2e.live.config.ts"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.32.0",
+    "@modelcontextprotocol/server-filesystem": "2026.8.31",
+    "@types/node": "26.0.0",
+    "e2e": "0.17.0",
+    "typescript": "6.0.3",
+    "zod": "4.6.1"
+  }
+}
