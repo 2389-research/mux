@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -523,20 +522,32 @@ func TestAnthropicThinkingReplay_UnpreservableRedactedThinkingIsDropped(t *testi
 	}
 }
 
-func TestAnthropicThinkingReplay_ModelSwitchRejectsSignedThinking(t *testing.T) {
+func TestAnthropicThinkingReplay_ModelSwitchDropsSignedThinking(t *testing.T) {
 	server, captured := sigTwoTurnServer(t, sigSignedThinkingBody)
 
-	err := sigReplayHistory(t, server, "claude-haiku-4-5", nil)
-	var mismatch *ErrReplayMismatch
-	if !errors.As(err, &mismatch) {
-		t.Fatalf("want *ErrReplayMismatch, got %v", err)
-	}
-	if mismatch.Model != "claude-haiku-4-5" || mismatch.ReplayModel != "claude-sonnet-4-20250514" {
-		t.Errorf("mismatch names the wrong identities: %+v", mismatch)
+	// A model switch no longer rejects a signed-thinking history: it drops
+	// the mismatched blocks and warns, and the second turn still reaches
+	// the wire, matching the raw API's own tolerance for a stale envelope.
+	if err := sigReplayHistory(t, server, "claude-haiku-4-5", nil); err != nil {
+		t.Fatalf("model switch must warn and drop, not error: %v", err)
 	}
 
-	// Preflight, so the second turn never reached the wire.
-	if total, _ := captured(); total != 1 {
-		t.Errorf("expected the rejected turn to send nothing, got %d requests", total)
+	total, body := captured()
+	if total != 2 {
+		t.Fatalf("expected 2 requests, got %d", total)
+	}
+	var sent sigSentMessages
+	if err := json.Unmarshal(body, &sent); err != nil {
+		t.Fatalf("decode second request body: %v\n%s", err, body)
+	}
+	assistant := sent.Messages[1]
+	if len(assistant.Content) != 1 {
+		t.Fatalf("expected only the tool_use block to survive, got %d blocks: %s", len(assistant.Content), body)
+	}
+	if assistant.Content[0]["id"] != "toolu_sig" {
+		t.Errorf("surviving block is not the tool_use call: %v", assistant.Content[0])
+	}
+	if bytes.Contains(body, []byte("thinking")) {
+		t.Errorf("dropped thinking envelope leaked into the request: %s", body)
 	}
 }

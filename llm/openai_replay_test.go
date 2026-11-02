@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -447,11 +446,36 @@ func TestConvertResponsesInput_ReplayWithMediaKeepsMediaPart(t *testing.T) {
 	}
 }
 
-// Provider/model switches reject with ErrReplayMismatch before any HTTP
-// request is made.
+// Provider/model switches drop the mismatched block's replay envelope and
+// warn, but still reach the wire: matching the raw Anthropic/OpenAI/Gemini
+// APIs, which ignore a stale envelope rather than rejecting the call.
 func TestOpenAIClient_CreateMessageOpenAIReplayPreflight(t *testing.T) {
+	var requestBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Error("server must not be reached for replay identity mismatch")
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Errorf("decode request body: %v", err)
+			http.Error(w, "bad request body", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"id":         "resp_ok",
+			"object":     "response",
+			"created_at": 0,
+			"model":      "gpt-5.2",
+			"status":     "completed",
+			"output": []map[string]any{
+				{
+					"type":   "message",
+					"id":     "msg_ok",
+					"role":   "assistant",
+					"status": "completed",
+					"content": []map[string]any{
+						{"type": "output_text", "text": "ok", "annotations": []any{}},
+					},
+				},
+			},
+		})
 	}))
 	defer server.Close()
 
@@ -466,26 +490,40 @@ func TestOpenAIClient_CreateMessageOpenAIReplayPreflight(t *testing.T) {
 	_, err := client.CreateMessage(context.Background(), &Request{
 		Messages: []Message{{
 			Role: RoleAssistant,
-			Blocks: []ContentBlock{{
-				Type: ContentTypeReplay,
-				Replay: &ProviderReplay{
-					Provider: "openai",
-					Model:    "gpt-5.1",
-					Data:     json.RawMessage(`{"type":"reasoning","id":"rs1","encrypted_content":"opaque"}`),
+			Blocks: []ContentBlock{
+				{
+					Type: ContentTypeReplay,
+					Replay: &ProviderReplay{
+						Provider: "openai",
+						Model:    "gpt-5.1",
+						Data:     json.RawMessage(`{"type":"reasoning","id":"rs1","encrypted_content":"opaque"}`),
+					},
 				},
-			}},
+				{Type: ContentTypeText, Text: "visible answer"},
+			},
 		}},
 	})
+	if err != nil {
+		t.Fatalf("expected the call to reach the wire despite the mismatch, got %v", err)
+	}
+	if requestBody == nil {
+		t.Fatal("server was never reached")
+	}
 
-	if err == nil {
-		t.Fatal("expected error, got nil")
+	input, ok := requestBody["input"].([]any)
+	if !ok {
+		t.Fatalf("input missing in request body: %#v", requestBody)
 	}
-	var mismatch *ErrReplayMismatch
-	if !errors.As(err, &mismatch) {
-		t.Fatalf("expected *ErrReplayMismatch, got %T: %v", err, err)
+	body, _ := json.Marshal(input)
+	if strings.Contains(string(body), "rs1") || strings.Contains(string(body), "encrypted_content") {
+		t.Errorf("dropped replay envelope reached the wire: %s", body)
 	}
-	if mismatch.Provider != "openai" || mismatch.Model != "gpt-5.2" || mismatch.ReplayModel != "gpt-5.1" {
-		t.Errorf("mismatch identities: %+v", mismatch)
+	if len(input) != 1 {
+		t.Fatalf("expected only the surviving text block, got %d items: %s", len(input), body)
+	}
+	item, ok := input[0].(map[string]any)
+	if !ok || item["content"] != "visible answer" {
+		t.Errorf("surviving text block did not reach the wire: %#v", input[0])
 	}
 }
 

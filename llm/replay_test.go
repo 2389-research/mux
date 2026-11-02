@@ -5,10 +5,21 @@ package llm
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
-	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/anthropics/anthropic-sdk-go"
+	anthropicoption "github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/openai/openai-go/v3"
+	openaioption "github.com/openai/openai-go/v3/option"
 )
 
 func replayTestBlock(provider, model, data string) ContentBlock {
@@ -20,6 +31,31 @@ func replayTestBlock(provider, model, data string) ContentBlock {
 			Data:     json.RawMessage(data),
 		},
 	}
+}
+
+// captureStderr redirects os.Stderr for the duration of fn and returns
+// everything written to it. No other test in this package captures stderr,
+// so this stays a local helper rather than a shared one.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = orig }()
+
+	fn()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close pipe writer: %v", err)
+	}
+	captured, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read captured stderr: %v", err)
+	}
+	return string(captured)
 }
 
 func TestProviderReplay_JSONByteEquality(t *testing.T) {
@@ -42,23 +78,23 @@ func TestValidateReplay_MismatchedProvider(t *testing.T) {
 		replayTestBlock("anthropic", "claude-sonnet-4-20250514", `{"type":"reasoning","id":"rs1"}`),
 	}}}
 
-	err := validateReplay("openai", "gpt-5", messages)
-	if err == nil {
-		t.Fatal("expected error, got nil")
+	var result []Message
+	var err error
+	warning := captureStderr(t, func() {
+		result, err = validateReplay("openai", "gpt-5", messages)
+	})
+	if err != nil {
+		t.Fatalf("mismatch must warn and drop, not error: %v", err)
 	}
-	var mismatch *ErrReplayMismatch
-	if !errors.As(err, &mismatch) {
-		t.Fatalf("expected *ErrReplayMismatch, got %T: %v", err, err)
+	if len(result[0].Blocks) != 0 {
+		t.Fatalf("a replay-only block must be dropped entirely, got %+v", result[0].Blocks)
 	}
-	if mismatch.Provider != "openai" || mismatch.Model != "gpt-5" {
-		t.Errorf("request identity: got %q/%q, want openai/gpt-5", mismatch.Provider, mismatch.Model)
+	if messages[0].Blocks[0].Replay == nil {
+		t.Fatal("validateReplay must not mutate the caller's original messages")
 	}
-	if mismatch.ReplayProvider != "anthropic" || mismatch.ReplayModel != "claude-sonnet-4-20250514" {
-		t.Errorf("replay identity: got %q/%q, want anthropic/claude-sonnet-4-20250514", mismatch.ReplayProvider, mismatch.ReplayModel)
-	}
-	for _, identity := range []string{"openai", "anthropic"} {
-		if !strings.Contains(mismatch.Error(), identity) {
-			t.Errorf("Error() %q must name identity %q", mismatch.Error(), identity)
+	for _, identity := range []string{"openai", "gpt-5", "anthropic", "claude-sonnet-4-20250514"} {
+		if !strings.Contains(warning, identity) {
+			t.Errorf("warning %q must name identity %q", warning, identity)
 		}
 	}
 }
@@ -68,24 +104,57 @@ func TestValidateReplay_MismatchedModel(t *testing.T) {
 		replayTestBlock("anthropic", "claude-sonnet-4-20250514", `{"type":"reasoning","id":"rs1"}`),
 	}}}
 
-	err := validateReplay("anthropic", "claude-opus-4-1-20250805", messages)
-	if err == nil {
-		t.Fatal("expected error, got nil")
+	var result []Message
+	var err error
+	warning := captureStderr(t, func() {
+		result, err = validateReplay("anthropic", "claude-opus-4-1-20250805", messages)
+	})
+	if err != nil {
+		t.Fatalf("mismatch must warn and drop, not error: %v", err)
 	}
-	var mismatch *ErrReplayMismatch
-	if !errors.As(err, &mismatch) {
-		t.Fatalf("expected *ErrReplayMismatch, got %T: %v", err, err)
+	if len(result[0].Blocks) != 0 {
+		t.Fatalf("a replay-only block must be dropped entirely, got %+v", result[0].Blocks)
 	}
-	if mismatch.Provider != "anthropic" || mismatch.Model != "claude-opus-4-1-20250805" {
-		t.Errorf("request identity: got %q/%q, want anthropic/claude-opus-4-1-20250805", mismatch.Provider, mismatch.Model)
-	}
-	if mismatch.ReplayProvider != "anthropic" || mismatch.ReplayModel != "claude-sonnet-4-20250514" {
-		t.Errorf("replay identity: got %q/%q, want anthropic/claude-sonnet-4-20250514", mismatch.ReplayProvider, mismatch.ReplayModel)
+	if messages[0].Blocks[0].Replay == nil {
+		t.Fatal("validateReplay must not mutate the caller's original messages")
 	}
 	for _, identity := range []string{"claude-opus-4-1-20250805", "claude-sonnet-4-20250514"} {
-		if !strings.Contains(mismatch.Error(), identity) {
-			t.Errorf("Error() %q must name identity %q", mismatch.Error(), identity)
+		if !strings.Contains(warning, identity) {
+			t.Errorf("warning %q must name identity %q", warning, identity)
 		}
+	}
+}
+
+// TestValidateReplay_MismatchLeavesOtherMessagesAliased confirms the
+// copy-on-write contract: dropping a block clones only the message that
+// held it. A sibling message with nothing to drop keeps its original
+// Blocks backing array — proven here by mutating through the result and
+// observing the mutation land in the original, which a real clone would
+// not show. The touched message's original is proven independent instead:
+// its Replay pointer must survive the drop applied to the returned copy.
+func TestValidateReplay_MismatchLeavesOtherMessagesAliased(t *testing.T) {
+	messages := []Message{
+		{Role: RoleUser, Blocks: []ContentBlock{{Type: ContentTypeText, Text: "unrelated"}}},
+		{Role: RoleAssistant, Blocks: []ContentBlock{
+			replayTestBlock("anthropic", "claude-sonnet-4-20250514", `{"type":"reasoning","id":"rs1"}`),
+		}},
+	}
+
+	var result []Message
+	captureStderr(t, func() {
+		var err error
+		result, err = validateReplay("openai", "gpt-5", messages)
+		if err != nil {
+			t.Fatalf("mismatch must warn and drop, not error: %v", err)
+		}
+	})
+
+	result[0].Blocks[0].Text = "mutated through the result"
+	if messages[0].Blocks[0].Text != "mutated through the result" {
+		t.Errorf("untouched message must stay aliased to the original, got %q", messages[0].Blocks[0].Text)
+	}
+	if messages[1].Blocks[0].Replay == nil {
+		t.Fatal("dropping a block must not mutate the caller's original message")
 	}
 }
 
@@ -98,7 +167,7 @@ func TestValidateReplay_MatchingIdentityPasses(t *testing.T) {
 		{Role: RoleUser, Blocks: []ContentBlock{{Type: ContentTypeToolResult, ToolUseID: "call_1"}}},
 	}
 
-	if err := validateReplay("openai", "gpt-5", messages); err != nil {
+	if _, err := validateReplay("openai", "gpt-5", messages); err != nil {
 		t.Fatalf("expected nil, got %v", err)
 	}
 }
@@ -108,7 +177,7 @@ func TestValidateReplay_EmptyData(t *testing.T) {
 		replayTestBlock("gemini", "gemini-2.5-pro", ""),
 	}}}
 
-	err := validateReplay("gemini", "gemini-2.5-pro", messages)
+	_, err := validateReplay("gemini", "gemini-2.5-pro", messages)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -125,7 +194,7 @@ func TestValidateReplay_InvalidJSON(t *testing.T) {
 		replayTestBlock("openai", "gpt-5", `{"type":"reasoning",`),
 	}}}
 
-	err := validateReplay("openai", "gpt-5", messages)
+	_, err := validateReplay("openai", "gpt-5", messages)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -147,7 +216,7 @@ func TestValidateReplay_UnsupportedPayload(t *testing.T) {
 			messages := []Message{{Role: RoleAssistant, Blocks: []ContentBlock{
 				replayTestBlock("ollama", "qwen3", data),
 			}}}
-			err := validateReplay("ollama", "qwen3", messages)
+			_, err := validateReplay("ollama", "qwen3", messages)
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
@@ -164,7 +233,7 @@ func TestValidateReplay_NilReplayIgnored(t *testing.T) {
 		{Role: RoleUser, Content: "plain content"},
 	}
 
-	if err := validateReplay("openai", "gpt-5", messages); err != nil {
+	if _, err := validateReplay("openai", "gpt-5", messages); err != nil {
 		t.Fatalf("blocks without replay must pass, got %v", err)
 	}
 }
@@ -174,7 +243,7 @@ func TestValidateReplay_ReplayBlockWithoutPayload(t *testing.T) {
 		{Type: ContentTypeReplay},
 	}}}
 
-	err := validateReplay("openai", "gpt-5", messages)
+	_, err := validateReplay("openai", "gpt-5", messages)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -210,5 +279,214 @@ func TestCloneResponse_ReplayAliasIsolation(t *testing.T) {
 	original.Content[0].Replay.Data[1] = 'Y'
 	if !bytes.Equal(clone.Content[0].Replay.Data, []byte(`X"type":"reasoning","id":"rs1","encrypted_content":"opaque"}`)) {
 		t.Errorf("mutating the original changed the clone replay data: %s", clone.Content[0].Replay.Data)
+	}
+}
+
+// TestValidateReplay_ResultIsValidInput proves the drop result is safe to
+// feed back into validateReplay. A dropped block keeps its Type set, and a
+// caller that re-validates (or the package's own RetryClient, which re-sends
+// the same *Request) must not see a structural failure invented by the drop.
+func TestValidateReplay_ResultIsValidInput(t *testing.T) {
+	messages := []Message{{Role: RoleAssistant, Blocks: []ContentBlock{
+		replayTestBlock("anthropic", "claude-sonnet-4-20250514", `{"type":"thinking","thinking":"t","signature":"s"}`),
+		{Type: ContentTypeToolUse, ID: "toolu_1", Name: "read_file", Input: map[string]any{"path": "/a"}},
+	}}}
+
+	var dropped []Message
+	captureStderr(t, func() {
+		var err error
+		dropped, err = validateReplay("anthropic", "claude-haiku-4-5", messages)
+		if err != nil {
+			t.Fatalf("mismatch must warn and drop, not error: %v", err)
+		}
+	})
+
+	// Second pass over the first pass's own output, as any adapter re-entry
+	// does (RetryClient re-uses the same *Request).
+	var twice []Message
+	captureStderr(t, func() {
+		var err error
+		twice, err = validateReplay("anthropic", "claude-haiku-4-5", dropped)
+		if err != nil {
+			t.Fatalf("validateReplay's own output must be valid input to it: %v", err)
+		}
+	})
+
+	// The block that lost its only payload must be gone, not left as an
+	// empty shell that the structural check rejects.
+	for _, block := range twice[0].Blocks {
+		if block.Type == ContentTypeReplay && block.Replay == nil {
+			t.Fatalf("dropped block survived as a payload-less replay block: %+v", twice[0].Blocks)
+		}
+		if block.Replay != nil {
+			t.Errorf("no envelope should survive a mismatch, got %+v", block.Replay)
+		}
+	}
+	// The tool call has a normalized fallback and must still be there.
+	var sawTool bool
+	for _, block := range twice[0].Blocks {
+		if block.Type == ContentTypeToolUse && block.ID == "toolu_1" {
+			sawTool = true
+		}
+	}
+	if !sawTool {
+		t.Errorf("the droppable tool call must survive the drop: %+v", twice[0].Blocks)
+	}
+}
+
+// replayReuseAnthropicServer answers every request with a valid message body.
+func replayReuseAnthropicServer(t *testing.T) (*httptest.Server, func() int) {
+	t.Helper()
+	var mu sync.Mutex
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","model":"claude-haiku-4-5","stop_reason":"end_turn","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	t.Cleanup(server.Close)
+	return server, func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return requests
+	}
+}
+
+// TestAnthropicClient_SameRequestIsResendable pins the Client contract that
+// dropping a mismatched envelope must not make: sending one *Request twice
+// works. This is exactly what the package's own RetryClient does on a
+// retryable 429/500/502/503/504 — it re-invokes the inner client with the
+// same *Request.
+func TestAnthropicClient_SameRequestIsResendable(t *testing.T) {
+	server, requests := replayReuseAnthropicServer(t)
+	client := &AnthropicClient{
+		client: anthropic.NewClient(anthropicoption.WithAPIKey("test-key"), anthropicoption.WithBaseURL(server.URL), anthropicoption.WithMaxRetries(0)),
+		model:  "claude-haiku-4-5",
+	}
+	req := &Request{
+		Messages: []Message{{Role: RoleAssistant, Blocks: []ContentBlock{
+			replayTestBlock("anthropic", "claude-sonnet-4-20250514", `{"type":"thinking","thinking":"t","signature":"s"}`),
+			{Type: ContentTypeToolUse, ID: "toolu_1", Name: "read_file", Input: map[string]any{"path": "/a"}},
+		}}},
+	}
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		captureStderr(t, func() {
+			if _, err := client.CreateMessage(context.Background(), req); err != nil {
+				t.Fatalf("call %d with the same Request: %v", attempt, err)
+			}
+		})
+	}
+	if got := requests(); got != 2 {
+		t.Fatalf("expected both calls to reach the wire, got %d requests", got)
+	}
+	// The caller's Request must not be left self-invalidating, and the
+	// adapter must not destroy the caller's own envelopes either: base never
+	// mutated req.Messages, and a caller that keeps a Request around (or a
+	// RetryClient re-sending it) must not lose data it still owns.
+	if _, err := validateReplay("anthropic", "claude-haiku-4-5", req.Messages); err != nil {
+		t.Errorf("caller's Request was poisoned by the drop: %v", err)
+	}
+	if len(req.Messages[0].Blocks) != 2 {
+		t.Fatalf("adapter rewrote the caller's blocks: got %+v", req.Messages[0].Blocks)
+	}
+	if req.Messages[0].Blocks[0].Replay == nil {
+		t.Error("adapter destroyed the caller's replay envelope")
+	}
+}
+
+// TestOpenAIClient_SameRequestIsResendable is the OpenAI analogue: the shared
+// preflight is per-adapter, so both providers need the guarantee.
+func TestOpenAIClient_SameRequestIsResendable(t *testing.T) {
+	var mu sync.Mutex
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response","created_at":0,"model":"gpt-5.2","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok","annotations":[]}]}]}`))
+	}))
+	defer server.Close()
+
+	client := &OpenAIClient{
+		client: openai.NewClient(openaioption.WithAPIKey("test-key"), openaioption.WithBaseURL(server.URL), openaioption.WithMaxRetries(0)),
+		model:  "gpt-5.2",
+	}
+	req := &Request{
+		Messages: []Message{{Role: RoleAssistant, Blocks: []ContentBlock{
+			replayTestBlock("openai", "gpt-5.1", `{"type":"reasoning","id":"rs1","encrypted_content":"opaque"}`),
+			{Type: ContentTypeText, Text: "visible"},
+		}}},
+	}
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		captureStderr(t, func() {
+			if _, err := client.CreateMessage(context.Background(), req); err != nil {
+				t.Fatalf("call %d with the same Request: %v", attempt, err)
+			}
+		})
+	}
+	mu.Lock()
+	total := requests
+	mu.Unlock()
+	if total != 2 {
+		t.Fatalf("expected both calls to reach the wire, got %d requests", total)
+	}
+	if len(req.Messages[0].Blocks) != 2 || req.Messages[0].Blocks[0].Replay == nil {
+		t.Fatalf("adapter must not rewrite the caller's blocks: %+v", req.Messages[0].Blocks)
+	}
+}
+
+// TestRetryClient_RetriesAfterReplayDrop is the end-to-end reachability
+// case from the review: a history carrying a stale envelope gets a transient
+// 500 from the provider, so RetryClient re-invokes the same adapter with the
+// same *Request. That retry must succeed rather than die at preflight with a
+// structural error the caller's history never contained.
+func TestRetryClient_RetriesAfterReplayDrop(t *testing.T) {
+	var mu sync.Mutex
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		requests++
+		turn := requests
+		mu.Unlock()
+		// First attempt is a transient failure; the retry succeeds.
+		if turn == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"type":"error","error":{"type":"api_error","message":"transient"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","model":"claude-haiku-4-5","stop_reason":"end_turn","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	adapter := &AnthropicClient{
+		client: anthropic.NewClient(anthropicoption.WithAPIKey("test-key"), anthropicoption.WithBaseURL(server.URL), anthropicoption.WithMaxRetries(0)),
+		model:  "claude-haiku-4-5",
+	}
+	req := &Request{
+		Messages: []Message{{Role: RoleAssistant, Blocks: []ContentBlock{
+			replayTestBlock("anthropic", "claude-sonnet-4-20250514", `{"type":"thinking","thinking":"t","signature":"s"}`),
+			{Type: ContentTypeToolUse, ID: "toolu_1", Name: "read_file", Input: map[string]any{"path": "/a"}},
+		}}},
+	}
+
+	client := NewRetryClient(adapter, &RetryConfig{MaxRetries: 2, InitialDelay: time.Millisecond, MaxDelay: time.Millisecond, Multiplier: 1})
+	captureStderr(t, func() {
+		if _, err := client.CreateMessage(context.Background(), req); err != nil {
+			t.Fatalf("retry after a replay drop must succeed, got %v", err)
+		}
+	})
+
+	mu.Lock()
+	total := requests
+	mu.Unlock()
+	if total != 2 {
+		t.Fatalf("expected the retry to reach the wire, got %d requests", total)
 	}
 }
